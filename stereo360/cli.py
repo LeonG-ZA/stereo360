@@ -13,7 +13,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Convert monoscopic 360 equirectangular video to "
                     "stereoscopic top-bottom 360 video.",
     )
-    p.add_argument("input", help="Input monoscopic 360 video (equirectangular)")
+    # Optional so the probes that describe the *machine* rather than a file --
+    # --probe-backends and --probe-encoders -- can run without one. Required
+    # for everything else, checked in main(). argparse cannot express that.
+    p.add_argument("input", nargs="?",
+                   help="Input monoscopic 360 video (equirectangular). Not "
+                        "needed with --probe-backends or --probe-encoders.")
     p.add_argument("-o", "--output", default=None,
                    help="Output MP4 path (not needed with --probe-json)")
     p.add_argument("--face-size", type=int, default=None,
@@ -75,8 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="HuggingFace model id (depth-anything) or variant "
                         "'small'/'large' (video-depth-anything). Default for "
                         "depth-anything is Depth-Anything-V2-Base, which "
-                        "measured the lowest depth noise and 40% less "
-                        "frame-to-frame flicker than Small for about +9% "
+                        "measured the lowest depth noise and 40%% less "
+                        "frame-to-frame flicker than Small for about +9%% "
                         "render time; pass the Small id for a faster run. The "
                         "temporal backend ships small and large only, and "
                         "defaults to small.")
@@ -190,8 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--source-subsampling", action="store_true",
                    help="Encode with the source's chroma subsampling instead "
                         "of 4:2:0. Only worthwhile for a 4:2:2/4:4:4 source: "
-                        "measured on 4:2:0 footage, 4:4:4 output was 4% more "
-                        "faithful for 25% more encode time, because the "
+                        "measured on 4:2:0 footage, 4:4:4 output was 4%% more "
+                        "faithful for 25%% more encode time, because the "
                         "camera had already halved the chroma detail. 4:2:0 is "
                         "also the only layout headset hardware decoders accept "
                         "at 8K, so anything else is for masters and uploads, "
@@ -420,6 +425,10 @@ def main(argv=None) -> int:
         print(json.dumps({"backends": [a.as_dict() for a in
                                        _b.probe_backends(args.onnx_model)]}))
         return 0
+    # Past the machine-only probes, an input is required. Checked here rather
+    # than by argparse, which cannot make a positional conditionally optional.
+    if not args.input:
+        build_parser().error("an input video is required")
     if args.probe_json:
         return _probe_json(args.input)
     if not args.output:
