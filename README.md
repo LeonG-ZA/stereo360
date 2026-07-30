@@ -3,6 +3,8 @@
 Convert monoscopic 360° equirectangular video into stereoscopic top-bottom 360°
 video for VR headsets.
 
+![The stereo360 desktop interface: left and right eye preview of a single frame, beside the file and encoding settings](docs/ui.png)
+
 ## What it does
 
 Ordinary 360 footage is flat: you can look around, but nothing has depth. This
