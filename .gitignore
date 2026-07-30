@@ -1,0 +1,47 @@
+# --- Generated model weights (194 MB) -------------------------------------
+# Exported by scripts/export_onnx.py, and re-downloadable. Far too big for git,
+# and nothing here is authored.
+models/*
+!models/README.md
+
+# --- Vendored upstream checkout -------------------------------------------
+# third_party/Video-Depth-Anything is a clone of someone else's repository,
+# carrying its own .git and its own licence. It is cloned, not authored, so it
+# is not ours to redistribute.
+third_party/*
+!third_party/README.md
+
+# --- Media ----------------------------------------------------------------
+# Source footage and renders. An 8K stereo render is ~400 MB a second.
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.insv
+*.wav
+*.m4a
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Editors / OS ---------------------------------------------------------
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

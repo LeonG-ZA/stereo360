@@ -1,0 +1,7 @@
+# Extra packages for --depth-backend video-depth-anything.
+#
+# The temporal model lives in a vendored clone (third_party/Video-Depth-Anything)
+# that imports these; nothing else in stereo360 does, so they stay out of
+# requirements.txt rather than being installed for everyone.
+einops>=0.7
+easydict>=1.10

@@ -1,0 +1,3 @@
+# Desktop interface only. The core pipeline does not import any of this, so a
+# headless machine can install requirements.txt alone and still convert video.
+PySide6>=6.6

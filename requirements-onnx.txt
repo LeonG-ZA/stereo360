@@ -1,0 +1,11 @@
+# ONNX Runtime backend (--depth-backend onnx).
+#
+# To RUN an exported model, onnxruntime alone is enough. Pick the build that
+# matches your hardware: onnxruntime-directml for AMD/Intel GPUs on Windows,
+# onnxruntime-gpu for CUDA, plain onnxruntime for CPU.
+onnxruntime>=1.17
+
+# To EXPORT one with scripts/export_onnx.py. torch's exporter needs both, and
+# without them the script fails with ModuleNotFoundError before doing anything.
+onnx>=1.16
+onnxscript>=0.1

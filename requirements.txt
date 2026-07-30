@@ -1,0 +1,6 @@
+numpy>=1.24
+opencv-python>=4.8
+tqdm>=4.65
+torch>=2.2
+transformers>=4.45
+Pillow>=10.0

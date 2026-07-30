@@ -1,0 +1,4 @@
+module Stereo360
+singleton Theme 1.0 Theme.qml
+Card 1.0 Card.qml
+Row2 1.0 Row2.qml
