@@ -79,12 +79,22 @@ DEFAULT_ONNX_MODEL = "models/depth_anything_v2_small.onnx"
 #: Pipeline seconds per frame at 8K, used only to describe the presets above.
 _PIPELINE_SPF = 0.80
 
-#: HEVC's decoded picture limit, in luma samples. Every level carries the same
-#: number -- 6.2 is no more permissive than 5.1 here -- so a frame above it has
-#: nowhere to go: no encoder setting and no player admits it. Worth saying in
-#: the interface because it is the one hard reason to prefer VR180 output at
-#: 8K, and nothing else in the app would reveal it.
-MAX_HEVC_LUMA = 35_651_584
+#: The largest decoded picture either codec admits, in luma samples, reached
+#: at the highest level each defines. Not an HEVC number: H.264 caps a frame at
+#: 139,264 macroblocks, and 139264 x 256 is the same 35,651,584. Verified by
+#: encoding 7680x7680 both ways -- x264 warns "frame MB size (480x480) > level
+#: limit (139264)" and tags level 6.2 anyway; x265 says nothing and invents
+#: "Level-6.3", which the spec does not define. So switching encoder does not
+#: buy room, and neither tag can be believed.
+#:
+#: Width and height individually are fine to about 16,888 px; the area is what
+#: is capped.
+#:
+#: This is a fact about *direct playback*, not about the file being wrong. Both
+#: streams decode in software, and YouTube transcodes on upload, so 7680x7680
+#: remains the right 8K 3D-360 master. It bites when a headset has to decode
+#: the frame itself.
+MAX_LEVEL_LUMA = 35_651_584
 
 
 def output_size(width: int, height: int, output_mode: str = "360") -> tuple:

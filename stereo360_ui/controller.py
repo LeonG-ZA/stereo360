@@ -158,9 +158,9 @@ class Controller(QObject):
         return list(options.output_size(int(width), int(height), str(mode)))
 
     @Slot(int, int, result=bool)
-    def exceedsHevcLimit(self, width: int, height: int) -> bool:
-        """Whether a frame this size is beyond what any HEVC level decodes."""
-        return int(width) * int(height) > options.MAX_HEVC_LUMA
+    def exceedsLevelLimit(self, width: int, height: int) -> bool:
+        """Whether a frame this size is past the top level of both codecs."""
+        return int(width) * int(height) > options.MAX_LEVEL_LUMA
 
     @Slot(int, int, str)
     def probeEncoders(self, width: int, height: int, mode: str) -> None:

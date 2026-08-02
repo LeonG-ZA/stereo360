@@ -757,10 +757,22 @@ def test_the_ui_and_the_core_agree_on_the_output_size(size, mode):
                                                                         mode)
 
 
-def test_vr180_is_what_brings_an_8k_source_under_the_hevc_limit():
-    """The one hard reason to choose it, and nothing else in the app would say
-    so: the 360 frame encodes perfectly well and then will not play."""
+def test_vr180_is_what_brings_an_8k_source_under_the_level_cap():
+    """Worth surfacing, and worth surfacing *carefully*: the 360 frame is over
+    the cap and is still the correct YouTube master. See the note below."""
     assert options.output_size(7680, 3840, "360") == (7680, 7680)
     assert options.output_size(7680, 3840, "vr180") == (7680, 3840)
-    assert 7680 * 7680 > options.MAX_HEVC_LUMA
-    assert 7680 * 3840 <= options.MAX_HEVC_LUMA
+    assert 7680 * 7680 > options.MAX_LEVEL_LUMA
+    assert 7680 * 3840 <= options.MAX_LEVEL_LUMA
+
+
+def test_the_cap_is_not_an_hevc_number():
+    """H.264 caps a frame at 139,264 macroblocks, HEVC at 35,651,584 luma
+    samples, and 139264 x 256 is the same figure. It matters because the
+    obvious reaction to "past HEVC's limit" is to switch to H.264, which buys
+    nothing -- so the interface must not name one codec.
+
+    Confirmed against x264 itself, which prints the macroblock number when
+    handed a 7680x7680 frame: "frame MB size (480x480) > level limit (139264)".
+    """
+    assert options.MAX_LEVEL_LUMA == 139_264 * 256

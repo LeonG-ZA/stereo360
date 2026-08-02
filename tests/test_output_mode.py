@@ -38,8 +38,10 @@ def test_360_geometry_is_unchanged():
 
 def test_vr180_keeps_the_pixel_count_and_spends_it_on_half_the_sphere():
     """An 8K source gives 7680x3840 either way. Same pixels, half the sphere,
-    so twice the angular resolution — and, incidentally, inside HEVC's 35.65
-    Mpx decode cap where the 360 frame is not."""
+    so twice the angular resolution — and, incidentally, inside the 35.65 Mpx
+    decode cap that H.264 and HEVC share at their highest level, where the 360
+    frame is not. That is about direct playback only: 7680x7680 is still the
+    right master for YouTube, which transcodes."""
     w, h = pipeline.output_geometry(7680, 3840, "vr180")
     assert (w, h) == (7680, 3840)
     assert w * h <= 35_651_584

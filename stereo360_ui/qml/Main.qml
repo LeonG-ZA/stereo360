@@ -128,8 +128,11 @@ ApplicationWindow {
         : null
     readonly property string outputSizeText:
         outputSize ? outputSize[0] + "×" + outputSize[1] : ""
-    readonly property bool outputTooBigForHevc:
-        outputSize ? app.exceedsHevcLimit(outputSize[0], outputSize[1]) : false
+    readonly property bool outputExceedsLevelCap:
+        outputSize ? app.exceedsLevelLimit(outputSize[0], outputSize[1])
+                   : false
+    readonly property string outputMegapixels:
+        outputSize ? (outputSize[0] * outputSize[1] / 1e6).toFixed(1) : ""
 
     function encoderEntry(name) {
         for (var i = 0; i < app.encoders.length; ++i)
@@ -447,37 +450,43 @@ ApplicationWindow {
                                 }
                                 Text {
                                     text: win.outputSizeText
-                                    color: win.outputTooBigForHevc ? Theme.warn
-                                                                   : Theme.textFaint
+                                    color: Theme.textFaint
                                     font.pixelSize: Theme.fontS
                                     font.family: "Consolas, monospace"
                                 }
                             }
 
-                            // The one hard reason to prefer VR180 at 8K, and
-                            // nothing else in the app would ever reveal it:
-                            // the file encodes fine and then will not play.
+                            // A note, not a warning. Over the cap is the
+                            // correct shape for a YouTube master, and saying
+                            // otherwise would talk people out of the one
+                            // workflow this tool is mostly used for. What it
+                            // costs is direct playback, which is invisible
+                            // until a headset refuses the file.
                             Rectangle {
                                 Layout.fillWidth: true
-                                visible: win.outputTooBigForHevc
-                                implicitHeight: hevcNote.implicitHeight + 16
-                                color: "#2a2114"
+                                visible: win.outputExceedsLevelCap
+                                implicitHeight: levelNote.implicitHeight + 16
+                                color: Theme.surfaceAlt
                                 radius: 6
                                 border.width: 1
-                                border.color: Theme.warn
+                                border.color: Theme.border
 
                                 Text {
-                                    id: hevcNote
+                                    id: levelNote
                                     anchors.fill: parent
                                     anchors.margins: 8
-                                    text: win.outputSizeText + " is past HEVC's "
-                                        + "decode limit of 35.6 megapixels — the "
-                                        + "same ceiling at every level, so no "
-                                        + "setting lifts it. It will encode, and "
-                                        + "headsets may refuse to play it. VR180 "
-                                        + "output halves the pixels and keeps the "
-                                        + "detail where you are looking."
-                                    color: Theme.warn
+                                    text: win.outputSizeText + " is "
+                                        + win.outputMegapixels + " megapixels, "
+                                        + "past the 35.6 that H.264 and HEVC "
+                                        + "both cap at in their highest level — "
+                                        + "so changing encoder does not help. "
+                                        + "Fine for YouTube, which transcodes on "
+                                        + "upload and takes this as the 8K 3D "
+                                        + "360 master. It only matters for "
+                                        + "playing the file directly on a "
+                                        + "headset, where VR180's 29.5 stays "
+                                        + "inside the cap."
+                                    color: Theme.textDim
                                     font.pixelSize: Theme.fontS
                                     wrapMode: Text.WordWrap
                                 }
