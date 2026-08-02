@@ -171,6 +171,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolution -- and an 8K vr180 frame is inside HEVC's "
                         "decode limit where an 8K 360 frame is not. Input must "
                         "be 360 in both cases.")
+    p.add_argument("--yaw", type=float, default=0.0, metavar="DEG",
+                   help="Which way the VR180 field points, in degrees of "
+                        "longitude, positive to the right. Wraps, so -200 and "
+                        "+160 are the same. Free and lossless: it selects a "
+                        "range of columns rather than rotating anything, so "
+                        "nothing is resampled. Only valid with --output-mode "
+                        "vr180, since 360 output keeps the whole sphere and "
+                        "has no direction to choose. (default: 0)")
     p.add_argument("--face-overlap", type=float, default=None, metavar="F",
                    help="How far each depth face reaches past its nominal 90 "
                         "degrees, in tangent units (0.15 = 98 degrees per "
@@ -359,6 +367,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             input_projection=args.input_projection,
             face_overlap=face_overlap,
             output_mode=args.output_mode,
+            yaw=args.yaw,
             reporter=reporter,
         )
 
@@ -389,6 +398,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
         output_mode=args.output_mode,
+        yaw=args.yaw,
         reporter=reporter,
         cancel=cancel,
     )

@@ -170,3 +170,81 @@ def inspect_source(fn):
     import inspect
 
     return inspect.getsource(fn)
+
+
+# ------------------------------------------------------------------ yaw
+
+def test_yaw_zero_is_the_middle_of_the_sphere():
+    assert pipeline.vr180_crop(64, 0.0) == (16, 32)
+
+
+@pytest.mark.parametrize("yaw,expected_start", [
+    (0.0, 16), (90.0, 32), (180.0, 48), (-90.0, 0), (-180.0, 48),
+])
+def test_yaw_moves_the_crop_by_the_right_amount(yaw, expected_start):
+    """A quarter turn is a quarter of the width, and the field stays 180."""
+    x0, half = pipeline.vr180_crop(64, yaw)
+    assert (x0, half) == (expected_start, 32)
+
+
+@pytest.mark.parametrize("a,b", [(-200.0, 160.0), (400.0, 40.0),
+                                 (-360.0, 0.0), (540.0, 180.0)])
+def test_yaw_wraps_so_any_value_is_legal(a, b):
+    assert pipeline.vr180_crop(64, a) == pipeline.vr180_crop(64, b)
+
+
+def test_a_yaw_across_the_seam_wraps_the_columns():
+    """At yaw 180 the field straddles the +/-180 boundary, so the crop has to
+    come from both ends of the frame rather than running off the end."""
+    left, right = eyes(w=64)
+    out = pipeline.stack_eyes(left, right, "vr180", yaw=180.0)
+    assert out.shape == (32, 64, 3)
+    # Columns 48..63 then 0..15 of the source, in that order.
+    want = np.concatenate([left[:, 48:], left[:, :16]], axis=1)
+    np.testing.assert_array_equal(out[:, :32], want)
+
+
+def test_yaw_resamples_nothing():
+    """Every output column is a source column, byte for byte. That is what
+    makes the direction free to drag in a UI."""
+    rng = np.random.default_rng(1)
+    left = rng.integers(0, 255, (8, 64, 3), dtype=np.uint8)
+    for yaw in (0.0, 37.0, 90.0, 175.0, -125.0):
+        out = pipeline.stack_eyes(left, left, "vr180", yaw)
+        for col in out[:, :32].transpose(1, 0, 2):
+            assert any(np.array_equal(col, src)
+                       for src in left.transpose(1, 0, 2)), yaw
+
+
+def test_yaw_does_not_change_the_frame_size():
+    left, right = eyes(w=64)
+    sizes = {pipeline.stack_eyes(left, right, "vr180", y).shape
+             for y in (0.0, 45.0, 180.0, -73.0)}
+    assert len(sizes) == 1
+
+
+def test_a_yaw_on_360_output_is_refused_rather_than_ignored():
+    """Silently ignoring it would mean an hour of rendering pointing the wrong
+    way. 360 keeps the whole sphere, so there is no direction to choose."""
+    with pytest.raises(ValueError, match="vr180 output only"):
+        pipeline.check_yaw("360", 45.0)
+    pipeline.check_yaw("360", 0.0)          # the default must stay legal
+    pipeline.check_yaw("vr180", 45.0)
+
+
+def test_both_entry_points_check_the_yaw():
+    import inspect
+
+    for fn in (pipeline.convert, pipeline.preview_frame):
+        assert inspect.signature(fn).parameters["yaw"].default == 0.0
+        assert "check_yaw" in inspect.getsource(fn), fn.__name__
+
+
+def test_the_cli_exposes_yaw_and_passes_it_to_both():
+    from stereo360 import cli
+
+    parser = cli.build_parser()
+    assert parser.parse_args(["i.mp4", "-o", "o.mp4"]).yaw == 0.0
+    assert parser.parse_args(["i.mp4", "-o", "o.mp4",
+                              "--yaw", "-37.5"]).yaw == -37.5
+    assert inspect_source(cli._run).count("yaw=args.yaw") == 2

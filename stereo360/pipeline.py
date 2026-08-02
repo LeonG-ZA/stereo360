@@ -450,6 +450,21 @@ DEFAULT_OUTPUT_MODE = "360"
 VR180_FOV = 180.0
 
 
+def check_yaw(output_mode: str, yaw: float) -> None:
+    """A yaw only means something when part of the sphere is being discarded.
+
+    For 360 output the whole sphere is kept, so a yaw would have to rotate it
+    -- which is possible (rolling the columns of a full equirect is lossless)
+    but is not what this flag does. Silently ignoring it would be worse than
+    refusing: the render would take an hour and come out pointing the wrong way.
+    """
+    if yaw and output_mode != "vr180":
+        raise ValueError(
+            f"A yaw of {yaw:g} degrees was given with --output-mode "
+            f"{output_mode}, which keeps the whole sphere and has no direction "
+            f"to choose. Yaw applies to vr180 output only.")
+
+
 def output_geometry(w: int, h: int, output_mode: str) -> tuple:
     """(width, height) of the encoded frame for a `w` x `h` equirect source.
 
@@ -471,8 +486,34 @@ def _check_output_mode(output_mode: str) -> None:
                          f"of {list(OUTPUT_MODES)}")
 
 
+def vr180_crop(w: int, yaw: float = 0.0) -> tuple:
+    """(first column, width) of the 180-degree field centred on `yaw`.
+
+    Yaw is degrees of longitude, positive to the right, and wraps, so any value
+    is legal and -200 means the same as +160.
+
+    Because this is a column range rather than a rotation, pointing the field
+    somewhere else costs nothing and loses nothing: no resampling, no
+    interpolation, no softening. That matters for the interface, where it means
+    the direction can be dragged with live feedback once a frame has been
+    rendered, without recomputing any depth.
+    """
+    half = (w // 2) // 2 * 2
+    centre = (((yaw + 180.0) % 360.0) / 360.0) * w
+    return int(round(centre - half / 2.0)) % w, half
+
+
+def _crop_columns(a: np.ndarray, x0: int, width: int) -> np.ndarray:
+    """`width` columns from `x0`, wrapping round the +/-180 degree seam."""
+    end = x0 + width
+    if end <= a.shape[1]:
+        return a[:, x0:end]
+    return np.concatenate([a[:, x0:], a[:, :end - a.shape[1]]], axis=1)
+
+
 def stack_eyes(left: np.ndarray, right: np.ndarray,
-               output_mode: str = DEFAULT_OUTPUT_MODE) -> np.ndarray:
+               output_mode: str = DEFAULT_OUTPUT_MODE,
+               yaw: float = 0.0) -> np.ndarray:
     """Combine the two eyes into the frame that gets encoded.
 
     The one place that decides layout, so the encoder's frame size, the written
@@ -482,12 +523,9 @@ def stack_eyes(left: np.ndarray, right: np.ndarray,
     if output_mode == "360":
         return np.concatenate([left, right], axis=0)
 
-    # Keep the middle half of the longitude range. Nothing is resampled — this
-    # is a column range, which is also why the direction is free to change.
-    w = left.shape[1]
-    half = (w // 2) // 2 * 2
-    x0 = (w - half) // 2
-    return np.concatenate([left[:, x0:x0 + half], right[:, x0:x0 + half]],
+    x0, half = vr180_crop(left.shape[1], yaw)
+    return np.concatenate([_crop_columns(left, x0, half),
+                           _crop_columns(right, x0, half)],
                           axis=1)
 
 
@@ -683,11 +721,13 @@ class _Sink:
 
     def __init__(self, encoder, reporter: Reporter,
                  cancel: Optional[Callable[[], bool]],
-                 output_mode: str = DEFAULT_OUTPUT_MODE) -> None:
+                 output_mode: str = DEFAULT_OUTPUT_MODE,
+                 yaw: float = 0.0) -> None:
         self._encoder = encoder
         self._reporter = reporter
         self._cancel = cancel
         self._output_mode = output_mode
+        self._yaw = yaw
         self.written = 0
 
     def check(self) -> None:
@@ -702,7 +742,8 @@ class _Sink:
 
     def write(self, left: np.ndarray, right: np.ndarray) -> None:
         self.check()
-        self._encoder.write(stack_eyes(left, right, self._output_mode))
+        self._encoder.write(
+            stack_eyes(left, right, self._output_mode, self._yaw))
         self.written += 1
         self._reporter.advance(1)
 
@@ -734,6 +775,7 @@ def convert(
     temporal_depth: float = DepthStabiliser.DEFAULT_TAU,
     face_overlap: float = projection.FACE_OVERLAP,
     output_mode: str = DEFAULT_OUTPUT_MODE,
+    yaw: float = 0.0,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> ConvertResult:
@@ -768,12 +810,25 @@ def convert(
     warn_if_source_is_deeper_than_8_bit(info, bitdepth, reporter)
 
     _check_output_mode(output_mode)
+    check_yaw(output_mode, yaw)
     out_w, out_h = output_geometry(w, h, output_mode)
     if output_mode != DEFAULT_OUTPUT_MODE:
+        aim = (f"centred {yaw:+g} degrees from the source's forward direction"
+               if yaw else "centred on the source's forward direction")
         reporter.info(
-            f"Output: VR180, {out_w}x{out_h} side-by-side "
-            f"(the middle {VR180_FOV:.0f} degrees of the source).",
-            output_mode=output_mode, width=out_w, height=out_h)
+            f"Output: VR180, {out_w}x{out_h} side-by-side, {aim}.",
+            output_mode=output_mode, width=out_w, height=out_h, yaw=yaw)
+    if yaw and spatial_audio:
+        # The picture turned; the soundfield did not. Loud rather than silent,
+        # because a listener has no way to tell it is happening.
+        reporter.warning(
+            f"The view is turned {yaw:+g} degrees but the ambisonic soundfield "
+            f"is NOT rotated to match, so every sound will be {abs(yaw):g} "
+            f"degrees out of place -- and in a 180 field a source that should "
+            f"be visible in front can end up behind you. Rotating ambiX is not "
+            f"implemented yet; use --yaw 0, or drop --spatial-audio and treat "
+            f"the track as plain audio.",
+            yaw=yaw, ambisonic_rotation=False)
 
     encoder = ffmpeg_io.VideoEncoder(
         output_path, width=out_w, height=out_h, fps=info.fps,
@@ -782,7 +837,7 @@ def convert(
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)
-    sink = _Sink(encoder, reporter, cancel, output_mode)
+    sink = _Sink(encoder, reporter, cancel, output_mode, yaw)
     cancelled = False
 
     reporter.start(total, width=out_w, height=out_h, fps=info.fps,
@@ -880,6 +935,7 @@ def preview_frame(
     input_projection: str = "auto",
     face_overlap: float = projection.FACE_OVERLAP,
     output_mode: str = DEFAULT_OUTPUT_MODE,
+    yaw: float = 0.0,
     reporter: Optional[Reporter] = None,
 ) -> PreviewResult:
     """Render one source frame to an image instead of converting the video.
@@ -908,6 +964,7 @@ def preview_frame(
         raise ValueError(f"--preview-frame must not be negative, got "
                          f"{frame_index}")
 
+    check_yaw(output_mode, yaw)
     info = ffmpeg_io.probe(input_path)
     source_projection = resolve_projection(info, input_projection, reporter)
     # A preview is for judging settings, so the same caveat applies: what it
@@ -945,7 +1002,7 @@ def preview_frame(
         right = right_eye_passthrough(source.equirect, face_size)
     else:
         right = source.equirect
-    stacked = stack_eyes(left, right, output_mode)
+    stacked = stack_eyes(left, right, output_mode, yaw)
 
     # Downscaled by default. A full 8K top-bottom preview is a 7680x7680 PNG
     # that takes seconds to encode and tens of megabytes to hold, for an image
