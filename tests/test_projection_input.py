@@ -38,7 +38,10 @@ def _cubemap(src: str, dst: str, tag: bool = True, face: int = F) -> None:
     if not tag:
         return
     real = spherical._sv3d
-    spherical._sv3d = lambda: spherical._box(
+    # Swallows whatever arguments the real _sv3d takes -- it gained a
+    # horizontal field of view for VR180, and this fixture only cares about
+    # substituting a cbmp projection box for the equi one.
+    spherical._sv3d = lambda *_a, **_k: spherical._box(
         "sv3d",
         spherical._full_box("svhd", b"stereo360\x00")
         + spherical._box("proj",

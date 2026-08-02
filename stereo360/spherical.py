@@ -63,13 +63,28 @@ def _st3d(stereo_mode: str) -> bytes:
     return _full_box("st3d", struct.pack(">B", _STEREO_MODES[stereo_mode]))
 
 
-def _sv3d() -> bytes:
-    """sv3d > (svhd, proj > (prhd, equi)) describing a full equirect sphere."""
+def _equi_bounds(horizontal_fov: float) -> Tuple[int, int, int, int]:
+    """(top, bottom, left, right) for `equi`, in 0.32 fixed point.
+
+    The bounds say how much of a *full* sphere is cropped away, so a 180-degree
+    field crops a quarter from each side and 360 crops nothing. Only the
+    horizontal is parameterised: a VR180 frame covers the full 180 degrees
+    vertically, and nothing here needs a vertical crop.
+    """
+    if not 0.0 < horizontal_fov <= 360.0:
+        raise ValueError(f"horizontal_fov must be in (0, 360], got "
+                         f"{horizontal_fov}")
+    side = (1.0 - horizontal_fov / 360.0) / 2.0
+    fixed = int(round(side * 2 ** 32))
+    return 0, 0, fixed, fixed
+
+
+def _sv3d(horizontal_fov: float = 360.0) -> bytes:
+    """sv3d > (svhd, proj > (prhd, equi)) describing the projection."""
     svhd = _full_box("svhd", b"stereo360\x00")
     prhd = _full_box("prhd", struct.pack(">iii", 0, 0, 0))     # 16.16 pose
-    # Bounds are 0.32 fixed point; all zero means the projection covers the
-    # whole sphere, which is what a full equirectangular frame is.
-    equi = _full_box("equi", struct.pack(">IIII", 0, 0, 0, 0))
+    equi = _full_box("equi", struct.pack(">IIII",
+                                         *_equi_bounds(horizontal_fov)))
     return _box("sv3d", svhd + _box("proj", prhd + equi))
 
 
@@ -198,17 +213,35 @@ def _apply(data: bytes, inserts: List[Tuple[int, bytes]],
 
 
 def inject_spherical_metadata(path: str, stereo_mode: str = "top-bottom",
-                              spatial_audio: bool = False) -> None:
+                              spatial_audio: bool = False,
+                              horizontal_fov: float = 360.0) -> None:
     """Insert spherical (V1 + V2) and optional SA3D metadata, in place.
 
-    stereo_mode:   "top-bottom" | "left-right" | "mono"
-    spatial_audio: describe the audio track as ambiX ACN/SN3D. Only valid if
-                   the source audio really is ambisonic; the channel count
-                   must be a perfect square (4, 9, 16 -> order 1, 2, 3).
+    stereo_mode:    "top-bottom" | "left-right" | "mono"
+    spatial_audio:  describe the audio track as ambiX ACN/SN3D. Only valid if
+                    the source audio really is ambisonic; the channel count
+                    must be a perfect square (4, 9, 16 -> order 1, 2, 3).
+    horizontal_fov: degrees of longitude the frame covers. 360 (the default) is
+                    a full sphere; 180 is VR180, and writes `equi` bounds that
+                    crop a quarter from each side.
+
+    **V1 is written only for a full sphere.** Its `ProjectionType` says
+    "equirectangular" and means the whole thing, so on a 180 file it would be a
+    lie -- a V1-only reader would stretch half a sphere across a full one,
+    which is precisely what VLC 3.0.21 does when it ignores the V2 bounds.
+    Omitting it means such a reader sees flat 2D video instead: obviously
+    wrong, rather than subtly wrong.
+
+    V1 does have `CroppedArea*` / `FullPano*` fields that could describe a
+    partial panorama, so this is a choice rather than a limitation. They are
+    not used because their meaning for a side-by-side stereo frame -- per eye,
+    or per packed frame? -- is not something to guess at when V2 already works
+    on the target devices.
     """
     if stereo_mode not in _STEREO_MODES:
         raise ValueError(f"Unknown stereo_mode {stereo_mode!r}; "
                          f"expected one of {sorted(_STEREO_MODES)}")
+    _equi_bounds(horizontal_fov)        # validate before touching the file
     if has_spherical_metadata(path):
         return
 
@@ -251,18 +284,21 @@ def inject_spherical_metadata(path: str, stereo_mode: str = "top-bottom",
         handler = _track_handler(data, tpos, tsize, theader)
 
         if handler == "vide":
-            # V1: uuid box appended to the trak itself.
-            xml = SPHERICAL_XML_TEMPLATE.format(
-                stereo_mode=stereo_mode).encode("utf-8")
-            add(tpos + tsize, _box("uuid", SPHERICAL_UUID + xml),
-                [moov_start, tpos])
+            # V1: uuid box appended to the trak itself. Full sphere only --
+            # see the note in this function's docstring.
+            if horizontal_fov >= 360.0:
+                xml = SPHERICAL_XML_TEMPLATE.format(
+                    stereo_mode=stereo_mode).encode("utf-8")
+                add(tpos + tsize, _box("uuid", SPHERICAL_UUID + xml),
+                    [moov_start, tpos])
 
             # V2: st3d + sv3d appended to the video sample entry.
             entry = _sample_entry(data, tpos, tsize, theader)
             if entry is not None:
                 estart, esize = entry
                 chain = ancestry(tpos, tsize, theader, estart) + [estart]
-                add(estart + esize, _st3d(stereo_mode) + _sv3d(), chain)
+                add(estart + esize,
+                    _st3d(stereo_mode) + _sv3d(horizontal_fov), chain)
 
         elif handler == "soun" and spatial_audio:
             entry = _sample_entry(data, tpos, tsize, theader)
