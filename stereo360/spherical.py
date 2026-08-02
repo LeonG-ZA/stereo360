@@ -80,7 +80,25 @@ def _equi_bounds(horizontal_fov: float) -> Tuple[int, int, int, int]:
 
 
 def _sv3d(horizontal_fov: float = 360.0) -> bytes:
-    """sv3d > (svhd, proj > (prhd, equi)) describing the projection."""
+    """sv3d > (svhd, proj > (prhd, equi)) describing the projection.
+
+    The `prhd` pose is deliberately zero, and it is the only rotation field
+    anywhere in this metadata, so it is worth saying why it stays that way.
+
+    It is 16.16 fixed-point yaw/pitch/roll and it does round-trip -- write 45
+    and ffprobe reads back `yaw: 45` in the Spherical Mapping side data. But
+    it lives in the *video* sample entry and describes where the projection
+    sits in the global frame. It moves the picture, not the sound.
+
+    So it cannot stand in for rotating a VR180 file's audio. Using it that way
+    would be the opposite manoeuvre -- leave the soundfield alone and declare
+    the video turned -- which places the content off to one side of the viewer
+    at startup instead of in front of them, which is the whole point of VR180.
+
+    Zero is also the truthful value for what this tool produces: the crop has
+    already put the chosen direction at the front, and `ambisonics` has turned
+    the soundfield to match, so picture and sound agree that front is front.
+    """
     svhd = _full_box("svhd", b"stereo360\x00")
     prhd = _full_box("prhd", struct.pack(">iii", 0, 0, 0))     # 16.16 pose
     equi = _full_box("equi", struct.pack(">IIII",

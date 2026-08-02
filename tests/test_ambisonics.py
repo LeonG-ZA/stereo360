@@ -543,3 +543,48 @@ def test_family_255_would_say_nothing_about_what_the_channels_are():
     args = _candidate("libopus", 4).args
     assert "255" not in args
     assert args[args.index("-mapping_family") + 1] == "2"
+
+
+# ---------------------------------- why the rotation cannot be metadata alone
+
+def test_sa3d_has_nowhere_to_put_a_rotation():
+    """The recurring hope is that a soundfield could be turned by a tag rather
+    than by touching the samples. SA3D is the box that describes an ambisonic
+    track and it carries no such field: version, type, order, ordering,
+    normalisation, channel count, and a channel *map*.
+
+    The map is an index permutation, and that is not enough even for a right
+    angle -- a 90-degree yaw needs entries of -1, and 45 needs +-0.707. Only a
+    yaw of zero is a permutation.
+    """
+    from stereo360 import spherical
+
+    box = spherical._sa3d(4, 1)
+    # 8 header + 12 fixed fields + 4 channels x 4 bytes. Nothing spare.
+    assert len(box) == 8 + 12 + 4 * 4
+
+    for yaw in (45, 90, 180):
+        entries = {round(v, 6)
+                   for row in ambisonics.yaw_matrix(1, yaw) for v in row}
+        assert not entries <= {0.0, 1.0}, \
+            f"yaw {yaw} would be expressible as a permutation"
+    identity = {round(v, 6)
+                for row in ambisonics.yaw_matrix(1, 0) for v in row}
+    assert identity <= {0.0, 1.0}, "the do-nothing case, for contrast"
+
+
+def test_the_projection_pose_is_left_at_zero():
+    """`prhd` is the one rotation field in the metadata, and it turns the
+    *picture*: it is in the video sample entry and describes where the
+    projection sits. Declaring a pose instead of rotating the audio would put
+    a VR180 file's content beside the viewer rather than in front.
+
+    Zero is also the honest value here -- the crop has already put the chosen
+    direction at the front and the soundfield has been turned to match.
+    """
+    from stereo360 import spherical
+
+    body = spherical._sv3d(180.0)
+    at = body.find(b"prhd")
+    yaw, pitch, roll = struct.unpack(">iii", body[at + 8:at + 20])
+    assert (yaw, pitch, roll) == (0, 0, 0)
