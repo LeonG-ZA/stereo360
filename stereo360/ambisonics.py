@@ -49,7 +49,10 @@ none, and it is inaudible as anything but "the mix is wrong", so
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+import os
+import subprocess
+import tempfile
+from typing import List, NamedTuple, Optional
 
 #: Above third order the channel count outruns anything a consumer file
 #: carries, and SA3D would have to describe it too. Not a maths limit.
@@ -118,40 +121,138 @@ def yaw_matrix(order: int, yaw_degrees: float) -> List[List[float]]:
     return matrix
 
 
-#: Per-channel bitrate for the re-encode a rotation forces. Generous on
-#: purpose: the spatial information in ambisonics lives in the *differences*
-#: between channels, which is exactly what a codec throws away first.
-_KBPS_PER_CHANNEL = 96
+#: Per-channel bitrate for a lossy re-encode. Generous on purpose, and cheap:
+#: the spatial information in ambisonics lives in the *differences* between
+#: channels, which is what a codec discards first, and even 16 channels at
+#: this rate is 2 Mbit/s against an 8K picture running fifty times that.
+_KBPS_PER_CHANNEL = 128
 
 
-def encode_args(channels: int) -> Optional[List[str]]:
-    """ffmpeg arguments to write `channels` of rotated ambiX back, or None.
+class Encoder(NamedTuple):
+    """One way of writing rotated ambiX back into the file."""
 
-    First order is AAC, which is what Google's spatial media spec uses and
-    what every player that reads SA3D already expects.
+    name: str
+    args: List[str]
+    lossless: bool
+    #: What the user should know about this choice, or "" when it is the
+    #: uncontroversial one.
+    note: str
 
-    Above that, ffmpeg's native AAC encoder simply refuses -- "Unsupported
-    channel layout" for 9 channels, and for 16 it guesses 9.1.6 and refuses
-    that too. libopus takes any count with `-mapping_family 255`; the channel
-    order survives (measured by cross-correlating every output channel against
-    every input one) and `channelcount` lands correctly in the sample entry,
-    so SA3D still describes the track truthfully.
 
-    What is *not* established is whether a headset plays Opus-in-MP4
-    ambisonics -- Google's spec is AAC. So the caller announces the swap
-    rather than making it quietly.
+def _lossy(name: str, channels: int, extra: List[str] = ()) -> List[str]:
+    return ["-c:a", name, *extra,
+            "-b:a", f"{channels * _KBPS_PER_CHANNEL}k"]
+
+
+#: Tried in order. Deliberately does **not** include ffmpeg's native `aac`.
+#: It encodes 4 channels perfectly happily and sounds materially worse than
+#: libfdk_aac at the same bitrate; reaching for it because it is the one
+#: spelled "aac" is a well-worn way to quietly degrade a master.
+#:
+#: Every entry below was measured end to end -- encode, mux, decode -- for
+#: channel order and for the `channelcount` that SA3D is built from. What is
+#: *not* established for any of them but libfdk_aac is whether a headset
+#: plays the result: Google's spatial media spec is AAC. Hence the notes, and
+#: hence `--ambisonic-codec` for overriding this.
+def _candidates(channels: int) -> List[Encoder]:
+    return [
+        # Best AAC there is, and AAC is what players expect. Absent from most
+        # Windows builds -- its licence is not GPL-compatible, so gyan.dev and
+        # friends leave it out.
+        Encoder("libfdk_aac", _lossy("libfdk_aac", channels), False, ""),
+        # Takes any channel count. Good at these rates, but Opus-in-MP4
+        # ambisonics is off the beaten track.
+        Encoder("libopus",
+                _lossy("libopus", channels, ["-mapping_family", "255"]),
+                False,
+                "Opus rather than AAC, because this build of ffmpeg has no "
+                "libfdk_aac. Whether headsets play Opus ambisonics in MP4 is "
+                "untested"
+                + (". --ambisonic-codec pcm_s24le avoids the question and "
+                   "loses nothing." if channels in _AAC_LAYOUT else
+                   ", and at this order it is the only choice: MP4 will not "
+                   f"carry PCM with {channels} channels.")),
+        # Nothing is thrown away, which for a master is the point. Roughly
+        # 1.2 Mbit/s per four channels -- next to nothing beside 8K video.
+        Encoder("pcm_s24le", ["-c:a", "pcm_s24le"], True,
+                "24-bit PCM: nothing is re-compressed, so the rotation costs "
+                "no quality at all. Larger, and it writes an `ipcm` entry "
+                "that older players may not read."),
+    ]
+
+
+def choose_encoder(channels: int,
+                   requested: str = "auto") -> Optional[Encoder]:
+    """The best available way to write `channels` back, or None if there is
+    no way at all.
+
+    `requested` names one explicitly; "auto" walks the list above and takes
+    the first this ffmpeg actually has. Availability is measured by encoding
+    real silence, not by reading `-encoders`: a build can list a codec it
+    cannot run, and finding that out during a render wastes the render.
     """
     if channels <= 0:
         return None
-    rate = f"{channels * _KBPS_PER_CHANNEL}k"
-    if channels <= 8:
-        return ["-c:a", "aac", "-b:a", rate]
-    return ["-c:a", "libopus", "-mapping_family", "255", "-b:a", rate]
+    options = _candidates(channels)
+    if requested != "auto":
+        options = [e for e in options if e.name == requested]
+        if not options:
+            raise ValueError(
+                f"Unknown ambisonic codec {requested!r}; expected 'auto' or "
+                f"one of {', '.join(e.name for e in _candidates(4))}")
+        # Probed like any other. The probe now runs the real chain, so there
+        # is no case where it fails and the render would have worked -- and
+        # finding out at frame one costs the whole render.
+        if not _can_encode(options[0], channels):
+            raise ValueError(
+                f"--ambisonic-codec {requested} cannot write {channels} "
+                f"channels here. "
+                + (f"MP4 will not carry PCM with an unnamed layout, and there "
+                   f"is no standard name for {channels} channels; libopus is "
+                   f"the only option at this order."
+                   if requested == "pcm_s24le" else
+                   f"This build of ffmpeg cannot run it.")
+                + " Use --ambisonic-codec auto to take the best available.")
+        return options[0]
+    for option in options:
+        if _can_encode(option, channels):
+            return option
+    return None
 
 
-def needs_opus(channels: int) -> bool:
-    """Whether writing this many channels means leaving AAC behind."""
-    return channels > 8
+#: Probing costs a subprocess, and the answer cannot change mid-run.
+_probe_cache: dict = {}
+
+
+def _can_encode(encoder: Encoder, channels: int) -> bool:
+    """Whether this encoder can write the real chain, measured by doing it.
+
+    The rotation filter is part of the probe, not just the codec. Without it
+    the answer is wrong in the worst direction: `pcm_s24le` at 16 channels
+    encodes silence from `anullsrc` quite happily and then refuses the same
+    silence once the pan filter is in front of it, because the MP4 muxer will
+    not take PCM with an unnamed layout. A probe that does not exercise the
+    real path just produces a confident wrong answer later.
+    """
+    order = order_for_channels(channels)
+    if order is None:
+        return False
+    key = (encoder.name, channels)
+    if key not in _probe_cache:
+        layout = _AAC_LAYOUT.get(channels, f"{channels}C")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "probe.mp4")
+            result = subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                 "-i", f"anullsrc=cl={layout}:r=48000:d=0.2",
+                 # A real angle: an identity mix could be optimised away.
+                 "-filter:a", audio_filter(order, 30.0),
+                 *encoder.args, out],
+                capture_output=True)
+            _probe_cache[key] = (result.returncode == 0
+                                 and os.path.isfile(out)
+                                 and os.path.getsize(out) > 0)
+    return _probe_cache[key]
 
 
 def _term(gain: float, channel: int) -> Optional[str]:
@@ -187,11 +288,15 @@ def pan_filter(order: int, yaw_degrees: float) -> str:
 def audio_filter(order: int, yaw_degrees: float) -> str:
     """The whole `-filter:a` chain: the rotation, plus any relabelling.
 
-    Split from `pan_filter` because the relabelling is a fact about the
-    encoder that follows, not about the rotation.
+    Split from `pan_filter` because the relabelling is a fact about what
+    follows, not about the rotation.
+
+    Applied whenever a name exists for the channel count, rather than only for
+    the encoders known to demand one. AAC refuses an unknown layout and so
+    does the MP4 muxer for PCM; Opus, FLAC and ALAC do not care either way,
+    and were each measured to pass the channels through in order with the
+    label attached. One rule beats a table of exceptions.
     """
     chain = pan_filter(order, yaw_degrees)
     layout = _AAC_LAYOUT.get(channels_for_order(order))
-    if layout and not needs_opus(channels_for_order(order)):
-        chain += f",aformat=channel_layouts={layout}"
-    return chain
+    return chain + (f",aformat=channel_layouts={layout}" if layout else "")

@@ -451,7 +451,7 @@ VR180_FOV = 180.0
 
 
 def plan_audio_rotation(info, yaw: float, spatial_audio: bool,
-                        reporter: Reporter):
+                        reporter: Reporter, ambisonic_codec: str = "auto"):
     """(audio filter, encoder args) for turning the soundfield with the view.
 
     A yaw moves the picture and leaves the sound where it was. In 360 that
@@ -498,18 +498,25 @@ def plan_audio_rotation(info, yaw: float, spatial_audio: bool,
             yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
         return None, None
 
-    args = ambisonics.encode_args(channels)
-    swap = ambisonics.needs_opus(channels)
+    encoder = ambisonics.choose_encoder(channels, ambisonic_codec)
+    if encoder is None:
+        reporter.warning(
+            f"The order-{order} soundfield cannot be rotated {yaw:+g} degrees: "
+            f"this ffmpeg has no encoder able to write {channels} channels "
+            f"back into an MP4. The audio is copied through unrotated, so "
+            f"every sound will be {abs(yaw):g} degrees out of place. Install "
+            f"an ffmpeg with libfdk_aac or libopus, or use --yaw 0.",
+            yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
     reporter.info(
         f"Rotating the order-{order} soundfield {yaw:+g} degrees to match the "
-        f"view."
-        + (f" Re-encoding to Opus: ffmpeg's AAC encoder cannot write "
-           f"{channels} channels. Whether headsets play Opus ambisonics in "
-           f"MP4 is untested." if swap else
-           " Costs one AAC generation; the picture is unaffected."),
+        f"view, re-encoding with {encoder.name}."
+        + (f" {encoder.note}" if encoder.note else ""),
         yaw=yaw, ambisonic_order=order, audio_channels=channels,
+        audio_codec=encoder.name, audio_lossless=encoder.lossless,
         ambisonic_rotation=True)
-    return ambisonics.audio_filter(order, yaw), args
+    return ambisonics.audio_filter(order, yaw), list(encoder.args)
 
 
 def check_yaw(output_mode: str, yaw: float) -> None:
@@ -916,6 +923,7 @@ def convert(
     split_baseline: bool = False,
     gradient_limit: float = 0.0,
     spatial_audio: bool = False,
+    ambisonic_codec: str = "auto",
     source_subsampling: bool = False,
     input_projection: str = "auto",
     temporal_depth: float = DepthStabiliser.DEFAULT_TAU,
@@ -967,7 +975,8 @@ def convert(
             f"Output: VR180, {out_w}x{out_h} side-by-side, {aim}.",
             output_mode=output_mode, width=out_w, height=out_h, yaw=yaw)
     audio_filter, audio_args = plan_audio_rotation(
-        info, yaw=yaw, spatial_audio=spatial_audio, reporter=reporter)
+        info, yaw=yaw, spatial_audio=spatial_audio, reporter=reporter,
+        ambisonic_codec=ambisonic_codec)
 
     encoder = ffmpeg_io.VideoEncoder(
         output_path, width=out_w, height=out_h, fps=info.fps,

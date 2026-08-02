@@ -415,7 +415,7 @@ ApplicationWindow {
                             Row2 {
                                 label: "Spatial audio"
                                 hint: win.spatialAudio && win.outputMode === "vr180" && win.yaw !== 0
-                                    ? "The soundfield will be turned " + win.yaw.toFixed(0) + "° to match the view, so sounds stay where you see them. Costs one AAC generation; the picture is unaffected."
+                                    ? "The soundfield will be turned " + win.yaw.toFixed(0) + "° to match the view, so sounds stay where you see them. The audio is re-encoded once to do it — the log names the codec — and the picture is unaffected."
                                     : win.outputMode === "vr180" && win.yaw !== 0
                                       ? (win.sourceIsAmbisonic
                                          ? "This source has " + app.sourceInfo.audio_channels + " audio channels, which is what ambiX looks like. Tick this and the soundfield turns with the view; leave it and every sound stays " + Math.abs(win.yaw).toFixed(0) + "° out of place."

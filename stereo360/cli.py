@@ -148,6 +148,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "what lets --yaw turn the soundfield with the view: "
                         "without this flag the audio is copied through and "
                         "every sound stays at its original bearing.")
+    p.add_argument("--ambisonic-codec", default="auto",
+                   choices=["auto", "libfdk_aac", "libopus", "pcm_s24le"],
+                   help="How to write the soundfield back when --yaw rotates "
+                        "it. auto (default) takes the first your ffmpeg has, "
+                        "in that order. libfdk_aac is the best AAC and the "
+                        "format players expect, but its licence keeps it out "
+                        "of most Windows builds; libopus handles any order; "
+                        "pcm_s24le re-compresses nothing at all, which for a "
+                        "master is the point. ffmpeg's own 'aac' encoder is "
+                        "deliberately not offered -- it is materially worse "
+                        "than libfdk_aac at the same bitrate. Ignored without "
+                        "a yaw, when the audio is copied untouched.")
     p.add_argument("--split-baseline", action="store_true",
                    help="Warp BOTH eyes by half the baseline in opposite "
                         "directions instead of leaving the left eye untouched. "
@@ -403,6 +415,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         split_baseline=args.split_baseline,
         gradient_limit=args.gradient_limit,
         spatial_audio=args.spatial_audio,
+        ambisonic_codec=args.ambisonic_codec,
         source_subsampling=args.source_subsampling,
         input_projection=args.input_projection,
         temporal_depth=args.temporal_depth,

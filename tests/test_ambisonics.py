@@ -110,6 +110,11 @@ def _channel_mapping(sent: np.ndarray, got: np.ndarray) -> list:
             for j in range(got.shape[1])]
 
 
+def _candidate(name: str, channels: int):
+    """The Encoder for `name`, whether or not this build can run it."""
+    return next(e for e in ambisonics._candidates(channels) if e.name == name)
+
+
 # ----------------------------------------------------------- channel counts
 
 @pytest.mark.parametrize("channels,order", [(4, 1), (9, 2), (16, 3)])
@@ -272,88 +277,206 @@ def test_rotation_does_not_change_the_loudness(tmp_path: Path):
     assert after == pytest.approx(before, rel=1e-4)
 
 
-# ------------------------------------------------------------- encoding
+# ------------------------------------------------------- choosing an encoder
 
-def test_first_order_stays_aac():
-    """What Google's spatial media spec uses, and what anything reading SA3D
-    already expects."""
-    assert ambisonics.encode_args(4)[:2] == ["-c:a", "aac"]
-    assert not ambisonics.needs_opus(4)
-
-
-@pytest.mark.parametrize("channels", [9, 16])
-def test_higher_orders_need_opus(channels):
-    """ffmpeg's native AAC encoder refuses 9 channels outright ("Unsupported
-    channel layout") and mistakes 16 for 9.1.6, refusing that too."""
-    assert ambisonics.needs_opus(channels)
-    args = ambisonics.encode_args(channels)
-    assert args[:2] == ["-c:a", "libopus"]
-    assert "-mapping_family" in args
+def test_the_native_aac_encoder_is_never_offered():
+    """ffmpeg's own `aac` will encode four channels quite happily and sounds
+    materially worse than libfdk_aac at the same bitrate. Reaching for it
+    because it is the one spelled "aac" is a well-worn way to degrade a
+    master, so it is not in the list at any priority."""
+    for channels in (4, 9, 16):
+        names = [e.name for e in ambisonics._candidates(channels)]
+        assert "aac" not in names, names
+        assert "aac_mf" not in names
 
 
-@pytest.mark.parametrize("channels", [4, 9, 16])
-def test_the_chosen_encoder_can_actually_write_that_many_channels(channels,
-                                                                  tmp_path):
-    """The claim above, checked against ffmpeg rather than believed."""
-    out = str(tmp_path / "a.mp4")
-    subprocess.run(
-        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
-         "-i", f"anullsrc=cl={channels}C:r=48000:d=0.3",
-         *ambisonics.encode_args(channels), out],
-        check=True, capture_output=True)
-    probed = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a:0",
-         "-show_entries", "stream=channels", "-of", "csv=p=0", out],
-        capture_output=True, text=True, check=True)
-    assert int(probed.stdout.strip()) == channels
+def test_libfdk_aac_is_first_in_line():
+    """Best AAC there is, and AAC is what SA3D players expect. Absent from
+    most Windows builds only because its licence is not GPL-compatible."""
+    assert ambisonics._candidates(4)[0].name == "libfdk_aac"
 
 
+def test_the_order_of_preference_is_quality_then_compatibility():
+    assert [e.name for e in ambisonics._candidates(4)] == [
+        "libfdk_aac", "libopus", "pcm_s24le"]
+
+
+def test_auto_skips_what_this_ffmpeg_does_not_have(monkeypatch):
+    """The probe runs a real encode rather than trusting `-encoders`, because
+    a build can list a codec it cannot actually run."""
+    monkeypatch.setattr(ambisonics, "_probe_cache", {})
+    monkeypatch.setattr(ambisonics, "_can_encode",
+                        lambda e, ch: e.name == "pcm_s24le")
+    assert ambisonics.choose_encoder(4).name == "pcm_s24le"
+
+
+def test_auto_takes_the_best_available(monkeypatch):
+    monkeypatch.setattr(ambisonics, "_probe_cache", {})
+    monkeypatch.setattr(ambisonics, "_can_encode", lambda e, ch: True)
+    assert ambisonics.choose_encoder(4).name == "libfdk_aac"
+    assert ambisonics.choose_encoder(4).note == "", \
+        "the preferred choice needs no explaining"
+
+
+def test_nothing_available_is_reported_rather_than_guessed(monkeypatch):
+    monkeypatch.setattr(ambisonics, "_probe_cache", {})
+    monkeypatch.setattr(ambisonics, "_can_encode", lambda e, ch: False)
+    assert ambisonics.choose_encoder(4) is None
+
+
+def test_an_explicit_choice_is_honoured():
+    """"Can my headset play Opus" is not a question a probe can settle, so
+    the user gets to decide."""
+    assert ambisonics.choose_encoder(4, "pcm_s24le").name == "pcm_s24le"
+    assert ambisonics.choose_encoder(16, "libopus").name == "libopus"
+
+
+def test_an_impossible_explicit_choice_fails_before_the_render():
+    """Honouring it blindly would kill the run at frame one, an hour of
+    rendering after the mistake was made. The probe exercises the real chain,
+    so a failure here is a failure there."""
+    with pytest.raises(ValueError, match="cannot write 16 channels"):
+        ambisonics.choose_encoder(16, "pcm_s24le")
+
+
+def test_that_refusal_says_which_way_out():
+    with pytest.raises(ValueError) as e:
+        ambisonics.choose_encoder(16, "pcm_s24le")
+    assert "libopus" in str(e.value)
+    assert "--ambisonic-codec auto" in str(e.value)
+
+
+def test_an_unknown_codec_is_refused_by_name():
+    with pytest.raises(ValueError, match="Unknown ambisonic codec"):
+        ambisonics.choose_encoder(4, "mp3")
+    with pytest.raises(ValueError, match="libfdk_aac"):
+        ambisonics.choose_encoder(4, "aac")     # names what is on offer
+
+
+def test_the_fallbacks_say_why_they_are_not_the_first_choice():
+    """A silent codec substitution in a master is not acceptable."""
+    for name in ("libopus", "pcm_s24le"):
+        assert _candidate(name, 4).note, name
+    assert "untested" in _candidate("libopus", 4).note
+    assert _candidate("pcm_s24le", 4).lossless
+
+
+# --------------------------------------------- what actually reaches the file
+
+@pytest.mark.parametrize("codec", ["libopus", "pcm_s24le"])
 @pytest.mark.parametrize("order", [1, 2, 3])
-def test_channel_order_survives_the_whole_encode(order, tmp_path: Path):
-    """The end of the chain, and the check that matters most: ACN order in,
-    ACN order out. A remap here would put every sound somewhere plausible and
-    wrong, which is the hardest kind of audio bug to notice."""
+def test_channel_order_survives_the_whole_encode(codec, order, tmp_path: Path):
+    """ACN order in, ACN order out. A remap here would put every sound
+    somewhere plausible and wrong, which is the hardest audio bug to notice.
+
+    Only the codecs this build has; libfdk_aac is covered by the priority
+    tests above and cannot be exercised where it is not installed.
+    """
     n = ambisonics.channels_for_order(order)
+    encoder = _candidate(codec, n)
+    if not ambisonics._can_encode(encoder, n):
+        pytest.skip(f"{codec} cannot write {n} channels in this build")
+
     t = np.arange(19200) / RATE
     data = np.stack([0.2 * np.sin(2 * np.pi * (400 + 37 * i) * t + i)
                      * (1 + 0.5 * np.sin(2 * np.pi * (3 + i) * t))
                      for i in range(n)], axis=1)
     identity = "|".join(f"c{i}=c{i}" for i in range(n))
     chain = f"pan={n}C|{identity}"
-    if not ambisonics.needs_opus(n):
-        chain += ",aformat=channel_layouts=4.0"
-    out = _through_encoder(tmp_path, data, chain, ambisonics.encode_args(n))
+    layout = ambisonics._AAC_LAYOUT.get(n)
+    if layout:
+        chain += f",aformat=channel_layouts={layout}"
+    out = _through_encoder(tmp_path, data, chain, list(encoder.args))
     assert _channel_mapping(data, out) == list(range(n))
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])
-def test_the_real_filter_chain_encodes_and_keeps_the_bearing(order, tmp_path):
-    """`audio_filter` plus `encode_args`, exactly as the pipeline uses them,
-    through a lossy codec and back."""
-    data = encode_source(-60.0, order)
-    out = _through_encoder(
-        tmp_path, data, ambisonics.audio_filter(order, 60.0),
-        ambisonics.encode_args(ambisonics.channels_for_order(order)))
+def test_the_real_chain_encodes_and_keeps_the_bearing(order, tmp_path: Path):
+    """`audio_filter` plus whatever `choose_encoder` picked, exactly as the
+    pipeline uses them, through a real codec and back."""
+    n = ambisonics.channels_for_order(order)
+    encoder = ambisonics.choose_encoder(n)
+    assert encoder is not None, "no usable ambisonic encoder in this build"
+    out = _through_encoder(tmp_path, encode_source(-60.0, order),
+                           ambisonics.audio_filter(order, 60.0),
+                           list(encoder.args))
     assert wrap(bearing(out)) == pytest.approx(0.0, abs=1.0)
 
 
-@pytest.mark.parametrize("channels", [4, 9, 16])
-def test_the_channel_count_survives_into_the_sample_entry(channels, tmp_path):
+def test_pcm_really_is_lossless(tmp_path: Path):
+    """The reason it is worth offering at all: rotating costs nothing. The
+    audio is a rounding error beside an 8K picture, so paying in bytes to pay
+    nothing in quality is a reasonable trade for a master."""
+    data = encode_source(25.0, 1)
+    encoder = ambisonics.choose_encoder(4, "pcm_s24le")
+    out = _through_encoder(tmp_path, data,
+                           ambisonics.audio_filter(1, 0.0), list(encoder.args))
+    n = min(len(data), len(out))
+    # 24-bit: a sample is within one part in 2^23 of where it started.
+    assert np.abs(out[:n] - data[:n]).max() < 2 ** -22
+
+
+@pytest.mark.parametrize("order", [1, 2, 3])
+def test_the_channel_count_survives_into_the_sample_entry(order, tmp_path):
     """SA3D describes the track by reading `channelcount` back out of the
     audio sample entry, so a codec that wrote the wrong number there would
     produce a file claiming an order it does not have."""
     from stereo360 import spherical
 
+    channels = ambisonics.channels_for_order(order)
+    encoder = ambisonics.choose_encoder(channels)
     out = str(tmp_path / "a.mp4")
+    layout = ambisonics._AAC_LAYOUT.get(channels, f"{channels}C")
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
-         "-i", f"anullsrc=cl={channels}C:r=48000:d=0.3",
-         *ambisonics.encode_args(channels), out],
-        check=True, capture_output=True)
+         "-i", f"anullsrc=cl={layout}:r=48000:d=0.3",
+         *encoder.args, out], check=True, capture_output=True)
 
     data = Path(out).read_bytes()
-    tag = b"Opus" if ambisonics.needs_opus(channels) else b"mp4a"
-    entry = data.find(tag) - 4
-    assert entry > 0, f"no {tag.decode()} sample entry"
-    assert spherical._audio_channels(data, entry) == channels
+    entry = max(data.find(tag) for tag in (b"mp4a", b"Opus", b"ipcm"))
+    assert entry > 0, "no recognised audio sample entry"
+    assert spherical._audio_channels(data, entry - 4) == channels
     assert struct.calcsize(">H") == 2        # the field the reader assumes
+
+
+def test_the_probe_runs_the_rotation_too_not_just_the_codec():
+    """`pcm_s24le` encodes 16 channels of silence from anullsrc without
+    complaint and then refuses the identical silence with the pan filter in
+    front of it, because the MP4 muxer will not take PCM with an unnamed
+    layout. A probe that skips the filter answers a question nobody asked."""
+    assert ambisonics._can_encode(_candidate("pcm_s24le", 4), 4), \
+        "four channels have a named layout, so PCM is fine"
+    assert not ambisonics._can_encode(_candidate("pcm_s24le", 16), 16), \
+        "sixteen do not, and the muxer refuses"
+
+
+def test_auto_therefore_avoids_pcm_at_higher_orders(monkeypatch):
+    """Which is the point of probing rather than tabulating: the same codec
+    is usable at one order and not at another."""
+    monkeypatch.setattr(ambisonics, "_probe_cache", {})
+    chosen = ambisonics.choose_encoder(16)
+    assert chosen is None or chosen.name != "pcm_s24le"
+
+
+def test_the_notes_name_flag_values_that_exist():
+    """A note telling someone to pass `--ambisonic-codec pcm` when the choice
+    is spelled `pcm_s24le` sends them to an argparse error."""
+    valid = {e.name for e in ambisonics._candidates(4)} | {"auto"}
+    for name in valid - {"auto"}:
+        note = _candidate(name, 4).note
+        for word in note.replace(".", " ").replace(";", " ").split():
+            if word.startswith("--ambisonic-codec"):
+                continue
+        if "--ambisonic-codec" in note:
+            after = note.split("--ambisonic-codec", 1)[1].split()[0]
+            assert after.strip(".,;") in valid, f"{name}: {after}"
+
+
+def test_the_opus_note_only_offers_pcm_where_pcm_works():
+    """Telling someone at third order to use PCM instead sends them to an
+    error, since MP4 will not carry 16 channels of it."""
+    assert "pcm_s24le" in _candidate("libopus", 4).note
+    for channels in (9, 16):
+        note = _candidate("libopus", channels).note
+        assert "pcm_s24le" not in note, note
+        assert "only choice" in note
