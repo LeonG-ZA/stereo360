@@ -431,6 +431,65 @@ def fit_chunk_size(chunk_size: int, w: int, h: int, eyes: int = 1,
 #: user gives up by accident.
 DEFAULT_CHROMA = "4:2:0"
 
+#: How the two eyes are laid out, and how much of the sphere they cover.
+#:
+#: "360" is the original: a full equirect per eye, stacked top over bottom.
+#: "vr180" keeps the middle 180 degrees of longitude and puts the eyes side by
+#: side, which is what VR180 players expect.
+#:
+#: Only reachable with 360 input. The tool does not accept 180 input — VR180
+#: cameras already shoot stereo, so a monoscopic half-equirect barely exists,
+#: and cropping from a full sphere gives a better result than processing one
+#: would: the depth stage sees six real faces and the warp has content beyond
+#: the crop to shift in. See plans/vr180.md.
+OUTPUT_MODES = ("360", "vr180")
+DEFAULT_OUTPUT_MODE = "360"
+
+#: Degrees of longitude a VR180 frame covers. Not a knob: the format is 180,
+#: and the number appears here so the crop and the metadata cannot disagree.
+VR180_FOV = 180.0
+
+
+def output_geometry(w: int, h: int, output_mode: str) -> tuple:
+    """(width, height) of the encoded frame for a `w` x `h` equirect source.
+
+    360 stacks two full equirects vertically. VR180 halves each eye
+    horizontally and puts them side by side, so an 8K source gives 7680x3840
+    either way round — the same pixel count, spent on half the sphere at twice
+    the angular resolution.
+    """
+    _check_output_mode(output_mode)
+    if output_mode == "vr180":
+        half = (w // 2) // 2 * 2      # even, or the encoder rejects it
+        return half * 2, h
+    return w, h * 2
+
+
+def _check_output_mode(output_mode: str) -> None:
+    if output_mode not in OUTPUT_MODES:
+        raise ValueError(f"Unknown output_mode {output_mode!r}; expected one "
+                         f"of {list(OUTPUT_MODES)}")
+
+
+def stack_eyes(left: np.ndarray, right: np.ndarray,
+               output_mode: str = DEFAULT_OUTPUT_MODE) -> np.ndarray:
+    """Combine the two eyes into the frame that gets encoded.
+
+    The one place that decides layout, so the encoder's frame size, the written
+    pixels and the spherical metadata cannot drift apart.
+    """
+    _check_output_mode(output_mode)
+    if output_mode == "360":
+        return np.concatenate([left, right], axis=0)
+
+    # Keep the middle half of the longitude range. Nothing is resampled — this
+    # is a column range, which is also why the direction is free to change.
+    w = left.shape[1]
+    half = (w // 2) // 2 * 2
+    x0 = (w - half) // 2
+    return np.concatenate([left[:, x0:x0 + half], right[:, x0:x0 + half]],
+                          axis=1)
+
 
 def warn_if_source_is_deeper_than_8_bit(info, bitdepth: int,
                                         reporter: Reporter) -> bool:
@@ -623,10 +682,12 @@ class _Sink:
     """
 
     def __init__(self, encoder, reporter: Reporter,
-                 cancel: Optional[Callable[[], bool]]) -> None:
+                 cancel: Optional[Callable[[], bool]],
+                 output_mode: str = DEFAULT_OUTPUT_MODE) -> None:
         self._encoder = encoder
         self._reporter = reporter
         self._cancel = cancel
+        self._output_mode = output_mode
         self.written = 0
 
     def check(self) -> None:
@@ -641,7 +702,7 @@ class _Sink:
 
     def write(self, left: np.ndarray, right: np.ndarray) -> None:
         self.check()
-        self._encoder.write(np.concatenate([left, right], axis=0))
+        self._encoder.write(stack_eyes(left, right, self._output_mode))
         self.written += 1
         self._reporter.advance(1)
 
@@ -672,6 +733,7 @@ def convert(
     input_projection: str = "auto",
     temporal_depth: float = DepthStabiliser.DEFAULT_TAU,
     face_overlap: float = projection.FACE_OVERLAP,
+    output_mode: str = DEFAULT_OUTPUT_MODE,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> ConvertResult:
@@ -705,17 +767,25 @@ def convert(
     chroma = _resolve_chroma(info, codec, source_subsampling, reporter)
     warn_if_source_is_deeper_than_8_bit(info, bitdepth, reporter)
 
+    _check_output_mode(output_mode)
+    out_w, out_h = output_geometry(w, h, output_mode)
+    if output_mode != DEFAULT_OUTPUT_MODE:
+        reporter.info(
+            f"Output: VR180, {out_w}x{out_h} side-by-side "
+            f"(the middle {VR180_FOV:.0f} degrees of the source).",
+            output_mode=output_mode, width=out_w, height=out_h)
+
     encoder = ffmpeg_io.VideoEncoder(
-        output_path, width=w, height=h * 2, fps=info.fps,
+        output_path, width=out_w, height=out_h, fps=info.fps,
         audio_source=audio_source, codec=codec, crf=crf, preset=preset,
         bitdepth=bitdepth, color=info.color, chroma=chroma,
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)
-    sink = _Sink(encoder, reporter, cancel)
+    sink = _Sink(encoder, reporter, cancel, output_mode)
     cancelled = False
 
-    reporter.start(total, width=w, height=h * 2, fps=info.fps,
+    reporter.start(total, width=out_w, height=out_h, fps=info.fps,
                    input=input_path, output=output_path, face_size=face_size)
     try:
         chunk_size = fit_chunk_size(chunk_size, w, h,
@@ -770,8 +840,11 @@ def convert(
     # Spherical + stereoscopic are always true of this output, so they are
     # never optional. Ambisonic audio is a property of the *source*, so it has
     # to be declared.
-    spherical.inject_spherical_metadata(output_path, stereo_mode="top-bottom",
-                                        spatial_audio=spatial_audio)
+    spherical.inject_spherical_metadata(
+        output_path,
+        stereo_mode="left-right" if output_mode == "vr180" else "top-bottom",
+        spatial_audio=spatial_audio,
+        horizontal_fov=VR180_FOV if output_mode == "vr180" else 360.0)
     reporter.finish(output=output_path, frames=sink.written,
                     cancelled=cancelled)
     return ConvertResult(output_path, sink.written, cancelled)
@@ -806,6 +879,7 @@ def preview_frame(
     width: int = 2048,
     input_projection: str = "auto",
     face_overlap: float = projection.FACE_OVERLAP,
+    output_mode: str = DEFAULT_OUTPUT_MODE,
     reporter: Optional[Reporter] = None,
 ) -> PreviewResult:
     """Render one source frame to an image instead of converting the video.
@@ -871,7 +945,7 @@ def preview_frame(
         right = right_eye_passthrough(source.equirect, face_size)
     else:
         right = source.equirect
-    stacked = np.concatenate([left, right], axis=0)
+    stacked = stack_eyes(left, right, output_mode)
 
     # Downscaled by default. A full 8K top-bottom preview is a 7680x7680 PNG
     # that takes seconds to encode and tens of megabytes to hold, for an image

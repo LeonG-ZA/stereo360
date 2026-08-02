@@ -161,6 +161,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "times slower. 1 = whole faces (default: 1)")
     # Default deliberately None rather than projection.FACE_OVERLAP: importing
     # projection here would pull numpy and cv2 into every --help.
+    p.add_argument("--output-mode", default="360", choices=["360", "vr180"],
+                   help="What to produce. 360 (default) is a full sphere per "
+                        "eye, stacked top over bottom. vr180 keeps the middle "
+                        "180 degrees and puts the eyes side by side, which is "
+                        "what VR180 players expect and what Apple Vision Pro "
+                        "content uses. Same pixel count either way, so vr180 "
+                        "spends them on half the sphere at twice the angular "
+                        "resolution -- and an 8K vr180 frame is inside HEVC's "
+                        "decode limit where an 8K 360 frame is not. Input must "
+                        "be 360 in both cases.")
     p.add_argument("--face-overlap", type=float, default=None, metavar="F",
                    help="How far each depth face reaches past its nominal 90 "
                         "degrees, in tangent units (0.15 = 98 degrees per "
@@ -348,6 +358,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             width=args.preview_width,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            output_mode=args.output_mode,
             reporter=reporter,
         )
 
@@ -377,6 +388,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         input_projection=args.input_projection,
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
+        output_mode=args.output_mode,
         reporter=reporter,
         cancel=cancel,
     )
