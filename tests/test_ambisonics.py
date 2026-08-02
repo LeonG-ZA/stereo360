@@ -480,3 +480,66 @@ def test_the_opus_note_only_offers_pcm_where_pcm_works():
         note = _candidate("libopus", channels).note
         assert "pcm_s24le" not in note, note
         assert "only choice" in note
+
+
+# ------------------------------------------------- how Opus labels the track
+
+def _dops(path: Path) -> dict:
+    """The OpusSpecificBox, which is MP4's stand-in for Ogg's OpusHead."""
+    data = path.read_bytes()
+    i = data.find(b"dOps")
+    assert i > 0, "no dOps box"
+    p = i + 4
+    box = {
+        "version": data[p],
+        "channels": data[p + 1],
+        "pre_skip": struct.unpack(">H", data[p + 2:p + 4])[0],
+        "rate": struct.unpack(">I", data[p + 4:p + 8])[0],
+        "gain": struct.unpack(">h", data[p + 8:p + 10])[0],
+        "family": data[p + 10],
+    }
+    if box["family"] != 0:
+        box["streams"] = data[p + 11]
+        box["coupled"] = data[p + 12]
+        box["mapping"] = list(data[p + 13:p + 13 + box["channels"]])
+    return box
+
+
+@pytest.mark.parametrize("order", [1, 2, 3])
+def test_opus_declares_itself_ambisonic(order, tmp_path: Path):
+    """Family 2 is RFC 8486's ambisonic mapping: ACN order, SN3D, (n+1)^2
+    channels -- a description of ambiX so exact it could have been written
+    for it.
+
+    RFC 8486 signals this in Ogg's OpusHead and this writes MP4, so the
+    obvious worry is that it does not carry. It does: the family is a
+    property of the Opus stream, and MP4's dOps box mirrors OpusHead field
+    for field. This reads the box back to prove it.
+    """
+    channels = ambisonics.channels_for_order(order)
+    out = tmp_path / "a.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+         "-i", f"anullsrc=cl={channels}C:r=48000:d=0.3",
+         "-filter:a", ambisonics.audio_filter(order, 30.0),
+         *_candidate("libopus", channels).args, str(out)],
+        check=True, capture_output=True)
+
+    box = _dops(out)
+    assert box["family"] == 2, "not labelled as ambisonics"
+    assert box["channels"] == channels
+    assert box["mapping"] == list(range(channels)), \
+        "the mapping table must not permute ACN order"
+    assert box["coupled"] == 0, "ambisonic channels are not a stereo pair"
+    assert box["streams"] == channels
+
+
+def test_family_255_would_say_nothing_about_what_the_channels_are():
+    """Why 2 and not the obvious 255. Both encode identically -- same streams,
+    same coupling, same order, same size -- but 255 means "discrete channels,
+    no meaning", leaving Google's SA3D box as the only thing in the file that
+    calls this a soundfield."""
+    assert ambisonics._OPUS_MAPPING_FAMILY == 2
+    args = _candidate("libopus", 4).args
+    assert "255" not in args
+    assert args[args.index("-mapping_family") + 1] == "2"

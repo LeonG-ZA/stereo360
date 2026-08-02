@@ -139,6 +139,33 @@ class Encoder(NamedTuple):
     note: str
 
 
+#: Opus channel mapping family. 2 is the ambisonic one from RFC 8486: ACN
+#: order, SN3D normalisation, (n+1)^2 channels -- a description of ambiX so
+#: exact it could have been written for this.
+#:
+#: RFC 8486 signals it in Ogg's `OpusHead`, and this writes MP4, so the
+#: obvious worry is that it does not carry over. It does. The family is a
+#: property of the Opus stream, not of Ogg, and MP4's `dOps` box
+#: (OpusSpecificBox) mirrors OpusHead field for field -- version, channel
+#: count, pre-skip, sample rate, gain, **ChannelMappingFamily**, then the
+#: mapping table. Verified by reading the box back: family 2, N streams,
+#: 0 coupled, identity mapping, at every order.
+#:
+#: Family 2 and family 255 encode to byte-identical structure here -- same
+#: stream count, same coupling, same size, same channel order -- so the
+#: choice costs nothing and buys self-description. With 255 ("discrete
+#: channels, no meaning") the only thing in the file calling this a
+#: soundfield is Google's SA3D box; with 2 the audio stream says so itself.
+#:
+#: The one caveat worth knowing: the Opus-in-ISOBMFF encapsulation spec
+#: predates RFC 8486 and normatively references RFC 7845, which defines only
+#: families 0 and 1. The field is a passthrough byte and ffmpeg writes it
+#: without complaint, but a player is within its rights to reject a family it
+#: does not recognise, where 255 invites it to hand over the channels
+#: regardless. Untested on a headset either way -- see plans/vr180.md.
+_OPUS_MAPPING_FAMILY = 2
+
+
 def _lossy(name: str, channels: int, extra: List[str] = ()) -> List[str]:
     return ["-c:a", name, *extra,
             "-b:a", f"{channels * _KBPS_PER_CHANNEL}k"]
@@ -161,9 +188,11 @@ def _candidates(channels: int) -> List[Encoder]:
         # friends leave it out.
         Encoder("libfdk_aac", _lossy("libfdk_aac", channels), False, ""),
         # Takes any channel count. Good at these rates, but Opus-in-MP4
-        # ambisonics is off the beaten track.
+        # ambisonics is off the beaten track. See _OPUS_MAPPING_FAMILY for
+        # why 2 rather than the obvious 255.
         Encoder("libopus",
-                _lossy("libopus", channels, ["-mapping_family", "255"]),
+                _lossy("libopus", channels,
+                       ["-mapping_family", str(_OPUS_MAPPING_FAMILY)]),
                 False,
                 "Opus rather than AAC, because this build of ffmpeg has no "
                 "libfdk_aac. Whether headsets play Opus ambisonics in MP4 is "
