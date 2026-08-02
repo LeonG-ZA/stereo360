@@ -79,6 +79,26 @@ DEFAULT_ONNX_MODEL = "models/depth_anything_v2_small.onnx"
 #: Pipeline seconds per frame at 8K, used only to describe the presets above.
 _PIPELINE_SPF = 0.80
 
+#: HEVC's decoded picture limit, in luma samples. Every level carries the same
+#: number -- 6.2 is no more permissive than 5.1 here -- so a frame above it has
+#: nowhere to go: no encoder setting and no player admits it. Worth saying in
+#: the interface because it is the one hard reason to prefer VR180 output at
+#: 8K, and nothing else in the app would reveal it.
+MAX_HEVC_LUMA = 35_651_584
+
+
+def output_size(width: int, height: int, output_mode: str = "360") -> tuple:
+    """Encoded frame size for a `width` x `height` equirect source.
+
+    Mirrors `pipeline.output_geometry`, which this process cannot call: the UI
+    stays out of the core so that drawing a window never imports numpy. The
+    duplication is pinned by a test that runs both over a range of sizes.
+    """
+    if output_mode == "vr180":
+        return (width // 2) // 2 * 2 * 2, height
+    return width, height * 2
+
+
 # CLI defaults. A value equal to its default is left off the command line.
 _DEFAULTS = {
     "strength": 1.0,
@@ -96,6 +116,8 @@ _DEFAULTS = {
     "preset": "medium",
     "codec": "libx264",
     "bitdepth": 8,
+    "outputMode": "360",
+    "yaw": 0.0,
 }
 
 
@@ -148,6 +170,18 @@ def build_argv(
                           ("--preset", "preset"), ("--bitdepth", "bitdepth")):
             if chosen[key] != _DEFAULTS[key]:
                 argv += [flag, str(chosen[key])]
+
+    # Applies to a preview as much as to a render: the whole point of
+    # previewing a VR180 frame is to see which half of the sphere you chose.
+    mode = str(opts.get("outputMode") or _DEFAULTS["outputMode"])
+    if mode != _DEFAULTS["outputMode"]:
+        argv += ["--output-mode", mode]
+        # Only inside the mode that has a direction to choose. The CLI refuses
+        # a yaw in 360 mode rather than ignore it, so emitting one here would
+        # turn a stale control into a failed run.
+        yaw = _num(opts.get("yaw"), 0.0)
+        if abs(yaw) > 1e-9:
+            argv += ["--yaw", f"{yaw:g}"]
 
     if not opts.get("faceSizeAuto", True):
         size = int(_num(opts.get("faceSize"), 0))

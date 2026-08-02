@@ -290,6 +290,41 @@ def stream_durations(path: str) -> Tuple[Optional[float], Optional[float]]:
     return video, audio
 
 
+def write_thumbnail(path: str, out_path: str, frame_index: int = 0,
+                    width: int = 960) -> bool:
+    """One source frame as a small JPEG. False if none could be read.
+
+    For the interface's VR180 direction picker, which has to show what the
+    source looks like *before* any depth work has been done -- the whole point
+    of choosing a direction is to do it before committing to an hour of render.
+
+    Seeks by timestamp rather than counting frames. Landing a frame or two out
+    is invisible at 960 px wide, where counting to frame 9000 would mean
+    decoding 9000 frames to throw them all away.
+    """
+    ffmpeg = _require("ffmpeg")
+    info = probe(path)
+    seconds = frame_index / info.fps if info.fps > 0 else 0.0
+    even = max(2, int(width) // 2 * 2)       # odd widths cannot be 4:2:0 JPEG
+
+    def grab(seek: float) -> bool:
+        cmd = [ffmpeg, "-v", "error", "-y"]
+        if seek > 0:
+            cmd += ["-ss", f"{seek:.3f}"]
+        cmd += ["-i", path, "-frames:v", "1",
+                "-vf", f"scale={even}:-2:flags=area", "-q:v", "4", out_path]
+        subprocess.run(cmd, capture_output=True)
+        return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+
+    if grab(seconds):
+        return True
+    # Asked for a frame past the end -- which the interface can do, since it
+    # lets the frame number run free when the source does not declare a count.
+    # The first frame is the wrong picture but the right shape, and a picker
+    # with a picture in it beats an empty box.
+    return seconds > 0 and grab(0.0)
+
+
 def trim_audio_to_video(path: str, fps: float) -> bool:
     """Cut audio back when it outlasts the picture. True if it did.
 

@@ -251,6 +251,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolution. A full 8K preview is a 7680x7680 image "
                         "that costs seconds to encode for no visible benefit "
                         "(default: 2048)")
+    p.add_argument("--thumbnail", metavar="PATH", default=None,
+                   help="Write source frame --preview-frame to PATH as a "
+                        "small JPEG and stop, converting nothing. This is the "
+                        "picture the interface's VR180 direction picker drags "
+                        "on, so it has to appear before any depth work has "
+                        "been done -- it decodes one frame and touches no "
+                        "model.")
     p.add_argument("--progress-json", action="store_true",
                    help="Emit machine-readable NDJSON events on stdout (one "
                         "JSON object per line: info, warning, start, "
@@ -453,6 +460,15 @@ def main(argv=None) -> int:
         build_parser().error("an input video is required")
     if args.probe_json:
         return _probe_json(args.input)
+    if args.thumbnail:
+        from .ffmpeg_io import write_thumbnail
+
+        if not write_thumbnail(args.input, args.thumbnail,
+                               frame_index=args.preview_frame or 0):
+            print(f"could not read a frame from {args.input}", file=sys.stderr)
+            return 1
+        print(args.thumbnail)
+        return 0
     if not args.output:
         build_parser().error("-o/--output is required")
 

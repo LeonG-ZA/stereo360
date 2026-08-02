@@ -39,6 +39,8 @@ ApplicationWindow {
     // ---- settings state -------------------------------------------------
     property string inputPath: ""
     property string outputPath: ""
+    property string outputMode: "360"
+    property real yaw: 0             // only meaningful in vr180
     property string quality: "standard"
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
@@ -67,7 +69,7 @@ ApplicationWindow {
     function currentOptions() {
         return {
             "input": inputPath, "output": outputPath, "quality": quality,
-            "codec": codec,
+            "codec": codec, "outputMode": outputMode, "yaw": yaw,
             "strength": strength, "gradientLimit": gradientLimit,
             "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
@@ -84,20 +86,50 @@ ApplicationWindow {
     readonly property bool canRun: inputPath !== "" && outputPath !== ""
 
     // Whatever set inputPath -- the dialog or the text field -- ask what it is.
-    onInputPathChanged: app.probeInput(inputPath)
+    onInputPathChanged: { app.probeInput(inputPath); refreshThumbnail() }
 
     Component.onCompleted: app.probeBackends()
 
-    // Encoder availability depends on the output size, which is the source
-    // height doubled -- exactly the dimension the hardware limits bite on.
+    // Encoder availability depends on the output size, and the output mode is
+    // half of what decides that: the same source is 7680x7680 in 360 and
+    // 7680x3840 in VR180, which is exactly where the hardware limits bite.
+    function refreshEncoders() {
+        if (app.sourceInfo && app.sourceInfo.width)
+            app.probeEncoders(app.sourceInfo.width, app.sourceInfo.height,
+                              outputMode)
+    }
+
+    // Only fetched for the mode that has a direction to choose. Requesting it
+    // on the mode change as well as on the file means switching to VR180 finds
+    // the picture already there.
+    function refreshThumbnail() {
+        if (outputMode === "vr180" && inputPath !== "")
+            app.requestThumbnail(inputPath, previewFrame.value)
+    }
+
+    onOutputModeChanged: {
+        refreshEncoders()
+        refreshThumbnail()
+        // A yaw left over from a previous VR180 session would be silently
+        // dropped by the 360 render and silently reappear on switching back.
+        if (outputMode !== "vr180")
+            yaw = 0
+    }
+
     Connections {
         target: app
-        function onSourceInfoChanged() {
-            if (app.sourceInfo && app.sourceInfo.width)
-                app.probeEncoders(app.sourceInfo.width,
-                                  app.sourceInfo.height * 2)
-        }
+        function onSourceInfoChanged() { win.refreshEncoders() }
     }
+
+    readonly property var outputSize:
+        app.sourceInfo && app.sourceInfo.width
+        ? app.outputSize(app.sourceInfo.width, app.sourceInfo.height,
+                         outputMode)
+        : null
+    readonly property string outputSizeText:
+        outputSize ? outputSize[0] + "×" + outputSize[1] : ""
+    readonly property bool outputTooBigForHevc:
+        outputSize ? app.exceedsHevcLimit(outputSize[0], outputSize[1]) : false
 
     function encoderEntry(name) {
         for (var i = 0; i < app.encoders.length; ++i)
@@ -294,7 +326,9 @@ ApplicationWindow {
                 }
                 Text {
                     visible: !Theme.compact   // the title alone carries it
-                    text: "monoscopic 360° → stereoscopic top-bottom"
+                    text: win.outputMode === "vr180"
+                          ? "monoscopic 360° → stereoscopic VR180, side-by-side"
+                          : "monoscopic 360° → stereoscopic 360°, top-bottom"
                     color: Theme.textFaint
                     font.pixelSize: Theme.fontS
                     elide: Text.ElideRight
@@ -374,6 +408,89 @@ ApplicationWindow {
                                     checked: win.spatialAudio
                                     onToggled: win.spatialAudio = checked
                                 }
+                            }
+                        }
+
+                        // ---- output shape --------------------------------
+                        Card {
+                            title: "Output"
+                            subtitle: "what kind of file to make"
+
+                            Row2 {
+                                label: "Format"
+                                hint: win.outputMode === "vr180"
+                                    ? "The middle 180°, eyes side by side. The same pixels spent on half the sphere, so twice the angular resolution — and the layout Apple Vision Pro content uses."
+                                    : "A full sphere per eye, stacked top over bottom. Plays anywhere that plays 360° video."
+                                ComboBox {
+                                    id: modeBox
+                                    Layout.fillWidth: true
+                                    textRole: "label"
+                                    valueRole: "key"
+                                    currentIndex: win.outputMode === "vr180" ? 1 : 0
+                                    model: [
+                                        {key: "360",    label: "360 VR — top-bottom"},
+                                        {key: "vr180",  label: "VR180 — side-by-side"}
+                                    ]
+                                    onActivated: win.outputMode = currentValue
+
+                                    // Same as the quality preset: activating
+                                    // the box severs its own binding, so a
+                                    // later change to the property has to be
+                                    // pushed back in by hand.
+                                    Connections {
+                                        target: win
+                                        function onOutputModeChanged() {
+                                            modeBox.currentIndex =
+                                                win.outputMode === "vr180" ? 1 : 0
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: win.outputSizeText
+                                    color: win.outputTooBigForHevc ? Theme.warn
+                                                                   : Theme.textFaint
+                                    font.pixelSize: Theme.fontS
+                                    font.family: "Consolas, monospace"
+                                }
+                            }
+
+                            // The one hard reason to prefer VR180 at 8K, and
+                            // nothing else in the app would ever reveal it:
+                            // the file encodes fine and then will not play.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: win.outputTooBigForHevc
+                                implicitHeight: hevcNote.implicitHeight + 16
+                                color: "#2a2114"
+                                radius: 6
+                                border.width: 1
+                                border.color: Theme.warn
+
+                                Text {
+                                    id: hevcNote
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    text: win.outputSizeText + " is past HEVC's "
+                                        + "decode limit of 35.6 megapixels — the "
+                                        + "same ceiling at every level, so no "
+                                        + "setting lifts it. It will encode, and "
+                                        + "headsets may refuse to play it. VR180 "
+                                        + "output halves the pixels and keeps the "
+                                        + "detail where you are looking."
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontS
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+
+                            DirectionPicker {
+                                objectName: "directionPicker"
+                                Layout.fillWidth: true
+                                visible: win.outputMode === "vr180"
+                                source: app.thumbnailSource
+                                loading: win.inputPath !== ""
+                                yaw: win.yaw
+                                onYawMoved: (degrees) => win.yaw = degrees
                             }
                         }
 
@@ -866,7 +983,10 @@ ApplicationWindow {
                     // than the panel. The output is square and the panel is
                     // wide, so PreserveAspectFit leaves broad letterbox bars
                     // — labels pinned to the panel would sit in empty space
-                    // beside the picture they are naming.
+                    // beside the picture they are naming. They also follow
+                    // the packing: VR180 puts the eyes side by side, and a
+                    // label reading "right eye" over the left one would be
+                    // worse than no label at all.
                     readonly property real paintedW: previewImage.paintedWidth
                     readonly property real paintedH: previewImage.paintedHeight
                     readonly property real paintedX:
@@ -877,9 +997,14 @@ ApplicationWindow {
                     Repeater {
                         model: parent.hasPreview ? ["Left eye", "Right eye"] : []
                         Rectangle {
+                            readonly property bool sideBySide:
+                                win.outputMode === "vr180"
                             x: previewPanel.paintedX + 10
+                               + (sideBySide
+                                  ? index * previewPanel.paintedW / 2 : 0)
                             y: previewPanel.paintedY + 10
-                               + index * previewPanel.paintedH / 2
+                               + (sideBySide
+                                  ? 0 : index * previewPanel.paintedH / 2)
                             width: tag.implicitWidth + 14
                             height: 22
                             radius: 5
@@ -919,6 +1044,9 @@ ApplicationWindow {
                             : 999999
                         stepSize: 15
                         value: 0
+                        // The direction picker drags on this frame, so it has
+                        // to follow the same one the preview would render.
+                        onValueModified: win.refreshThumbnail()
                     }
                     Text {
                         text: win.sourceSummary
