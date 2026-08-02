@@ -144,7 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "Media Metadata Injector. The source audio must "
                         "actually be ambiX: 4, 9 or 16 channels for first, "
                         "second or third order. Spherical and stereoscopic "
-                        "top-bottom are always written and need no flag.")
+                        "top-bottom are always written and need no flag. Also "
+                        "what lets --yaw turn the soundfield with the view: "
+                        "without this flag the audio is copied through and "
+                        "every sound stays at its original bearing.")
     p.add_argument("--split-baseline", action="store_true",
                    help="Warp BOTH eyes by half the baseline in opposite "
                         "directions instead of leaving the left eye untouched. "
@@ -422,6 +425,7 @@ def _probe_json(path: str) -> int:
         "width": info.width, "height": info.height, "fps": info.fps,
         "frame_count": info.frame_count, "duration": info.duration,
         "has_audio": info.has_audio, "pix_fmt": info.pix_fmt,
+        "audio_channels": info.audio_channels,
         "chroma": info.chroma, "color_range": info.color.range,
         "color_space": info.color.space,
     }))

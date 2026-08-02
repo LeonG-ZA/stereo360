@@ -13,7 +13,7 @@ from typing import Callable, NamedTuple, Optional
 
 import numpy as np
 
-from . import ffmpeg_io, projection, spherical, warp
+from . import ambisonics, ffmpeg_io, projection, spherical, warp
 from .depth.base import DepthBackend
 from .events import Cancelled, Reporter
 
@@ -448,6 +448,68 @@ DEFAULT_OUTPUT_MODE = "360"
 #: Degrees of longitude a VR180 frame covers. Not a knob: the format is 180,
 #: and the number appears here so the crop and the metadata cannot disagree.
 VR180_FOV = 180.0
+
+
+def plan_audio_rotation(info, yaw: float, spatial_audio: bool,
+                        reporter: Reporter):
+    """(audio filter, encoder args) for turning the soundfield with the view.
+
+    A yaw moves the picture and leaves the sound where it was. In 360 that
+    would be merely wrong; in a 180 field it is worse, because a source that
+    ought to be visible in front can end up behind the viewer, in the
+    hemisphere the file no longer contains.
+
+    Only ambiX can be rotated, and only when the file says it is ambiX --
+    hence `--spatial-audio`. Plain stereo has no soundfield to turn, and
+    rotating a head-locked music bed would be wrong anyway.
+
+    Returns (None, None) whenever there is nothing to do, so the ordinary path
+    keeps copying audio through untouched.
+    """
+    if not yaw or not info.has_audio:
+        return None, None
+
+    channels = info.audio_channels
+    order = ambisonics.order_for_channels(channels)
+
+    if not spatial_audio:
+        # Not asked to treat it as ambisonic. Say so only when the channel
+        # count suggests they meant to, which is the case where a flag was
+        # forgotten rather than deliberately left off.
+        if order is not None:
+            reporter.warning(
+                f"The view is turned {yaw:+g} degrees and the audio has "
+                f"{channels} channels, which is what order-{order} ambiX looks "
+                f"like -- but without --spatial-audio it is copied through "
+                f"unrotated, leaving every sound {abs(yaw):g} degrees out of "
+                f"place. Add --spatial-audio to turn the soundfield with the "
+                f"view.",
+                yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
+    if order is None:
+        # --spatial-audio with a channel count that is not ambiX. The metadata
+        # step refuses this too, but after the render rather than before it.
+        reporter.warning(
+            f"--spatial-audio was given but the audio has "
+            f"{channels if channels else 'no'} channel(s), which is not ambiX "
+            f"(4, 9 or 16). Nothing can be rotated, so the {yaw:+g} degree "
+            f"turn will leave the sound where it was.",
+            yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
+    args = ambisonics.encode_args(channels)
+    swap = ambisonics.needs_opus(channels)
+    reporter.info(
+        f"Rotating the order-{order} soundfield {yaw:+g} degrees to match the "
+        f"view."
+        + (f" Re-encoding to Opus: ffmpeg's AAC encoder cannot write "
+           f"{channels} channels. Whether headsets play Opus ambisonics in "
+           f"MP4 is untested." if swap else
+           " Costs one AAC generation; the picture is unaffected."),
+        yaw=yaw, ambisonic_order=order, audio_channels=channels,
+        ambisonic_rotation=True)
+    return ambisonics.audio_filter(order, yaw), args
 
 
 def check_yaw(output_mode: str, yaw: float) -> None:
@@ -904,22 +966,14 @@ def convert(
         reporter.info(
             f"Output: VR180, {out_w}x{out_h} side-by-side, {aim}.",
             output_mode=output_mode, width=out_w, height=out_h, yaw=yaw)
-    if yaw and spatial_audio:
-        # The picture turned; the soundfield did not. Loud rather than silent,
-        # because a listener has no way to tell it is happening.
-        reporter.warning(
-            f"The view is turned {yaw:+g} degrees but the ambisonic soundfield "
-            f"is NOT rotated to match, so every sound will be {abs(yaw):g} "
-            f"degrees out of place -- and in a 180 field a source that should "
-            f"be visible in front can end up behind you. Rotating ambiX is not "
-            f"implemented yet; use --yaw 0, or drop --spatial-audio and treat "
-            f"the track as plain audio.",
-            yaw=yaw, ambisonic_rotation=False)
+    audio_filter, audio_args = plan_audio_rotation(
+        info, yaw=yaw, spatial_audio=spatial_audio, reporter=reporter)
 
     encoder = ffmpeg_io.VideoEncoder(
         output_path, width=out_w, height=out_h, fps=info.fps,
         audio_source=audio_source, codec=codec, crf=crf, preset=preset,
         bitdepth=bitdepth, color=info.color, chroma=chroma,
+        audio_filter=audio_filter, audio_args=audio_args,
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)

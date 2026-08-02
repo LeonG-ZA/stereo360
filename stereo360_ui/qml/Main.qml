@@ -131,6 +131,14 @@ ApplicationWindow {
     readonly property bool outputExceedsLevelCap:
         outputSize ? app.exceedsLevelLimit(outputSize[0], outputSize[1])
                    : false
+    // 4, 9 or 16 channels is what ambiX looks like. Only a hint -- the file
+    // does not say, which is why --spatial-audio exists at all -- but a hint
+    // worth giving, because the cost of forgetting it is every sound at the
+    // wrong bearing and nothing to hear that says so.
+    readonly property bool sourceIsAmbisonic: {
+        var n = app.sourceInfo ? app.sourceInfo.audio_channels : 0
+        return n === 4 || n === 9 || n === 16
+    }
     readonly property string outputMegapixels:
         outputSize ? (outputSize[0] * outputSize[1] / 1e6).toFixed(1) : ""
 
@@ -406,7 +414,13 @@ ApplicationWindow {
                             // before the render, not discovered after.
                             Row2 {
                                 label: "Spatial audio"
-                                hint: "Tick only if the source audio really is ambiX: 4, 9 or 16 channels. 360° and top-bottom are always written and need no setting."
+                                hint: win.spatialAudio && win.outputMode === "vr180" && win.yaw !== 0
+                                    ? "The soundfield will be turned " + win.yaw.toFixed(0) + "° to match the view, so sounds stay where you see them. Costs one AAC generation; the picture is unaffected."
+                                    : win.outputMode === "vr180" && win.yaw !== 0
+                                      ? (win.sourceIsAmbisonic
+                                         ? "This source has " + app.sourceInfo.audio_channels + " audio channels, which is what ambiX looks like. Tick this and the soundfield turns with the view; leave it and every sound stays " + Math.abs(win.yaw).toFixed(0) + "° out of place."
+                                         : "Tick this if the source audio really is ambiX: 4, 9 or 16 channels. Without it the view turns and the sound does not, leaving every source " + Math.abs(win.yaw).toFixed(0) + "° out of place.")
+                                      : "Tick only if the source audio really is ambiX: 4, 9 or 16 channels. 360° and top-bottom are always written and need no setting."
                                 Switch {
                                     checked: win.spatialAudio
                                     onToggled: win.spatialAudio = checked

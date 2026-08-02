@@ -157,6 +157,9 @@ class VideoInfo:
     #: What `st3d` says the frame contains: "2D", "side by side",
     #: "top and bottom", or None when the file declares nothing.
     stereo_layout: Optional[str] = None
+    #: Channels in the first audio stream, or None when there is no audio.
+    #: 4, 9 or 16 is what an ambiX track looks like -- see stereo360.ambisonics.
+    audio_channels: Optional[int] = None
 
     @property
     def chroma(self) -> Optional[str]:
@@ -235,7 +238,13 @@ def probe(path: str) -> VideoInfo:
                     stereo_layout = entry.get("type")
         except (ValueError, KeyError, IndexError, TypeError):
             pass
-    has_audio = any(s["codec_type"] == "audio" for s in data["streams"])
+    astream = next((s for s in data["streams"]
+                    if s["codec_type"] == "audio"), None)
+    has_audio = astream is not None
+    try:
+        audio_channels = int(astream["channels"]) if astream else None
+    except (KeyError, TypeError, ValueError):
+        audio_channels = None
 
     num, den = vstream["avg_frame_rate"].split("/")
     fps = float(num) / float(den) if float(den) else 0.0
@@ -268,6 +277,7 @@ def probe(path: str) -> VideoInfo:
         bound_left=bound_left,
         bound_right=bound_right,
         stereo_layout=stereo_layout,
+        audio_channels=audio_channels,
     )
 
 
@@ -568,6 +578,8 @@ class VideoEncoder:
         bitdepth: int = 8,
         color: Optional[ColorTags] = None,
         chroma: str = "4:2:0",
+        audio_filter: Optional[str] = None,
+        audio_args: Optional[List[str]] = None,
     ) -> None:
         ffmpeg = _require("ffmpeg")
         self._out_path = out_path
@@ -585,7 +597,16 @@ class VideoEncoder:
         cmd += ["-map", "0:v"]
         if audio_source:
             # Copy audio only if the source actually has an audio stream.
-            cmd += ["-map", "1:a?", "-c:a", "copy"]
+            cmd += ["-map", "1:a?"]
+            if audio_filter:
+                # Rotating an ambisonic soundfield is the only thing that puts
+                # a filter here, and it forces a re-encode: there is no way to
+                # remix channels without decoding them. Costs one generation,
+                # which is why the default path stays a straight copy.
+                cmd += ["-filter:a", audio_filter]
+                cmd += list(audio_args or ["-c:a", "aac"])
+            else:
+                cmd += ["-c:a", "copy"]
         if bitdepth not in (8, 10):
             raise ValueError(f"Unsupported bit depth: {bitdepth}")
         if chroma not in supported_chroma(codec):
