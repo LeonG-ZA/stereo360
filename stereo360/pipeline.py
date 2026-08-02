@@ -633,6 +633,90 @@ class SourceFrame(NamedTuple):
     faces: Optional[dict] = None
 
 
+#: A frame this close to square is almost certainly a half-equirect. A 360
+#: equirect is 2:1; nothing else normal arrives at 1:1.
+_SQUARE_RATIO_TOLERANCE = 0.15
+
+#: Blank line between paragraphs of a long refusal message.
+_PARAGRAPH_BREAK = chr(10) * 2
+
+#: Below this the file is not covering the whole sphere, whatever it says.
+#: Slack for the rounding in the `equi` bounds, which are integers.
+_PARTIAL_SPHERE_BELOW = 359.0
+
+
+def check_input_is_monoscopic_360(info, requested: str,
+                                  reporter: Reporter) -> None:
+    """Refuse input this tool cannot turn into stereo, and say what to do.
+
+    The tool converts a monoscopic 360 sphere. Two kinds of input look
+    plausible and are not:
+
+    *Already stereo.* A VR180 or 3D 360 file has two views packed into the
+    frame. Treated as one picture it would be converted into nonsense, and the
+    user already has the thing they came here for.
+
+    *Already 180.* A half-equirect has no content beyond its edge, which is
+    exactly what the warp needs to synthesise the second eye cleanly. Cropping
+    a full sphere to 180 gives a better result than processing a 180 source
+    would, so the answer is to bring the original rather than to accept this
+    and do a worse job of it. See plans/vr180.md.
+
+    Detection is metadata first, then the aspect ratio for untagged files. The
+    ratio only works because the input is meant to be monoscopic: a
+    side-by-side 180 is 2:1, the same shape as a full equirect, so it would be
+    ambiguous otherwise. That is why the stereo check runs first.
+
+    Not detected: dual fisheye, which is 2:1 with two circular images and would
+    need a frame decoded to recognise. It gets no message and produces poor
+    output, which is a known gap.
+    """
+    if info.is_stereo:
+        raise ValueError(
+            f"This file already contains two views ({info.stereo_layout}), so "
+            f"it is already 3D. stereo360 turns *monoscopic* footage into "
+            f"stereo; there is nothing here for it to add.")
+
+    fov = info.horizontal_fov
+    declared_partial = fov is not None and fov < _PARTIAL_SPHERE_BELOW
+    ratio = info.width / max(info.height, 1)
+    looks_square = (info.projection is None
+                    and abs(ratio - 1.0) < _SQUARE_RATIO_TOLERANCE)
+
+    if not (declared_partial or looks_square):
+        return
+
+    why = (f"it declares a {fov:.0f}-degree field of view" if declared_partial
+           else f"it is {info.width}x{info.height}, the 1:1 shape of a "
+                f"half-equirect rather than the 2:1 of a full sphere")
+
+    if requested != "auto":
+        # An explicit override is how a mistagged file gets through, so it has
+        # to win. Say what is being overridden rather than going quiet.
+        reporter.warning(
+            f"This looks like 180-degree footage ({why}), but "
+            f"--input-projection {requested!r} was given; continuing as "
+            f"{requested!r}.",
+            width=info.width, height=info.height, horizontal_fov=fov)
+        return
+
+    raise ValueError(_PARAGRAPH_BREAK.join([
+        f"This looks like 180-degree footage: {why}. stereo360 needs the "
+        f"original 360 video.",
+
+        "That is not an arbitrary restriction. Converting a full sphere and "
+        "cropping to 180 gives a *better* result than processing a 180 source "
+        "would: the depth stage sees whole cubemap faces instead of half-empty "
+        "ones, and the warp has content beyond the edge of the field to draw "
+        "the second eye from.",
+
+        "If you want a VR180 file, feed in the 360 original with "
+        "--output-mode vr180. If this file really is a full sphere and the tag "
+        "or shape is misleading, override with --input-projection "
+        "equirectangular.",
+    ]))
+
+
 def resolve_projection(info, requested: str, reporter: Reporter) -> str:
     """What projection to treat the input as, and why.
 
@@ -795,7 +879,9 @@ def convert(
     # works in equirect, so cubemap input is converted once as it is decoded --
     # but its faces are carried along, because the depth stage wants faces and
     # rebuilding them from the reconstruction would resample twice for nothing.
-    source_projection = resolve_projection(info, input_projection, reporter)
+    check_input_is_monoscopic_360(info, input_projection, reporter)
+    source_projection = resolve_projection(info, input_projection,
+                                           reporter)
     face_size, w, h = source_geometry(info, source_projection, face_size,
                                       reporter)
 
@@ -966,7 +1052,9 @@ def preview_frame(
 
     check_yaw(output_mode, yaw)
     info = ffmpeg_io.probe(input_path)
-    source_projection = resolve_projection(info, input_projection, reporter)
+    check_input_is_monoscopic_360(info, input_projection, reporter)
+    source_projection = resolve_projection(info, input_projection,
+                                           reporter)
     # A preview is for judging settings, so the same caveat applies: what it
     # shows has already been through the 8-bit decode.
     warn_if_source_is_deeper_than_8_bit(info, 8, reporter)

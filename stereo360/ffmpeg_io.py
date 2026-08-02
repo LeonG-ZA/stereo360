@@ -150,6 +150,13 @@ class VideoInfo:
     projection: Optional[str] = None
     #: Pixels padded onto each cube face edge, from the cbmp box.
     cubemap_padding: int = 0
+    #: Pixels cropped from a notional full sphere either side, from the `equi`
+    #: box. Zero on a full sphere, and on anything that declares nothing.
+    bound_left: int = 0
+    bound_right: int = 0
+    #: What `st3d` says the frame contains: "2D", "side by side",
+    #: "top and bottom", or None when the file declares nothing.
+    stereo_layout: Optional[str] = None
 
     @property
     def chroma(self) -> Optional[str]:
@@ -160,6 +167,27 @@ class VideoInfo:
     def bit_depth(self) -> Optional[int]:
         """Bits per component in the source, or None if undetermined."""
         return bit_depth_from_pix_fmt(self.pix_fmt)
+
+    @property
+    def horizontal_fov(self) -> Optional[float]:
+        """Degrees of longitude the frame covers, if the file says.
+
+        The `equi` bounds are pixels cropped from a full sphere, so the frame
+        plus the two bounds is the sphere. Returns None when nothing is
+        declared -- which is the common case, and means "assume 360" rather
+        than "not spherical".
+        """
+        if self.projection is None:
+            return None
+        total = self.width + self.bound_left + self.bound_right
+        if total <= 0:
+            return None
+        return 360.0 * self.width / total
+
+    @property
+    def is_stereo(self) -> bool:
+        """True only when the file positively declares two views."""
+        return bool(self.stereo_layout) and self.stereo_layout != "2D"
 
 
 def _require(tool: str) -> str:
@@ -184,6 +212,8 @@ def probe(path: str) -> VideoInfo:
     # separately because -show_streams alone does not include it.
     projection = None
     padding = 0
+    bound_left = bound_right = 0
+    stereo_layout = None
     side = subprocess.run(
         [ffprobe, "-v", "quiet", "-print_format", "json", "-select_streams",
          "v:0", "-show_entries", "stream_side_data", path],
@@ -192,9 +222,17 @@ def probe(path: str) -> VideoInfo:
         try:
             streams = json.loads(side.stdout).get("streams") or [{}]
             for entry in streams[0].get("side_data_list", []):
-                if entry.get("side_data_type") == "Spherical Mapping":
+                kind = entry.get("side_data_type")
+                if kind == "Spherical Mapping":
                     projection = entry.get("projection")
                     padding = int(entry.get("padding") or 0)
+                    # Pixels cropped from a notional full sphere. Present only
+                    # on a partial projection, which ffprobe calls "tiled
+                    # equirectangular".
+                    bound_left = int(entry.get("bound_left") or 0)
+                    bound_right = int(entry.get("bound_right") or 0)
+                elif kind == "Stereo 3D":
+                    stereo_layout = entry.get("type")
         except (ValueError, KeyError, IndexError, TypeError):
             pass
     has_audio = any(s["codec_type"] == "audio" for s in data["streams"])
@@ -227,6 +265,9 @@ def probe(path: str) -> VideoInfo:
         pix_fmt=vstream.get("pix_fmt"),
         projection=projection,
         cubemap_padding=padding,
+        bound_left=bound_left,
+        bound_right=bound_right,
+        stereo_layout=stereo_layout,
     )
 
 
