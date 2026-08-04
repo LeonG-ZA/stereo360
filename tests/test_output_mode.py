@@ -250,3 +250,55 @@ def test_the_cli_exposes_yaw_and_passes_it_to_both():
     assert parser.parse_args(["i.mp4", "-o", "o.mp4",
                               "--yaw", "-37.5"]).yaw == -37.5
     assert inspect_source(cli._run).count("yaw=args.yaw") == 2
+
+
+# ------------------------------------------------------------ output width
+
+def test_no_output_width_leaves_the_geometry_alone():
+    for mode in pipeline.OUTPUT_MODES:
+        assert (pipeline.output_geometry(7680, 3840, mode, None)
+                == pipeline.output_geometry(7680, 3840, mode))
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("360", (5760, 5760)),
+    ("vr180", (5760, 2880)),
+])
+def test_output_width_sizes_both_modes(mode, expected):
+    """One number sizes both packings: it is the encoded frame's width, which
+    for either mode is also the width of a full-sphere eye."""
+    assert pipeline.output_geometry(7680, 3840, mode, 5760) == expected
+
+
+def test_5760_is_what_brings_360_output_under_the_cap():
+    """The reason the option exists. 7680x7680 loads and shows nothing on a
+    Quest 3 in both H.264 and HEVC; 5760x5760 plays, as does 8K VR180."""
+    over = pipeline.output_geometry(7680, 3840, "360")
+    under = pipeline.output_geometry(7680, 3840, "360", 5760)
+    assert over[0] * over[1] > 35_651_584
+    assert under[0] * under[1] <= 35_651_584
+    # And 5970 is the largest square that fits, so 5760 is the standard size
+    # just below it rather than an arbitrary pick.
+    assert 5970 * 5970 <= 35_651_584 < 5972 * 5972
+
+
+@pytest.mark.parametrize("width", [7680, 5760, 4096, 3840, 2880, 1920, 1234])
+@pytest.mark.parametrize("mode", ["360", "vr180"])
+def test_every_output_width_gives_even_dimensions(mode, width):
+    """Odd dimensions are rejected by every yuv420p encoder, and a rounded
+    scale factor is exactly where an odd number would come from."""
+    w, h = pipeline.output_geometry(7680, 3840, mode, width)
+    assert w % 2 == 0 and h % 2 == 0, (mode, width, w, h)
+
+
+def test_scaling_up_is_refused():
+    """It would invent detail. Better to say so than to produce a soft file
+    that looks like it has more resolution than it does."""
+    with pytest.raises(ValueError, match="larger than"):
+        pipeline.scaled_eye_size(3840, 1920, 7680)
+
+
+def test_the_source_width_itself_is_not_a_resize():
+    """Passing the size it already is must not put a resize in the path."""
+    assert pipeline.scaled_eye_size(7680, 3840, 7680) == (7680, 3840)
+    assert pipeline.scaled_eye_size(7680, 3840, None) == (7680, 3840)

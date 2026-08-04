@@ -776,3 +776,82 @@ def test_the_cap_is_not_an_hevc_number():
     handed a 7680x7680 frame: "frame MB size (480x480) > level limit (139264)".
     """
     assert options.MAX_LEVEL_LUMA == 139_264 * 256
+
+
+# ------------------------------------------------------------ output width
+
+
+def test_the_source_width_emits_no_flag():
+    """Full size is the default and the commonest case; the flag appears only
+    when a size was actually chosen."""
+    assert "--output-width" not in options.build_argv(
+        dict(BASE, sourceWidth=7680, outputWidth=7680))
+    assert "--output-width" not in options.build_argv(
+        dict(BASE, sourceWidth=7680))
+
+
+def test_a_chosen_width_is_emitted():
+    argv = options.build_argv(dict(BASE, sourceWidth=7680, outputWidth=5760))
+    assert argv[argv.index("--output-width") + 1] == "5760"
+
+
+def test_the_width_travels_with_the_mode():
+    argv = options.build_argv(dict(BASE, sourceWidth=7680, outputWidth=5760,
+                                   outputMode="vr180"))
+    assert argv[argv.index("--output-mode") + 1] == "vr180"
+    assert argv[argv.index("--output-width") + 1] == "5760"
+
+
+@pytest.mark.parametrize("mode", ["360", "vr180"])
+@pytest.mark.parametrize("width", [7680, 5760, 4096, 3840, 1920])
+def test_the_ui_and_the_core_agree_on_the_scaled_size(mode, width):
+    """Same duplication as `output_size`, same reason, same risk: this number
+    decides which encoders get offered."""
+    from stereo360 import pipeline
+
+    assert (options.output_size(7680, 3840, mode, width)
+            == pipeline.output_geometry(7680, 3840, mode, width))
+
+
+def test_an_8k_source_is_offered_a_size_that_plays():
+    """The whole point. 7680x7680 is over the decode cap -- black on a Quest 3
+    in both codecs -- so there has to be something else on the list."""
+    choices = options.resolution_choices(7680, 3840, "360")
+    assert choices[0]["native"] and not choices[0]["fits"]
+    playable = [c for c in choices if c["fits"]]
+    assert playable and playable[0]["width"] == 5760
+    assert playable[0]["label"] == "5760×5760"
+
+
+def test_a_4k_source_has_nothing_to_warn_about():
+    """The restriction appears exactly when it applies, and a 4K project never
+    goes near it."""
+    for c in options.resolution_choices(3840, 1920, "360"):
+        assert c["fits"], c
+
+
+def test_vr180_is_under_the_cap_at_full_width():
+    choices = options.resolution_choices(7680, 3840, "vr180")
+    assert choices[0]["native"] and choices[0]["fits"]
+    assert choices[0]["label"] == "7680×3840"
+
+
+def test_choices_are_largest_first_and_never_upscale():
+    """The CLI refuses to scale up, so offering it would be offering a crash."""
+    choices = options.resolution_choices(5760, 2880, "360")
+    widths = [c["width"] for c in choices]
+    assert widths == sorted(widths, reverse=True)
+    assert max(widths) == 5760
+
+
+def test_the_probe_is_told_the_size_actually_being_encoded(qapp):
+    """hevc_amf takes 5760x5760 and refuses 7680x7680, so a list built for the
+    full size would offer an encoder that cannot run the chosen one."""
+    ctrl = Controller()
+    calls = []
+    ctrl.encodersChanged.connect(lambda: calls.append(1))
+    ctrl.probeEncoders(320, 240, "360", 0)
+    assert _pump(qapp, lambda: bool(calls), timeout=300)
+    ctrl.probeEncoders(320, 240, "360", 160)
+    assert _pump(qapp, lambda: len(calls) > 1, timeout=300), \
+        "a different output width is a different probe"

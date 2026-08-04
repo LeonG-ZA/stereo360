@@ -152,18 +152,26 @@ class Controller(QObject):
             ["-m", "stereo360", "--probe-backends", "-"])
         self._backend_probe.start()
 
+    @Slot(int, int, str, int, result="QVariantList")
+    def outputSize(self, width: int, height: int, mode: str,
+                   output_width: int = 0) -> list:
+        """[w, h] of the encoded frame for this source, mode and chosen size."""
+        return list(options.output_size(int(width), int(height), str(mode),
+                                        int(output_width) or None))
+
     @Slot(int, int, str, result="QVariantList")
-    def outputSize(self, width: int, height: int, mode: str) -> list:
-        """[w, h] of the encoded frame for this source and output mode."""
-        return list(options.output_size(int(width), int(height), str(mode)))
+    def resolutionChoices(self, width: int, height: int, mode: str) -> list:
+        """Output sizes worth offering for this source, largest first."""
+        return options.resolution_choices(int(width), int(height), str(mode))
 
     @Slot(int, int, result=bool)
     def exceedsLevelLimit(self, width: int, height: int) -> bool:
         """Whether a frame this size is past the top level of both codecs."""
         return int(width) * int(height) > options.MAX_LEVEL_LUMA
 
-    @Slot(int, int, str)
-    def probeEncoders(self, width: int, height: int, mode: str) -> None:
+    @Slot(int, int, str, int)
+    def probeEncoders(self, width: int, height: int, mode: str,
+                      output_width: int = 0) -> None:
         """Which encoders manage this output on this machine.
 
         Takes the *source* size and works out the output itself, because the
@@ -175,7 +183,8 @@ class Controller(QObject):
         3840x3840 and refuses 7680x7680, so a list built once for a 4K project
         would offer an encoder that cannot touch an 8K one.
         """
-        size = options.output_size(int(width), int(height), str(mode))
+        size = options.output_size(int(width), int(height), str(mode),
+                                   int(output_width) or None)
         if size == self._encoder_size or min(size) <= 0:
             return          # already known; probing costs a few seconds
         if self._encoder_probe.state() != QProcess.NotRunning:

@@ -534,15 +534,53 @@ def check_yaw(output_mode: str, yaw: float) -> None:
             f"to choose. Yaw applies to vr180 output only.")
 
 
-def output_geometry(w: int, h: int, output_mode: str) -> tuple:
+def scaled_eye_size(w: int, h: int,
+                    output_width: Optional[int] = None) -> tuple:
+    """(width, height) each eye is resized to before it is packed.
+
+    `output_width` is the width of the *encoded frame*, which for both modes
+    is also the width of a full-sphere eye -- 360 stacks two of them, VR180
+    crops each to half and puts them side by side. So one number sizes both.
+
+    None keeps the source size, which is the default and the only behaviour
+    this had before.
+    """
+    if not output_width or output_width == w:
+        return w, h
+    if output_width > w:
+        raise ValueError(
+            f"--output-width {output_width} is larger than the {w}-wide "
+            f"source. Scaling up invents detail that is not there; render at "
+            f"the source width and let the player scale if you need to.")
+    if output_width < 2:
+        raise ValueError(f"--output-width {output_width} is not a usable size")
+    scale = output_width / w
+    return (int(round(w * scale)) // 2 * 2,
+            int(round(h * scale)) // 2 * 2)
+
+
+def output_geometry(w: int, h: int, output_mode: str,
+                    output_width: Optional[int] = None) -> tuple:
     """(width, height) of the encoded frame for a `w` x `h` equirect source.
 
     360 stacks two full equirects vertically. VR180 halves each eye
     horizontally and puts them side by side, so an 8K source gives 7680x3840
     either way round — the same pixel count, spent on half the sphere at twice
     the angular resolution.
+
+    `output_width` delivers a smaller frame than the source implies. It is not
+    a quality setting in the usual sense: depth and warping still run at the
+    source resolution and only the finished eyes are resized, so the result is
+    supersampled rather than rendered small. It costs the same time as the
+    full-size render.
+
+    The reason it exists is that 8K 360 output is 7680x7680, which is past
+    what any HEVC or H.264 level decodes -- confirmed black on a Quest 3, in
+    both codecs -- while remaining the correct master for YouTube, which
+    transcodes on ingest. 5760x5760 is the largest square that fits.
     """
     _check_output_mode(output_mode)
+    w, h = scaled_eye_size(w, h, output_width)
     if output_mode == "vr180":
         half = (w // 2) // 2 * 2      # even, or the encoder rejects it
         return half * 2, h
@@ -875,12 +913,15 @@ class _Sink:
     def __init__(self, encoder, reporter: Reporter,
                  cancel: Optional[Callable[[], bool]],
                  output_mode: str = DEFAULT_OUTPUT_MODE,
-                 yaw: float = 0.0) -> None:
+                 yaw: float = 0.0,
+                 eye_size: Optional[tuple] = None) -> None:
         self._encoder = encoder
         self._reporter = reporter
         self._cancel = cancel
         self._output_mode = output_mode
         self._yaw = yaw
+        #: (w, h) to resize each eye to, or None to leave it alone.
+        self._eye_size = eye_size
         self.written = 0
 
     def check(self) -> None:
@@ -895,6 +936,19 @@ class _Sink:
 
     def write(self, left: np.ndarray, right: np.ndarray) -> None:
         self.check()
+        if self._eye_size is not None:
+            # Each eye separately, and *before* packing. Resizing the stacked
+            # frame instead would let the resampling kernel reach across the
+            # boundary between the two eyes -- mixing the bottom of the left
+            # eye into the top of the right one, or across the seam between
+            # them in VR180. Scaling first also means the VR180 crop is
+            # computed on the width it will actually have.
+            import cv2
+
+            left = cv2.resize(left, self._eye_size,
+                              interpolation=cv2.INTER_AREA)
+            right = cv2.resize(right, self._eye_size,
+                               interpolation=cv2.INTER_AREA)
         self._encoder.write(
             stack_eyes(left, right, self._output_mode, self._yaw))
         self.written += 1
@@ -930,6 +984,7 @@ def convert(
     face_overlap: float = projection.FACE_OVERLAP,
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
+    output_width: Optional[int] = None,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> ConvertResult:
@@ -967,7 +1022,15 @@ def convert(
 
     _check_output_mode(output_mode)
     check_yaw(output_mode, yaw)
-    out_w, out_h = output_geometry(w, h, output_mode)
+    eye_w, eye_h = scaled_eye_size(w, h, output_width)
+    out_w, out_h = output_geometry(w, h, output_mode, output_width)
+    eye_size = (eye_w, eye_h) if (eye_w, eye_h) != (w, h) else None
+    if eye_size is not None:
+        reporter.info(
+            f"Delivering {out_w}x{out_h}: each eye is rendered at {w}x{h} and "
+            f"resized to {eye_w}x{eye_h} afterwards, so the result is "
+            f"supersampled rather than rendered small.",
+            output_width=output_width, source_width=w)
     if output_mode != DEFAULT_OUTPUT_MODE:
         aim = (f"centred {yaw:+g} degrees from the source's forward direction"
                if yaw else "centred on the source's forward direction")
@@ -986,7 +1049,7 @@ def convert(
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)
-    sink = _Sink(encoder, reporter, cancel, output_mode, yaw)
+    sink = _Sink(encoder, reporter, cancel, output_mode, yaw, eye_size)
     cancelled = False
 
     reporter.start(total, width=out_w, height=out_h, fps=info.fps,

@@ -194,6 +194,19 @@ def build_parser() -> argparse.ArgumentParser:
                         "nothing is resampled. Only valid with --output-mode "
                         "vr180, since 360 output keeps the whole sphere and "
                         "has no direction to choose. (default: 0)")
+    p.add_argument("--output-width", type=int, default=None, metavar="W",
+                   help="Deliver a frame W pixels wide instead of whatever "
+                        "the source implies: 360 output becomes WxW, vr180 "
+                        "Wx(W/2). Depth and warping still run at the source "
+                        "resolution and only the finished eyes are resized, "
+                        "so the result is supersampled rather than rendered "
+                        "small -- and costs the same time as the full-size "
+                        "render. The reason it exists: 8K 360 output is "
+                        "7680x7680, which no HEVC or H.264 level decodes "
+                        "(confirmed black on a Quest 3 in both codecs) while "
+                        "still being the right master for YouTube, which "
+                        "transcodes on ingest. 5760 is the largest square "
+                        "that plays. Cannot scale up.")
     p.add_argument("--face-overlap", type=float, default=None, metavar="F",
                    help="How far each depth face reaches past its nominal 90 "
                         "degrees, in tangent units (0.15 = 98 degrees per "
@@ -422,6 +435,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         face_overlap=face_overlap,
         output_mode=args.output_mode,
         yaw=args.yaw,
+        output_width=args.output_width,
         reporter=reporter,
         cancel=cancel,
     )

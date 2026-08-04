@@ -41,6 +41,7 @@ ApplicationWindow {
     property string outputPath: ""
     property string outputMode: "360"
     property real yaw: 0             // only meaningful in vr180
+    property int outputWidth: 0      // 0 = whatever the source implies
     property string quality: "standard"
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
@@ -70,6 +71,7 @@ ApplicationWindow {
         return {
             "input": inputPath, "output": outputPath, "quality": quality,
             "codec": codec, "outputMode": outputMode, "yaw": yaw,
+            "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
             "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
@@ -86,7 +88,13 @@ ApplicationWindow {
     readonly property bool canRun: inputPath !== "" && outputPath !== ""
 
     // Whatever set inputPath -- the dialog or the text field -- ask what it is.
-    onInputPathChanged: { app.probeInput(inputPath); refreshThumbnail() }
+    onInputPathChanged: {
+        app.probeInput(inputPath)
+        refreshThumbnail()
+        // A width picked for an 8K file is not a legal choice for a 4K one,
+        // and the CLI refuses to scale up rather than quietly obliging.
+        outputWidth = 0
+    }
 
     Component.onCompleted: app.probeBackends()
 
@@ -94,9 +102,9 @@ ApplicationWindow {
     // half of what decides that: the same source is 7680x7680 in 360 and
     // 7680x3840 in VR180, which is exactly where the hardware limits bite.
     function refreshEncoders() {
-        if (app.sourceInfo && app.sourceInfo.width)
-            app.probeEncoders(app.sourceInfo.width, app.sourceInfo.height,
-                              outputMode)
+        if (sourceWidth > 0)
+            app.probeEncoders(sourceWidth, app.sourceInfo.height,
+                              outputMode, outputWidth)
     }
 
     // Only fetched for the mode that has a direction to choose. Requesting it
@@ -106,6 +114,8 @@ ApplicationWindow {
         if (outputMode === "vr180" && inputPath !== "")
             app.requestThumbnail(inputPath, previewFrame.value)
     }
+
+    onOutputWidthChanged: refreshEncoders()
 
     onOutputModeChanged: {
         refreshEncoders()
@@ -121,10 +131,18 @@ ApplicationWindow {
         function onSourceInfoChanged() { win.refreshEncoders() }
     }
 
+    readonly property int sourceWidth:
+        app.sourceInfo && app.sourceInfo.width ? app.sourceInfo.width : 0
+
+    readonly property var resolutions:
+        sourceWidth > 0
+        ? app.resolutionChoices(sourceWidth, app.sourceInfo.height, outputMode)
+        : []
+
     readonly property var outputSize:
-        app.sourceInfo && app.sourceInfo.width
-        ? app.outputSize(app.sourceInfo.width, app.sourceInfo.height,
-                         outputMode)
+        sourceWidth > 0
+        ? app.outputSize(sourceWidth, app.sourceInfo.height, outputMode,
+                         outputWidth)
         : null
     readonly property string outputSizeText:
         outputSize ? outputSize[0] + "×" + outputSize[1] : ""
@@ -141,6 +159,30 @@ ApplicationWindow {
     }
     readonly property string outputMegapixels:
         outputSize ? (outputSize[0] * outputSize[1] / 1e6).toFixed(1) : ""
+
+    // The dropdown's rows. Each says what it is and what it is for, because
+    // "5760x5760" alone does not tell anyone which one they want.
+    readonly property var resolutionModel: {
+        var out = []
+        for (var i = 0; i < resolutions.length; ++i) {
+            var r = resolutions[i]
+            out.push({
+                width: r.width,
+                text: r.label + (r.native ? "  ·  full size" : ""),
+                sub: r.megapixels + " MP — "
+                     + (r.fits ? "plays on a headset"
+                               : "past the 35.6 MP decode limit; upload only")
+            })
+        }
+        return out
+    }
+    readonly property int resolutionIndex: {
+        var want = outputWidth === 0 ? sourceWidth : outputWidth
+        for (var i = 0; i < resolutions.length; ++i)
+            if (resolutions[i].width === want)
+                return i
+        return 0
+    }
 
     function encoderEntry(name) {
         for (var i = 0; i < app.encoders.length; ++i)
@@ -470,6 +512,56 @@ ApplicationWindow {
                                 }
                             }
 
+                            // Only a choice when the source is big enough to
+                            // give one. From a 4K file there is a single entry
+                            // and nothing here to think about.
+                            Row2 {
+                                label: "Resolution"
+                                visible: win.resolutions.length > 1
+                                hint: win.outputWidth === 0
+                                    ? "Full size — the right master for uploading, whatever it measures."
+                                    : "Rendered at the source resolution and resized afterwards, so this is supersampled rather than rendered small. Costs the same time as full size."
+                                ComboBox {
+                                    id: resBox
+                                    Layout.fillWidth: true
+                                    textRole: "text"
+                                    valueRole: "width"
+                                    model: win.resolutionModel
+                                    currentIndex: win.resolutionIndex
+                                    onActivated: win.outputWidth =
+                                        (currentValue === win.sourceWidth ? 0
+                                                                          : currentValue)
+
+                                    Connections {
+                                        target: win
+                                        function onOutputWidthChanged() {
+                                            resBox.currentIndex = win.resolutionIndex
+                                        }
+                                    }
+
+                                    delegate: ItemDelegate {
+                                        width: resBox.width
+                                        highlighted: resBox.highlightedIndex === index
+                                        contentItem: ColumnLayout {
+                                            spacing: 0
+                                            Text {
+                                                text: modelData.text
+                                                color: Theme.text
+                                                font.pixelSize: Theme.fontM
+                                            }
+                                            Text {
+                                                visible: modelData.sub !== ""
+                                                text: modelData.sub
+                                                color: Theme.textFaint
+                                                font.pixelSize: Theme.fontS
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // A note, not a warning. Over the cap is the
                             // correct shape for a YouTube master, and saying
                             // otherwise would talk people out of the one
@@ -492,14 +584,17 @@ ApplicationWindow {
                                     text: win.outputSizeText + " is "
                                         + win.outputMegapixels + " megapixels, "
                                         + "past the 35.6 that H.264 and HEVC "
-                                        + "both cap at in their highest level — "
-                                        + "so changing encoder does not help. "
-                                        + "Fine for YouTube, which transcodes on "
-                                        + "upload and takes this as the 8K 3D "
-                                        + "360 master. It only matters for "
-                                        + "playing the file directly on a "
-                                        + "headset, where VR180's 29.5 stays "
-                                        + "inside the cap."
+                                        + "both cap at in their highest level. "
+                                        + "Confirmed on a Quest 3: a file this "
+                                        + "size loads and shows nothing, in "
+                                        + "either codec. Keep it for uploading "
+                                        + "— YouTube transcodes and this is the "
+                                        + "right 8K 3D 360 master — and for "
+                                        + "watching from a file, drop to "
+                                        + (win.resolutions.length > 1
+                                           ? win.resolutions[1].label : "a smaller size")
+                                        + " above, or switch to VR180 at "
+                                        + "full width."
                                     color: Theme.textDim
                                     font.pixelSize: Theme.fontS
                                     wrapMode: Text.WordWrap
