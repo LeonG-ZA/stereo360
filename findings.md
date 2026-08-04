@@ -47,6 +47,10 @@ Options:
 | `--probe-encoders WxH` | off | Print which video encoders can encode WxH here as JSON, and exit |
 | `--probe-backends` | off | Print which depth backends can run here as JSON, with a reason for each that cannot, and exit |
 | `--probe-json` | off | Print what we know about the input as JSON and exit (for a GUI) |
+| `--output-mode` | 360 | `360` = a full sphere per eye, stacked top over bottom. `vr180` = the middle 180 degrees, eyes side by side. Input must be a full 360 video either way |
+| `--yaw DEG` | 0 | Which way the VR180 field points, in degrees of longitude, positive to the right. Free and lossless: it selects a range of columns rather than rotating anything. Only valid with `--output-mode vr180` |
+| `--output-width W` | source width | Deliver a smaller frame than the source implies: 360 becomes WxW, vr180 Wx(W/2). Depth and warping still run at full resolution, so the result is supersampled rather than rendered small, and it costs the same time. Exists because 8K 360 output is 7680x7680, which no HEVC or H.264 level decodes |
+| `--ambisonic-codec` | auto | How to write the soundfield back when `--yaw` rotates it: `libfdk_aac`, `aac`, `pcm_s24le`, `libopus`. auto takes the first your ffmpeg has, in that order |
 | `--spatial-audio` | off | Describe the audio as ambiX ambisonics (ACN/SN3D) by writing an `SA3D` box. The source audio must really be ambiX: 4, 9 or 16 channels. Spherical + stereoscopic are always written and need no flag |
 | `--split-baseline` | off | Warp both eyes by half the baseline in opposite directions. Same 3D, far less disocclusion per eye, and holes become monocular |
 | `--preview-frame N` | off | Render source frame N as one image and stop — see below |
