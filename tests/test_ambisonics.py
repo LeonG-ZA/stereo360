@@ -279,26 +279,71 @@ def test_rotation_does_not_change_the_loudness(tmp_path: Path):
 
 # ------------------------------------------------------- choosing an encoder
 
-def test_the_native_aac_encoder_is_never_offered():
-    """ffmpeg's own `aac` will encode four channels quite happily and sounds
-    materially worse than libfdk_aac at the same bitrate. Reaching for it
-    because it is the one spelled "aac" is a well-worn way to degrade a
-    master, so it is not in the list at any priority."""
-    for channels in (4, 9, 16):
-        names = [e.name for e in ambisonics._candidates(channels)]
-        assert "aac" not in names, names
-        assert "aac_mf" not in names
+def test_native_aac_is_offered_but_only_after_libfdk():
+    """This reverses an earlier decision, so the reason is recorded here.
+
+    ffmpeg's own `aac` was excluded on quality grounds -- it is audibly worse
+    than libfdk_aac at the same bitrate. Then device testing found it is the
+    *only* codec a Quest 3 will play: PCM is silent there and Opus is silent
+    in both mapping families. A file nobody can hear is worse than one that
+    sounds a little worse, so it is in the list -- behind libfdk_aac, at the
+    highest bitrate it accepts, and warning about itself.
+    """
+    names = [e.name for e in ambisonics._candidates(4)]
+    assert names.index("libfdk_aac") < names.index("aac"),         "the good encoder must still win when it is present"
+    assert ambisonics.choose_encoder(4, "aac").warn,         "the quality loss has to be reported, not absorbed"
 
 
-def test_libfdk_aac_is_first_in_line():
-    """Best AAC there is, and AAC is what SA3D players expect. Absent from
-    most Windows builds only because its licence is not GPL-compatible."""
-    assert ambisonics._candidates(4)[0].name == "libfdk_aac"
+def test_the_native_aac_note_says_why_it_is_worse_and_what_to_do():
+    note = ambisonics.choose_encoder(4, "aac").note
+    assert "libfdk_aac" in note, "does not name the better encoder"
+    assert "worse" in note, "does not say it is a downgrade"
+    assert str(ambisonics._AAC_KBPS_PER_CHANNEL) in note
 
 
-def test_the_order_of_preference_is_quality_then_compatibility():
-    assert [e.name for e in ambisonics._candidates(4)] == [
-        "libfdk_aac", "libopus", "pcm_s24le"]
+def test_aac_runs_at_the_ceiling_of_what_it_accepts():
+    """ffmpeg's AAC caps a frame at 24576 bits for 4 channels: 6144 per
+    channel, which at 48 kHz and 1024 samples a frame is exactly 288 kbit/s.
+    Asking for 290 prints "Too many bits" and clamps. Since this encoder is
+    the weak link, it runs at its ceiling."""
+    assert ambisonics._AAC_KBPS_PER_CHANNEL == 288
+    assert 24576 // 4 * 48000 // 1024 == 288_000
+    args = ambisonics.choose_encoder(4, "aac").args
+    assert args[args.index("-b:a") + 1] == "1152k"
+
+
+def test_that_ceiling_is_real(tmp_path: Path):
+    """Measured, not recited: at the limit ffmpeg is silent, one step over it
+    complains."""
+    def warns(kbps):
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "warning", "-f", "lavfi",
+             "-i", "sine=f=440:r=48000:d=1,aformat=channel_layouts=4.0",
+             "-c:a", "aac", "-b:a", f"{kbps}k", str(tmp_path / "b.m4a")],
+            capture_output=True, text=True)
+        return "Too many bits" in r.stderr
+
+    assert not warns(1152), "288 kbit/s per channel should be accepted"
+    assert warns(1160), "just above it should complain"
+
+
+def test_opus_and_pcm_stay_available_but_are_not_chosen_for_first_order():
+    """Both were measured silent on a Quest 3 (PCM plays on the desktop, Opus
+    nowhere), so neither should win `auto` where AAC can do the job."""
+    assert ambisonics.choose_encoder(4).name in ("libfdk_aac", "aac")
+    for name in ("libopus", "pcm_s24le"):
+        assert ambisonics.choose_encoder(4, name).name == name
+
+
+def test_higher_orders_still_get_opus_because_nothing_else_fits():
+    """AAC refuses 9 and 16 channels and MP4 will not carry PCM without a
+    named layout, so Opus is the only option -- and it warns that it was
+    silent in testing."""
+    for channels in (9, 16):
+        chosen = ambisonics.choose_encoder(channels)
+        assert chosen.name == "libopus"
+        assert chosen.warn
+        assert "silent" in chosen.note
 
 
 def test_auto_skips_what_this_ffmpeg_does_not_have(monkeypatch):
@@ -350,14 +395,14 @@ def test_an_unknown_codec_is_refused_by_name():
     with pytest.raises(ValueError, match="Unknown ambisonic codec"):
         ambisonics.choose_encoder(4, "mp3")
     with pytest.raises(ValueError, match="libfdk_aac"):
-        ambisonics.choose_encoder(4, "aac")     # names what is on offer
+        ambisonics.choose_encoder(4, "vorbis")  # names what is on offer
 
 
 def test_the_fallbacks_say_why_they_are_not_the_first_choice():
     """A silent codec substitution in a master is not acceptable."""
-    for name in ("libopus", "pcm_s24le"):
+    for name in ("aac", "libopus", "pcm_s24le"):
         assert _candidate(name, 4).note, name
-    assert "untested" in _candidate("libopus", 4).note
+    assert "silent" in _candidate("libopus", 4).note
     assert _candidate("pcm_s24le", 4).lossless
 
 
@@ -472,14 +517,18 @@ def test_the_notes_name_flag_values_that_exist():
             assert after.strip(".,;") in valid, f"{name}: {after}"
 
 
-def test_the_opus_note_only_offers_pcm_where_pcm_works():
-    """Telling someone at third order to use PCM instead sends them to an
-    error, since MP4 will not carry 16 channels of it."""
-    assert "pcm_s24le" in _candidate("libopus", 4).note
+def test_the_opus_note_says_something_different_at_each_order():
+    """At first order Opus is a dead end -- silent everywhere tested, and AAC
+    does the job. Above it, Opus is the only encoder that can carry the
+    channels at all, so the note has to stop discouraging it and start
+    explaining it."""
+    first = _candidate("libopus", 4).note
+    assert "auto will not choose it" in first
+
     for channels in (9, 16):
         note = _candidate("libopus", channels).note
-        assert "pcm_s24le" not in note, note
-        assert "only choice" in note
+        assert "only encoder" in note
+        assert str(channels) in note
 
 
 # ------------------------------------------------- how Opus labels the track

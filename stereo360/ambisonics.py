@@ -121,11 +121,18 @@ def yaw_matrix(order: int, yaw_degrees: float) -> List[List[float]]:
     return matrix
 
 
-#: Per-channel bitrate for a lossy re-encode. Generous on purpose, and cheap:
+#: The most ffmpeg's native AAC encoder accepts: it caps a frame at 24576
+#: bits for 4 channels, which is 6144 per channel, which at 48 kHz and 1024
+#: samples per frame is exactly 288 kbit/s. Ask for 290 and it says "Too many
+#: bits" and clamps. Used because it is the ceiling, not because the ceiling
+#: is needed -- the encoder is the weak link and this is what limits the
+#: damage. libfdk_aac is comfortably within its own limits here too.
+_AAC_KBPS_PER_CHANNEL = 288
+
+#: Opus is efficient enough that this is already far beyond transparent, and
 #: the spatial information in ambisonics lives in the *differences* between
-#: channels, which is what a codec discards first, and even 16 channels at
-#: this rate is 2 Mbit/s against an 8K picture running fifty times that.
-_KBPS_PER_CHANNEL = 128
+#: channels, which is what a codec discards first.
+_OPUS_KBPS_PER_CHANNEL = 128
 
 
 class Encoder(NamedTuple):
@@ -137,6 +144,10 @@ class Encoder(NamedTuple):
     #: What the user should know about this choice, or "" when it is the
     #: uncontroversial one.
     note: str
+    #: True when the note is bad news rather than context -- a quality loss,
+    #: or a codec measured not to play. Those are reported as warnings, not
+    #: buried in an info line nobody reads.
+    warn: bool = False
 
 
 #: Opus channel mapping family. 2 is the ambisonic one from RFC 8486: ACN
@@ -166,47 +177,78 @@ class Encoder(NamedTuple):
 _OPUS_MAPPING_FAMILY = 2
 
 
-def _lossy(name: str, channels: int, extra: List[str] = ()) -> List[str]:
+def _lossy(name: str, channels: int, kbps_per_channel: int,
+           extra: List[str] = ()) -> List[str]:
     return ["-c:a", name, *extra,
-            "-b:a", f"{channels * _KBPS_PER_CHANNEL}k"]
+            "-b:a", f"{channels * kbps_per_channel}k"]
 
 
-#: Tried in order. Deliberately does **not** include ffmpeg's native `aac`.
-#: It encodes 4 channels perfectly happily and sounds materially worse than
-#: libfdk_aac at the same bitrate; reaching for it because it is the one
-#: spelled "aac" is a well-worn way to quietly degrade a master.
+#: Tried in order. Which one plays is not a matter of opinion -- measured on
+#: a Quest 3's native player and on VLC 3.0.21, same 20 s clip, only the audio
+#: codec differing:
 #:
-#: Every entry below was measured end to end -- encode, mux, decode -- for
-#: channel order and for the `channelcount` that SA3D is built from. What is
-#: *not* established for any of them but libfdk_aac is whether a headset
-#: plays the result: Google's spatial media spec is AAC. Hence the notes, and
-#: hence `--ambisonic-codec` for overriding this.
+#:                        Quest 3      VLC
+#:   AAC 4ch              plays        plays
+#:   PCM 24-bit 4ch       silent       plays
+#:   Opus family 2        silent       silent
+#:   Opus family 255      silent       silent
+#:
+#: So AAC is not merely the conventional choice, it is the only one a headset
+#: will play, and Opus fails whichever mapping family it declares -- the
+#: family was not the problem, Opus-in-MP4 was.
+#:
+#: That forces an uncomfortable order. ffmpeg's own `aac` is materially worse
+#: than libfdk_aac at the same bitrate and would not be here on quality
+#: grounds; it is here because a file nobody can hear is worse than one that
+#: sounds a little worse. It is used at the highest bitrate it accepts, and it
+#: says what it is.
+#:
+#: PCM and Opus stay available explicitly. PCM is lossless and plays on the
+#: desktop, which is the right choice for an archival master that is not going
+#: to a headset; Opus is the only thing that can carry 9 or 16 channels at all.
 def _candidates(channels: int) -> List[Encoder]:
+    fdk_note = ""
+    aac_note = (
+        "Using ffmpeg's built-in AAC encoder, which is audibly worse than "
+        "libfdk_aac at the same bitrate -- this build of ffmpeg does not "
+        "include libfdk_aac, and installing one that does is the only way to "
+        "avoid the loss. Encoded at "
+        f"{_AAC_KBPS_PER_CHANNEL} kbit/s per channel, the most it accepts, to "
+        "limit the damage. Chosen anyway because it is the only codec a Quest "
+        "3 plays: Opus is silent there in both mapping families, and PCM "
+        "plays only on the desktop.")
     return [
-        # Best AAC there is, and AAC is what players expect. Absent from most
-        # Windows builds -- its licence is not GPL-compatible, so gyan.dev and
-        # friends leave it out.
-        Encoder("libfdk_aac", _lossy("libfdk_aac", channels), False, ""),
-        # Takes any channel count. Good at these rates, but Opus-in-MP4
-        # ambisonics is off the beaten track. See _OPUS_MAPPING_FAMILY for
-        # why 2 rather than the obvious 255.
-        Encoder("libopus",
-                _lossy("libopus", channels,
-                       ["-mapping_family", str(_OPUS_MAPPING_FAMILY)]),
-                False,
-                "Opus rather than AAC, because this build of ffmpeg has no "
-                "libfdk_aac. Whether headsets play Opus ambisonics in MP4 is "
-                "untested"
-                + (". --ambisonic-codec pcm_s24le avoids the question and "
-                   "loses nothing." if channels in _AAC_LAYOUT else
-                   ", and at this order it is the only choice: MP4 will not "
-                   f"carry PCM with {channels} channels.")),
-        # Nothing is thrown away, which for a master is the point. Roughly
-        # 1.2 Mbit/s per four channels -- next to nothing beside 8K video.
+        # Best AAC there is, and AAC is what plays. Absent from most Windows
+        # builds -- its licence is not GPL-compatible, so gyan.dev and friends
+        # leave it out.
+        Encoder("libfdk_aac",
+                _lossy("libfdk_aac", channels, _AAC_KBPS_PER_CHANNEL),
+                False, fdk_note),
+        # Only offered where AAC can carry the channel count at all: the
+        # native encoder refuses 9 and mistakes 16 for 9.1.6.
+        Encoder("aac", _lossy("aac", channels, _AAC_KBPS_PER_CHANNEL),
+                False, aac_note, warn=True),
+        # Lossless, and it does play -- just not on a headset.
         Encoder("pcm_s24le", ["-c:a", "pcm_s24le"], True,
                 "24-bit PCM: nothing is re-compressed, so the rotation costs "
-                "no quality at all. Larger, and it writes an `ipcm` entry "
-                "that older players may not read."),
+                "no quality at all. It plays on the desktop but NOT on a "
+                "Quest 3, so this is for masters and for editing, not for "
+                "sideloading."),
+        # Takes any channel count, which above first order is the whole point,
+        # since nothing else can. See _OPUS_MAPPING_FAMILY.
+        Encoder("libopus",
+                _lossy("libopus", channels, _OPUS_KBPS_PER_CHANNEL,
+                       ["-mapping_family", str(_OPUS_MAPPING_FAMILY)]),
+                False,
+                "Opus was silent on a Quest 3 in testing, in both mapping "
+                "families, and in VLC. At this order it is nonetheless the "
+                "only encoder that can carry "
+                f"{channels} channels into an MP4."
+                if channels not in _AAC_LAYOUT else
+                "Opus was silent on a Quest 3 in testing, in both mapping "
+                "families, and in VLC. Kept only for players known to handle "
+                "it; --ambisonic-codec auto will not choose it here.",
+                warn=True),
     ]
 
 

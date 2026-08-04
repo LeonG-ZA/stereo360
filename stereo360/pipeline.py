@@ -511,11 +511,15 @@ def plan_audio_rotation(info, yaw: float, spatial_audio: bool,
 
     reporter.info(
         f"Rotating the order-{order} soundfield {yaw:+g} degrees to match the "
-        f"view, re-encoding with {encoder.name}."
-        + (f" {encoder.note}" if encoder.note else ""),
+        f"view, re-encoding with {encoder.name}.",
         yaw=yaw, ambisonic_order=order, audio_channels=channels,
         audio_codec=encoder.name, audio_lossless=encoder.lossless,
         ambisonic_rotation=True)
+    if encoder.note:
+        # A quality loss or a codec that will not play is bad news, and bad
+        # news does not belong on the end of an info line.
+        say = reporter.warning if encoder.warn else reporter.info
+        say(encoder.note, audio_codec=encoder.name)
     return ambisonics.audio_filter(order, yaw), list(encoder.args)
 
 
