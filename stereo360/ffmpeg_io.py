@@ -150,6 +150,16 @@ class VideoInfo:
     projection: Optional[str] = None
     #: Pixels padded onto each cube face edge, from the cbmp box.
     cubemap_padding: int = 0
+    #: Pixels cropped from a notional full sphere either side, from the `equi`
+    #: box. Zero on a full sphere, and on anything that declares nothing.
+    bound_left: int = 0
+    bound_right: int = 0
+    #: What `st3d` says the frame contains: "2D", "side by side",
+    #: "top and bottom", or None when the file declares nothing.
+    stereo_layout: Optional[str] = None
+    #: Channels in the first audio stream, or None when there is no audio.
+    #: 4, 9 or 16 is what an ambiX track looks like -- see stereo360.ambisonics.
+    audio_channels: Optional[int] = None
 
     @property
     def chroma(self) -> Optional[str]:
@@ -160,6 +170,27 @@ class VideoInfo:
     def bit_depth(self) -> Optional[int]:
         """Bits per component in the source, or None if undetermined."""
         return bit_depth_from_pix_fmt(self.pix_fmt)
+
+    @property
+    def horizontal_fov(self) -> Optional[float]:
+        """Degrees of longitude the frame covers, if the file says.
+
+        The `equi` bounds are pixels cropped from a full sphere, so the frame
+        plus the two bounds is the sphere. Returns None when nothing is
+        declared -- which is the common case, and means "assume 360" rather
+        than "not spherical".
+        """
+        if self.projection is None:
+            return None
+        total = self.width + self.bound_left + self.bound_right
+        if total <= 0:
+            return None
+        return 360.0 * self.width / total
+
+    @property
+    def is_stereo(self) -> bool:
+        """True only when the file positively declares two views."""
+        return bool(self.stereo_layout) and self.stereo_layout != "2D"
 
 
 def _require(tool: str) -> str:
@@ -184,6 +215,8 @@ def probe(path: str) -> VideoInfo:
     # separately because -show_streams alone does not include it.
     projection = None
     padding = 0
+    bound_left = bound_right = 0
+    stereo_layout = None
     side = subprocess.run(
         [ffprobe, "-v", "quiet", "-print_format", "json", "-select_streams",
          "v:0", "-show_entries", "stream_side_data", path],
@@ -192,12 +225,26 @@ def probe(path: str) -> VideoInfo:
         try:
             streams = json.loads(side.stdout).get("streams") or [{}]
             for entry in streams[0].get("side_data_list", []):
-                if entry.get("side_data_type") == "Spherical Mapping":
+                kind = entry.get("side_data_type")
+                if kind == "Spherical Mapping":
                     projection = entry.get("projection")
                     padding = int(entry.get("padding") or 0)
+                    # Pixels cropped from a notional full sphere. Present only
+                    # on a partial projection, which ffprobe calls "tiled
+                    # equirectangular".
+                    bound_left = int(entry.get("bound_left") or 0)
+                    bound_right = int(entry.get("bound_right") or 0)
+                elif kind == "Stereo 3D":
+                    stereo_layout = entry.get("type")
         except (ValueError, KeyError, IndexError, TypeError):
             pass
-    has_audio = any(s["codec_type"] == "audio" for s in data["streams"])
+    astream = next((s for s in data["streams"]
+                    if s["codec_type"] == "audio"), None)
+    has_audio = astream is not None
+    try:
+        audio_channels = int(astream["channels"]) if astream else None
+    except (KeyError, TypeError, ValueError):
+        audio_channels = None
 
     num, den = vstream["avg_frame_rate"].split("/")
     fps = float(num) / float(den) if float(den) else 0.0
@@ -227,6 +274,10 @@ def probe(path: str) -> VideoInfo:
         pix_fmt=vstream.get("pix_fmt"),
         projection=projection,
         cubemap_padding=padding,
+        bound_left=bound_left,
+        bound_right=bound_right,
+        stereo_layout=stereo_layout,
+        audio_channels=audio_channels,
     )
 
 
@@ -247,6 +298,41 @@ def stream_durations(path: str) -> Tuple[Optional[float], Optional[float]]:
         elif stream.get("codec_type") == "audio":
             audio = value
     return video, audio
+
+
+def write_thumbnail(path: str, out_path: str, frame_index: int = 0,
+                    width: int = 960) -> bool:
+    """One source frame as a small JPEG. False if none could be read.
+
+    For the interface's VR180 direction picker, which has to show what the
+    source looks like *before* any depth work has been done -- the whole point
+    of choosing a direction is to do it before committing to an hour of render.
+
+    Seeks by timestamp rather than counting frames. Landing a frame or two out
+    is invisible at 960 px wide, where counting to frame 9000 would mean
+    decoding 9000 frames to throw them all away.
+    """
+    ffmpeg = _require("ffmpeg")
+    info = probe(path)
+    seconds = frame_index / info.fps if info.fps > 0 else 0.0
+    even = max(2, int(width) // 2 * 2)       # odd widths cannot be 4:2:0 JPEG
+
+    def grab(seek: float) -> bool:
+        cmd = [ffmpeg, "-v", "error", "-y"]
+        if seek > 0:
+            cmd += ["-ss", f"{seek:.3f}"]
+        cmd += ["-i", path, "-frames:v", "1",
+                "-vf", f"scale={even}:-2:flags=area", "-q:v", "4", out_path]
+        subprocess.run(cmd, capture_output=True)
+        return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+
+    if grab(seconds):
+        return True
+    # Asked for a frame past the end -- which the interface can do, since it
+    # lets the frame number run free when the source does not declare a count.
+    # The first frame is the wrong picture but the right shape, and a picker
+    # with a picture in it beats an empty box.
+    return seconds > 0 and grab(0.0)
 
 
 def trim_audio_to_video(path: str, fps: float) -> bool:
@@ -492,6 +578,8 @@ class VideoEncoder:
         bitdepth: int = 8,
         color: Optional[ColorTags] = None,
         chroma: str = "4:2:0",
+        audio_filter: Optional[str] = None,
+        audio_args: Optional[List[str]] = None,
     ) -> None:
         ffmpeg = _require("ffmpeg")
         self._out_path = out_path
@@ -509,7 +597,16 @@ class VideoEncoder:
         cmd += ["-map", "0:v"]
         if audio_source:
             # Copy audio only if the source actually has an audio stream.
-            cmd += ["-map", "1:a?", "-c:a", "copy"]
+            cmd += ["-map", "1:a?"]
+            if audio_filter:
+                # Rotating an ambisonic soundfield is the only thing that puts
+                # a filter here, and it forces a re-encode: there is no way to
+                # remix channels without decoding them. Costs one generation,
+                # which is why the default path stays a straight copy.
+                cmd += ["-filter:a", audio_filter]
+                cmd += list(audio_args or ["-c:a", "aac"])
+            else:
+                cmd += ["-c:a", "copy"]
         if bitdepth not in (8, 10):
             raise ValueError(f"Unsupported bit depth: {bitdepth}")
         if chroma not in supported_chroma(codec):

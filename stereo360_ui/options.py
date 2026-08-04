@@ -79,6 +79,77 @@ DEFAULT_ONNX_MODEL = "models/depth_anything_v2_small.onnx"
 #: Pipeline seconds per frame at 8K, used only to describe the presets above.
 _PIPELINE_SPF = 0.80
 
+#: The largest decoded picture either codec admits, in luma samples, reached
+#: at the highest level each defines. Not an HEVC number: H.264 caps a frame at
+#: 139,264 macroblocks, and 139264 x 256 is the same 35,651,584. Verified by
+#: encoding 7680x7680 both ways -- x264 warns "frame MB size (480x480) > level
+#: limit (139264)" and tags level 6.2 anyway; x265 says nothing and invents
+#: "Level-6.3", which the spec does not define. So switching encoder does not
+#: buy room, and neither tag can be believed.
+#:
+#: Width and height individually are fine to about 16,888 px; the area is what
+#: is capped.
+#:
+#: This is a fact about *direct playback*, not about the file being wrong. Both
+#: streams decode in software, and YouTube transcodes on upload, so 7680x7680
+#: remains the right 8K 3D-360 master. It bites when a headset has to decode
+#: the frame itself.
+MAX_LEVEL_LUMA = 35_651_584
+
+
+#: Widths offered as smaller alternatives to a source's own. Standard sizes
+#: rather than arbitrary numbers, so the choice reads as a format ("5.7K")
+#: instead of a slider position.
+_STANDARD_WIDTHS = (7680, 5760, 4096, 3840, 2880, 1920)
+
+
+def output_size(width: int, height: int, output_mode: str = "360",
+                output_width: Optional[int] = None) -> tuple:
+    """Encoded frame size for a `width` x `height` equirect source.
+
+    Mirrors `pipeline.output_geometry`, which this process cannot call: the UI
+    stays out of the core so that drawing a window never imports numpy. The
+    duplication is pinned by a test that runs both over a range of sizes.
+    """
+    if output_width and output_width != width:
+        scale = output_width / width
+        width = int(round(width * scale)) // 2 * 2
+        height = int(round(height * scale)) // 2 * 2
+    if output_mode == "vr180":
+        return (width // 2) // 2 * 2 * 2, height
+    return width, height * 2
+
+
+def resolution_choices(width: int, height: int,
+                       output_mode: str = "360") -> List[Dict[str, Any]]:
+    """Every output size worth offering for this source, largest first.
+
+    The source's own width always comes first and is the default -- it is the
+    right master for upload, whatever it measures. Smaller standard widths
+    follow, and exist because an 8K 360 frame is 7680x7680 and no HEVC or
+    H.264 level decodes that: confirmed black on a Quest 3 in both codecs,
+    while 5760x5760 and 8K VR180 both play.
+
+    From a 4K source nothing here is above the cap, so the list is just sizes
+    and carries no warning. The restriction appears exactly when it applies.
+    """
+    seen = set()
+    out = []
+    for candidate in (width,) + _STANDARD_WIDTHS:
+        if candidate > width or candidate in seen:
+            continue
+        seen.add(candidate)
+        w, h = output_size(width, height, output_mode, candidate)
+        out.append({
+            "width": candidate,
+            "label": f"{w}×{h}",
+            "megapixels": round(w * h / 1e6, 1),
+            "fits": w * h <= MAX_LEVEL_LUMA,
+            "native": candidate == width,
+        })
+    return out
+
+
 # CLI defaults. A value equal to its default is left off the command line.
 _DEFAULTS = {
     "strength": 1.0,
@@ -96,6 +167,8 @@ _DEFAULTS = {
     "preset": "medium",
     "codec": "libx264",
     "bitdepth": 8,
+    "outputMode": "360",
+    "yaw": 0.0,
 }
 
 
@@ -148,6 +221,25 @@ def build_argv(
                           ("--preset", "preset"), ("--bitdepth", "bitdepth")):
             if chosen[key] != _DEFAULTS[key]:
                 argv += [flag, str(chosen[key])]
+
+    # Applies to a preview as much as to a render: the whole point of
+    # previewing a VR180 frame is to see which half of the sphere you chose.
+    mode = str(opts.get("outputMode") or _DEFAULTS["outputMode"])
+    if mode != _DEFAULTS["outputMode"]:
+        argv += ["--output-mode", mode]
+        # Only inside the mode that has a direction to choose. The CLI refuses
+        # a yaw in 360 mode rather than ignore it, so emitting one here would
+        # turn a stale control into a failed run.
+        yaw = _num(opts.get("yaw"), 0.0)
+        if abs(yaw) > 1e-9:
+            argv += ["--yaw", f"{yaw:g}"]
+
+    # Omitted when it matches the source, which is both the default and the
+    # commonest case -- the flag only appears when a size was actually chosen.
+    out_width = int(_num(opts.get("outputWidth"), 0))
+    source_width = int(_num(opts.get("sourceWidth"), 0))
+    if out_width > 0 and out_width != source_width:
+        argv += ["--output-width", str(out_width)]
 
     if not opts.get("faceSizeAuto", True):
         size = int(_num(opts.get("faceSize"), 0))

@@ -144,7 +144,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "Media Metadata Injector. The source audio must "
                         "actually be ambiX: 4, 9 or 16 channels for first, "
                         "second or third order. Spherical and stereoscopic "
-                        "top-bottom are always written and need no flag.")
+                        "top-bottom are always written and need no flag. Also "
+                        "what lets --yaw turn the soundfield with the view: "
+                        "without this flag the audio is copied through and "
+                        "every sound stays at its original bearing.")
+    p.add_argument("--ambisonic-codec", default="auto",
+                   choices=["auto", "libfdk_aac", "aac", "libopus",
+                            "pcm_s24le"],
+                   help="How to write the soundfield back when --yaw rotates "
+                        "it. auto (default) takes the first your ffmpeg has, "
+                        "in that order. libfdk_aac is the best AAC and the "
+                        "format players expect, but its licence keeps it out "
+                        "of most Windows builds; libopus handles any order; "
+                        "pcm_s24le re-compresses nothing at all but "
+                        "plays only on the desktop. Measured on a Quest 3: "
+                        "AAC plays, PCM is silent, and Opus is silent in both "
+                        "mapping families -- so 'aac' is the fallback when "
+                        "libfdk_aac is absent, at the highest bitrate it "
+                        "accepts, and it warns that it is the worse encoder. "
+                        "Ignored without a yaw, when audio is copied "
+                        "untouched.")
     p.add_argument("--split-baseline", action="store_true",
                    help="Warp BOTH eyes by half the baseline in opposite "
                         "directions instead of leaving the left eye untouched. "
@@ -161,6 +180,37 @@ def build_parser() -> argparse.ArgumentParser:
                         "times slower. 1 = whole faces (default: 1)")
     # Default deliberately None rather than projection.FACE_OVERLAP: importing
     # projection here would pull numpy and cv2 into every --help.
+    p.add_argument("--output-mode", default="360", choices=["360", "vr180"],
+                   help="What to produce. 360 (default) is a full sphere per "
+                        "eye, stacked top over bottom. vr180 keeps the middle "
+                        "180 degrees and puts the eyes side by side, which is "
+                        "what VR180 players expect and what Apple Vision Pro "
+                        "content uses. Same pixel count either way, so vr180 "
+                        "spends them on half the sphere at twice the angular "
+                        "resolution -- and an 8K vr180 frame is inside HEVC's "
+                        "decode limit where an 8K 360 frame is not. Input must "
+                        "be 360 in both cases.")
+    p.add_argument("--yaw", type=float, default=0.0, metavar="DEG",
+                   help="Which way the VR180 field points, in degrees of "
+                        "longitude, positive to the right. Wraps, so -200 and "
+                        "+160 are the same. Free and lossless: it selects a "
+                        "range of columns rather than rotating anything, so "
+                        "nothing is resampled. Only valid with --output-mode "
+                        "vr180, since 360 output keeps the whole sphere and "
+                        "has no direction to choose. (default: 0)")
+    p.add_argument("--output-width", type=int, default=None, metavar="W",
+                   help="Deliver a frame W pixels wide instead of whatever "
+                        "the source implies: 360 output becomes WxW, vr180 "
+                        "Wx(W/2). Depth and warping still run at the source "
+                        "resolution and only the finished eyes are resized, "
+                        "so the result is supersampled rather than rendered "
+                        "small -- and costs the same time as the full-size "
+                        "render. The reason it exists: 8K 360 output is "
+                        "7680x7680, which no HEVC or H.264 level decodes "
+                        "(confirmed black on a Quest 3 in both codecs) while "
+                        "still being the right master for YouTube, which "
+                        "transcodes on ingest. 5760 is the largest square "
+                        "that plays. Cannot scale up.")
     p.add_argument("--face-overlap", type=float, default=None, metavar="F",
                    help="How far each depth face reaches past its nominal 90 "
                         "degrees, in tangent units (0.15 = 98 degrees per "
@@ -233,6 +283,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolution. A full 8K preview is a 7680x7680 image "
                         "that costs seconds to encode for no visible benefit "
                         "(default: 2048)")
+    p.add_argument("--thumbnail", metavar="PATH", default=None,
+                   help="Write source frame --preview-frame to PATH as a "
+                        "small JPEG and stop, converting nothing. This is the "
+                        "picture the interface's VR180 direction picker drags "
+                        "on, so it has to appear before any depth work has "
+                        "been done -- it decodes one frame and touches no "
+                        "model.")
     p.add_argument("--progress-json", action="store_true",
                    help="Emit machine-readable NDJSON events on stdout (one "
                         "JSON object per line: info, warning, start, "
@@ -348,6 +405,8 @@ def _run(args, reporter, cancel, backends, pipeline):
             width=args.preview_width,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            output_mode=args.output_mode,
+            yaw=args.yaw,
             reporter=reporter,
         )
 
@@ -373,10 +432,14 @@ def _run(args, reporter, cancel, backends, pipeline):
         split_baseline=args.split_baseline,
         gradient_limit=args.gradient_limit,
         spatial_audio=args.spatial_audio,
+        ambisonic_codec=args.ambisonic_codec,
         source_subsampling=args.source_subsampling,
         input_projection=args.input_projection,
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
+        output_mode=args.output_mode,
+        yaw=args.yaw,
+        output_width=args.output_width,
         reporter=reporter,
         cancel=cancel,
     )
@@ -387,12 +450,18 @@ def _probe_json(path: str) -> int:
     import json
 
     from .ffmpeg_io import probe
+    from .spherical import declares_ambix
 
     info = probe(path)
     print(json.dumps({
         "width": info.width, "height": info.height, "fps": info.fps,
         "frame_count": info.frame_count, "duration": info.duration,
         "has_audio": info.has_audio, "pix_fmt": info.pix_fmt,
+        "audio_channels": info.audio_channels,
+        # From the file's own SA3D box, which ffprobe does not surface at all
+        # -- it reports this camera's track as plain "4.0". VLC reads it, which
+        # is why VLC says "Channels: Ambisonics" about the same file.
+        "declares_ambix": declares_ambix(path),
         "chroma": info.chroma, "color_range": info.color.range,
         "color_space": info.color.space,
     }))
@@ -431,6 +500,15 @@ def main(argv=None) -> int:
         build_parser().error("an input video is required")
     if args.probe_json:
         return _probe_json(args.input)
+    if args.thumbnail:
+        from .ffmpeg_io import write_thumbnail
+
+        if not write_thumbnail(args.input, args.thumbnail,
+                               frame_index=args.preview_frame or 0):
+            print(f"could not read a frame from {args.input}", file=sys.stderr)
+            return 1
+        print(args.thumbnail)
+        return 0
     if not args.output:
         build_parser().error("-o/--output is required")
 

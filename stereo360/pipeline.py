@@ -13,7 +13,7 @@ from typing import Callable, NamedTuple, Optional
 
 import numpy as np
 
-from . import ffmpeg_io, projection, spherical, warp
+from . import ambisonics, ffmpeg_io, projection, spherical, warp
 from .depth.base import DepthBackend
 from .events import Cancelled, Reporter
 
@@ -431,6 +431,214 @@ def fit_chunk_size(chunk_size: int, w: int, h: int, eyes: int = 1,
 #: user gives up by accident.
 DEFAULT_CHROMA = "4:2:0"
 
+#: How the two eyes are laid out, and how much of the sphere they cover.
+#:
+#: "360" is the original: a full equirect per eye, stacked top over bottom.
+#: "vr180" keeps the middle 180 degrees of longitude and puts the eyes side by
+#: side, which is what VR180 players expect.
+#:
+#: Only reachable with 360 input. The tool does not accept 180 input — VR180
+#: cameras already shoot stereo, so a monoscopic half-equirect barely exists,
+#: and cropping from a full sphere gives a better result than processing one
+#: would: the depth stage sees six real faces and the warp has content beyond
+#: the crop to shift in. See plans/vr180.md.
+OUTPUT_MODES = ("360", "vr180")
+DEFAULT_OUTPUT_MODE = "360"
+
+#: Degrees of longitude a VR180 frame covers. Not a knob: the format is 180,
+#: and the number appears here so the crop and the metadata cannot disagree.
+VR180_FOV = 180.0
+
+
+def plan_audio_rotation(info, yaw: float, spatial_audio: bool,
+                        reporter: Reporter, ambisonic_codec: str = "auto"):
+    """(audio filter, encoder args) for turning the soundfield with the view.
+
+    A yaw moves the picture and leaves the sound where it was. In 360 that
+    would be merely wrong; in a 180 field it is worse, because a source that
+    ought to be visible in front can end up behind the viewer, in the
+    hemisphere the file no longer contains.
+
+    Only ambiX can be rotated, and only when the file says it is ambiX --
+    hence `--spatial-audio`. Plain stereo has no soundfield to turn, and
+    rotating a head-locked music bed would be wrong anyway.
+
+    Returns (None, None) whenever there is nothing to do, so the ordinary path
+    keeps copying audio through untouched.
+    """
+    if not yaw or not info.has_audio:
+        return None, None
+
+    channels = info.audio_channels
+    order = ambisonics.order_for_channels(channels)
+
+    if not spatial_audio:
+        # Not asked to treat it as ambisonic. Say so only when the channel
+        # count suggests they meant to, which is the case where a flag was
+        # forgotten rather than deliberately left off.
+        if order is not None:
+            reporter.warning(
+                f"The view is turned {yaw:+g} degrees and the audio has "
+                f"{channels} channels, which is what order-{order} ambiX looks "
+                f"like -- but without --spatial-audio it is copied through "
+                f"unrotated, leaving every sound {abs(yaw):g} degrees out of "
+                f"place. Add --spatial-audio to turn the soundfield with the "
+                f"view.",
+                yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
+    if order is None:
+        # --spatial-audio with a channel count that is not ambiX. The metadata
+        # step refuses this too, but after the render rather than before it.
+        reporter.warning(
+            f"--spatial-audio was given but the audio has "
+            f"{channels if channels else 'no'} channel(s), which is not ambiX "
+            f"(4, 9 or 16). Nothing can be rotated, so the {yaw:+g} degree "
+            f"turn will leave the sound where it was.",
+            yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
+    encoder = ambisonics.choose_encoder(channels, ambisonic_codec)
+    if encoder is None:
+        reporter.warning(
+            f"The order-{order} soundfield cannot be rotated {yaw:+g} degrees: "
+            f"this ffmpeg has no encoder able to write {channels} channels "
+            f"back into an MP4. The audio is copied through unrotated, so "
+            f"every sound will be {abs(yaw):g} degrees out of place. Install "
+            f"an ffmpeg with libfdk_aac or libopus, or use --yaw 0.",
+            yaw=yaw, audio_channels=channels, ambisonic_rotation=False)
+        return None, None
+
+    reporter.info(
+        f"Rotating the order-{order} soundfield {yaw:+g} degrees to match the "
+        f"view, re-encoding with {encoder.name}.",
+        yaw=yaw, ambisonic_order=order, audio_channels=channels,
+        audio_codec=encoder.name, audio_lossless=encoder.lossless,
+        ambisonic_rotation=True)
+    if encoder.note:
+        # A quality loss or a codec that will not play is bad news, and bad
+        # news does not belong on the end of an info line.
+        say = reporter.warning if encoder.warn else reporter.info
+        say(encoder.note, audio_codec=encoder.name)
+    return ambisonics.audio_filter(order, yaw), list(encoder.args)
+
+
+def check_yaw(output_mode: str, yaw: float) -> None:
+    """A yaw only means something when part of the sphere is being discarded.
+
+    For 360 output the whole sphere is kept, so a yaw would have to rotate it
+    -- which is possible (rolling the columns of a full equirect is lossless)
+    but is not what this flag does. Silently ignoring it would be worse than
+    refusing: the render would take an hour and come out pointing the wrong way.
+    """
+    if yaw and output_mode != "vr180":
+        raise ValueError(
+            f"A yaw of {yaw:g} degrees was given with --output-mode "
+            f"{output_mode}, which keeps the whole sphere and has no direction "
+            f"to choose. Yaw applies to vr180 output only.")
+
+
+def scaled_eye_size(w: int, h: int,
+                    output_width: Optional[int] = None) -> tuple:
+    """(width, height) each eye is resized to before it is packed.
+
+    `output_width` is the width of the *encoded frame*, which for both modes
+    is also the width of a full-sphere eye -- 360 stacks two of them, VR180
+    crops each to half and puts them side by side. So one number sizes both.
+
+    None keeps the source size, which is the default and the only behaviour
+    this had before.
+    """
+    if not output_width or output_width == w:
+        return w, h
+    if output_width > w:
+        raise ValueError(
+            f"--output-width {output_width} is larger than the {w}-wide "
+            f"source. Scaling up invents detail that is not there; render at "
+            f"the source width and let the player scale if you need to.")
+    if output_width < 2:
+        raise ValueError(f"--output-width {output_width} is not a usable size")
+    scale = output_width / w
+    return (int(round(w * scale)) // 2 * 2,
+            int(round(h * scale)) // 2 * 2)
+
+
+def output_geometry(w: int, h: int, output_mode: str,
+                    output_width: Optional[int] = None) -> tuple:
+    """(width, height) of the encoded frame for a `w` x `h` equirect source.
+
+    360 stacks two full equirects vertically. VR180 halves each eye
+    horizontally and puts them side by side, so an 8K source gives 7680x3840
+    either way round — the same pixel count, spent on half the sphere at twice
+    the angular resolution.
+
+    `output_width` delivers a smaller frame than the source implies. It is not
+    a quality setting in the usual sense: depth and warping still run at the
+    source resolution and only the finished eyes are resized, so the result is
+    supersampled rather than rendered small. It costs the same time as the
+    full-size render.
+
+    The reason it exists is that 8K 360 output is 7680x7680, which is past
+    what any HEVC or H.264 level decodes -- confirmed black on a Quest 3, in
+    both codecs -- while remaining the correct master for YouTube, which
+    transcodes on ingest. 5760x5760 is the largest square that fits.
+    """
+    _check_output_mode(output_mode)
+    w, h = scaled_eye_size(w, h, output_width)
+    if output_mode == "vr180":
+        half = (w // 2) // 2 * 2      # even, or the encoder rejects it
+        return half * 2, h
+    return w, h * 2
+
+
+def _check_output_mode(output_mode: str) -> None:
+    if output_mode not in OUTPUT_MODES:
+        raise ValueError(f"Unknown output_mode {output_mode!r}; expected one "
+                         f"of {list(OUTPUT_MODES)}")
+
+
+def vr180_crop(w: int, yaw: float = 0.0) -> tuple:
+    """(first column, width) of the 180-degree field centred on `yaw`.
+
+    Yaw is degrees of longitude, positive to the right, and wraps, so any value
+    is legal and -200 means the same as +160.
+
+    Because this is a column range rather than a rotation, pointing the field
+    somewhere else costs nothing and loses nothing: no resampling, no
+    interpolation, no softening. That matters for the interface, where it means
+    the direction can be dragged with live feedback once a frame has been
+    rendered, without recomputing any depth.
+    """
+    half = (w // 2) // 2 * 2
+    centre = (((yaw + 180.0) % 360.0) / 360.0) * w
+    return int(round(centre - half / 2.0)) % w, half
+
+
+def _crop_columns(a: np.ndarray, x0: int, width: int) -> np.ndarray:
+    """`width` columns from `x0`, wrapping round the +/-180 degree seam."""
+    end = x0 + width
+    if end <= a.shape[1]:
+        return a[:, x0:end]
+    return np.concatenate([a[:, x0:], a[:, :end - a.shape[1]]], axis=1)
+
+
+def stack_eyes(left: np.ndarray, right: np.ndarray,
+               output_mode: str = DEFAULT_OUTPUT_MODE,
+               yaw: float = 0.0) -> np.ndarray:
+    """Combine the two eyes into the frame that gets encoded.
+
+    The one place that decides layout, so the encoder's frame size, the written
+    pixels and the spherical metadata cannot drift apart.
+    """
+    _check_output_mode(output_mode)
+    if output_mode == "360":
+        return np.concatenate([left, right], axis=0)
+
+    x0, half = vr180_crop(left.shape[1], yaw)
+    return np.concatenate([_crop_columns(left, x0, half),
+                           _crop_columns(right, x0, half)],
+                          axis=1)
+
 
 def warn_if_source_is_deeper_than_8_bit(info, bitdepth: int,
                                         reporter: Reporter) -> bool:
@@ -536,6 +744,90 @@ class SourceFrame(NamedTuple):
     faces: Optional[dict] = None
 
 
+#: A frame this close to square is almost certainly a half-equirect. A 360
+#: equirect is 2:1; nothing else normal arrives at 1:1.
+_SQUARE_RATIO_TOLERANCE = 0.15
+
+#: Blank line between paragraphs of a long refusal message.
+_PARAGRAPH_BREAK = chr(10) * 2
+
+#: Below this the file is not covering the whole sphere, whatever it says.
+#: Slack for the rounding in the `equi` bounds, which are integers.
+_PARTIAL_SPHERE_BELOW = 359.0
+
+
+def check_input_is_monoscopic_360(info, requested: str,
+                                  reporter: Reporter) -> None:
+    """Refuse input this tool cannot turn into stereo, and say what to do.
+
+    The tool converts a monoscopic 360 sphere. Two kinds of input look
+    plausible and are not:
+
+    *Already stereo.* A VR180 or 3D 360 file has two views packed into the
+    frame. Treated as one picture it would be converted into nonsense, and the
+    user already has the thing they came here for.
+
+    *Already 180.* A half-equirect has no content beyond its edge, which is
+    exactly what the warp needs to synthesise the second eye cleanly. Cropping
+    a full sphere to 180 gives a better result than processing a 180 source
+    would, so the answer is to bring the original rather than to accept this
+    and do a worse job of it. See plans/vr180.md.
+
+    Detection is metadata first, then the aspect ratio for untagged files. The
+    ratio only works because the input is meant to be monoscopic: a
+    side-by-side 180 is 2:1, the same shape as a full equirect, so it would be
+    ambiguous otherwise. That is why the stereo check runs first.
+
+    Not detected: dual fisheye, which is 2:1 with two circular images and would
+    need a frame decoded to recognise. It gets no message and produces poor
+    output, which is a known gap.
+    """
+    if info.is_stereo:
+        raise ValueError(
+            f"This file already contains two views ({info.stereo_layout}), so "
+            f"it is already 3D. stereo360 turns *monoscopic* footage into "
+            f"stereo; there is nothing here for it to add.")
+
+    fov = info.horizontal_fov
+    declared_partial = fov is not None and fov < _PARTIAL_SPHERE_BELOW
+    ratio = info.width / max(info.height, 1)
+    looks_square = (info.projection is None
+                    and abs(ratio - 1.0) < _SQUARE_RATIO_TOLERANCE)
+
+    if not (declared_partial or looks_square):
+        return
+
+    why = (f"it declares a {fov:.0f}-degree field of view" if declared_partial
+           else f"it is {info.width}x{info.height}, the 1:1 shape of a "
+                f"half-equirect rather than the 2:1 of a full sphere")
+
+    if requested != "auto":
+        # An explicit override is how a mistagged file gets through, so it has
+        # to win. Say what is being overridden rather than going quiet.
+        reporter.warning(
+            f"This looks like 180-degree footage ({why}), but "
+            f"--input-projection {requested!r} was given; continuing as "
+            f"{requested!r}.",
+            width=info.width, height=info.height, horizontal_fov=fov)
+        return
+
+    raise ValueError(_PARAGRAPH_BREAK.join([
+        f"This looks like 180-degree footage: {why}. stereo360 needs the "
+        f"original 360 video.",
+
+        "That is not an arbitrary restriction. Converting a full sphere and "
+        "cropping to 180 gives a *better* result than processing a 180 source "
+        "would: the depth stage sees whole cubemap faces instead of half-empty "
+        "ones, and the warp has content beyond the edge of the field to draw "
+        "the second eye from.",
+
+        "If you want a VR180 file, feed in the 360 original with "
+        "--output-mode vr180. If this file really is a full sphere and the tag "
+        "or shape is misleading, override with --input-projection "
+        "equirectangular.",
+    ]))
+
+
 def resolve_projection(info, requested: str, reporter: Reporter) -> str:
     """What projection to treat the input as, and why.
 
@@ -623,10 +915,17 @@ class _Sink:
     """
 
     def __init__(self, encoder, reporter: Reporter,
-                 cancel: Optional[Callable[[], bool]]) -> None:
+                 cancel: Optional[Callable[[], bool]],
+                 output_mode: str = DEFAULT_OUTPUT_MODE,
+                 yaw: float = 0.0,
+                 eye_size: Optional[tuple] = None) -> None:
         self._encoder = encoder
         self._reporter = reporter
         self._cancel = cancel
+        self._output_mode = output_mode
+        self._yaw = yaw
+        #: (w, h) to resize each eye to, or None to leave it alone.
+        self._eye_size = eye_size
         self.written = 0
 
     def check(self) -> None:
@@ -641,7 +940,21 @@ class _Sink:
 
     def write(self, left: np.ndarray, right: np.ndarray) -> None:
         self.check()
-        self._encoder.write(np.concatenate([left, right], axis=0))
+        if self._eye_size is not None:
+            # Each eye separately, and *before* packing. Resizing the stacked
+            # frame instead would let the resampling kernel reach across the
+            # boundary between the two eyes -- mixing the bottom of the left
+            # eye into the top of the right one, or across the seam between
+            # them in VR180. Scaling first also means the VR180 crop is
+            # computed on the width it will actually have.
+            import cv2
+
+            left = cv2.resize(left, self._eye_size,
+                              interpolation=cv2.INTER_AREA)
+            right = cv2.resize(right, self._eye_size,
+                               interpolation=cv2.INTER_AREA)
+        self._encoder.write(
+            stack_eyes(left, right, self._output_mode, self._yaw))
         self.written += 1
         self._reporter.advance(1)
 
@@ -668,10 +981,14 @@ def convert(
     split_baseline: bool = False,
     gradient_limit: float = 0.0,
     spatial_audio: bool = False,
+    ambisonic_codec: str = "auto",
     source_subsampling: bool = False,
     input_projection: str = "auto",
     temporal_depth: float = DepthStabiliser.DEFAULT_TAU,
     face_overlap: float = projection.FACE_OVERLAP,
+    output_mode: str = DEFAULT_OUTPUT_MODE,
+    yaw: float = 0.0,
+    output_width: Optional[int] = None,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
 ) -> ConvertResult:
@@ -691,7 +1008,9 @@ def convert(
     # works in equirect, so cubemap input is converted once as it is decoded --
     # but its faces are carried along, because the depth stage wants faces and
     # rebuilding them from the reconstruction would resample twice for nothing.
-    source_projection = resolve_projection(info, input_projection, reporter)
+    check_input_is_monoscopic_360(info, input_projection, reporter)
+    source_projection = resolve_projection(info, input_projection,
+                                           reporter)
     face_size, w, h = source_geometry(info, source_projection, face_size,
                                       reporter)
 
@@ -705,17 +1024,39 @@ def convert(
     chroma = _resolve_chroma(info, codec, source_subsampling, reporter)
     warn_if_source_is_deeper_than_8_bit(info, bitdepth, reporter)
 
+    _check_output_mode(output_mode)
+    check_yaw(output_mode, yaw)
+    eye_w, eye_h = scaled_eye_size(w, h, output_width)
+    out_w, out_h = output_geometry(w, h, output_mode, output_width)
+    eye_size = (eye_w, eye_h) if (eye_w, eye_h) != (w, h) else None
+    if eye_size is not None:
+        reporter.info(
+            f"Delivering {out_w}x{out_h}: each eye is rendered at {w}x{h} and "
+            f"resized to {eye_w}x{eye_h} afterwards, so the result is "
+            f"supersampled rather than rendered small.",
+            output_width=output_width, source_width=w)
+    if output_mode != DEFAULT_OUTPUT_MODE:
+        aim = (f"centred {yaw:+g} degrees from the source's forward direction"
+               if yaw else "centred on the source's forward direction")
+        reporter.info(
+            f"Output: VR180, {out_w}x{out_h} side-by-side, {aim}.",
+            output_mode=output_mode, width=out_w, height=out_h, yaw=yaw)
+    audio_filter, audio_args = plan_audio_rotation(
+        info, yaw=yaw, spatial_audio=spatial_audio, reporter=reporter,
+        ambisonic_codec=ambisonic_codec)
+
     encoder = ffmpeg_io.VideoEncoder(
-        output_path, width=w, height=h * 2, fps=info.fps,
+        output_path, width=out_w, height=out_h, fps=info.fps,
         audio_source=audio_source, codec=codec, crf=crf, preset=preset,
         bitdepth=bitdepth, color=info.color, chroma=chroma,
+        audio_filter=audio_filter, audio_args=audio_args,
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)
-    sink = _Sink(encoder, reporter, cancel)
+    sink = _Sink(encoder, reporter, cancel, output_mode, yaw, eye_size)
     cancelled = False
 
-    reporter.start(total, width=w, height=h * 2, fps=info.fps,
+    reporter.start(total, width=out_w, height=out_h, fps=info.fps,
                    input=input_path, output=output_path, face_size=face_size)
     try:
         chunk_size = fit_chunk_size(chunk_size, w, h,
@@ -770,8 +1111,11 @@ def convert(
     # Spherical + stereoscopic are always true of this output, so they are
     # never optional. Ambisonic audio is a property of the *source*, so it has
     # to be declared.
-    spherical.inject_spherical_metadata(output_path, stereo_mode="top-bottom",
-                                        spatial_audio=spatial_audio)
+    spherical.inject_spherical_metadata(
+        output_path,
+        stereo_mode="left-right" if output_mode == "vr180" else "top-bottom",
+        spatial_audio=spatial_audio,
+        horizontal_fov=VR180_FOV if output_mode == "vr180" else 360.0)
     reporter.finish(output=output_path, frames=sink.written,
                     cancelled=cancelled)
     return ConvertResult(output_path, sink.written, cancelled)
@@ -806,6 +1150,8 @@ def preview_frame(
     width: int = 2048,
     input_projection: str = "auto",
     face_overlap: float = projection.FACE_OVERLAP,
+    output_mode: str = DEFAULT_OUTPUT_MODE,
+    yaw: float = 0.0,
     reporter: Optional[Reporter] = None,
 ) -> PreviewResult:
     """Render one source frame to an image instead of converting the video.
@@ -834,8 +1180,11 @@ def preview_frame(
         raise ValueError(f"--preview-frame must not be negative, got "
                          f"{frame_index}")
 
+    check_yaw(output_mode, yaw)
     info = ffmpeg_io.probe(input_path)
-    source_projection = resolve_projection(info, input_projection, reporter)
+    check_input_is_monoscopic_360(info, input_projection, reporter)
+    source_projection = resolve_projection(info, input_projection,
+                                           reporter)
     # A preview is for judging settings, so the same caveat applies: what it
     # shows has already been through the 8-bit decode.
     warn_if_source_is_deeper_than_8_bit(info, 8, reporter)
@@ -871,7 +1220,7 @@ def preview_frame(
         right = right_eye_passthrough(source.equirect, face_size)
     else:
         right = source.equirect
-    stacked = np.concatenate([left, right], axis=0)
+    stacked = stack_eyes(left, right, output_mode, yaw)
 
     # Downscaled by default. A full 8K top-bottom preview is a 7680x7680 PNG
     # that takes seconds to encode and tens of megabytes to hold, for an image

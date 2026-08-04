@@ -40,6 +40,7 @@ class Controller(QObject):
     sourceInfoChanged = Signal()
     backendsChanged = Signal()
     encodersChanged = Signal()
+    thumbnailChanged = Signal()
     #: level, text -- appended to the log view
     logged = Signal(str, str)
     #: fired when a run ends so QML can flash a result banner
@@ -74,6 +75,14 @@ class Controller(QObject):
         # Its own process, so a probe can never disturb a running render.
         self._probe = QProcess(self)
         self._probe.finished.connect(self._on_probe_finished)
+
+        self._thumbnail = ""
+        self._thumbnail_key = None
+        self._pending_thumbnail = None
+        self._thumbnail_path = os.path.join(
+            tempfile.gettempdir(), "stereo360_thumbnail.jpg")
+        self._thumbnail_proc = QProcess(self)
+        self._thumbnail_proc.finished.connect(self._on_thumbnail_finished)
 
     # ---------------------------------------------------------- properties
 
@@ -120,6 +129,11 @@ class Controller(QObject):
         """[{name, available, detail}] -- which depth backends can run here."""
         return self._backends
 
+    @Property(str, notify=thumbnailChanged)
+    def thumbnailSource(self) -> str:
+        """A picture of the source frame, for the direction picker, or ''."""
+        return self._thumbnail
+
     # ------------------------------------------------------------- probing
 
     @Slot()
@@ -138,15 +152,39 @@ class Controller(QObject):
             ["-m", "stereo360", "--probe-backends", "-"])
         self._backend_probe.start()
 
-    @Slot(int, int)
-    def probeEncoders(self, width: int, height: int) -> None:
-        """Which encoders manage this output size on this machine.
+    @Slot(int, int, str, int, result="QVariantList")
+    def outputSize(self, width: int, height: int, mode: str,
+                   output_width: int = 0) -> list:
+        """[w, h] of the encoded frame for this source, mode and chosen size."""
+        return list(options.output_size(int(width), int(height), str(mode),
+                                        int(output_width) or None))
+
+    @Slot(int, int, str, result="QVariantList")
+    def resolutionChoices(self, width: int, height: int, mode: str) -> list:
+        """Output sizes worth offering for this source, largest first."""
+        return options.resolution_choices(int(width), int(height), str(mode))
+
+    @Slot(int, int, result=bool)
+    def exceedsLevelLimit(self, width: int, height: int) -> bool:
+        """Whether a frame this size is past the top level of both codecs."""
+        return int(width) * int(height) > options.MAX_LEVEL_LUMA
+
+    @Slot(int, int, str, int)
+    def probeEncoders(self, width: int, height: int, mode: str,
+                      output_width: int = 0) -> None:
+        """Which encoders manage this output on this machine.
+
+        Takes the *source* size and works out the output itself, because the
+        answer depends on the output mode as much as on the input: the same 8K
+        source encodes as 7680x7680 in 360 mode and 7680x3840 in VR180, and
+        there are encoders that take one and refuse the other.
 
         Resolution-dependent and worth re-asking per input: hevc_amf takes
         3840x3840 and refuses 7680x7680, so a list built once for a 4K project
         would offer an encoder that cannot touch an 8K one.
         """
-        size = (int(width), int(height))
+        size = options.output_size(int(width), int(height), str(mode),
+                                   int(output_width) or None)
         if size == self._encoder_size or min(size) <= 0:
             return          # already known; probing costs a few seconds
         if self._encoder_probe.state() != QProcess.NotRunning:
@@ -206,6 +244,52 @@ class Controller(QObject):
         self._probe.setProgram(sys.executable)
         self._probe.setArguments(["-m", "stereo360", path, "--probe-json"])
         self._probe.start()
+
+    @Slot(str, int)
+    def requestThumbnail(self, path: str, frame: int) -> None:
+        """Fetch a picture of the source frame for the direction picker.
+
+        Cheap enough to do on every frame change -- one decoded frame, no
+        model, measured at 0.7 s on an 8K file -- and it has to be, because
+        choosing where the VR180 field points is something you do *before*
+        spending an hour on a render.
+        """
+        key = (path, int(frame))
+        if not path or key == self._thumbnail_key:
+            return
+        if self._thumbnail and self._thumbnail_key \
+                and self._thumbnail_key[0] != path:
+            # A picture of the previous file is worse than no picture: it
+            # would look like a valid answer to a question about this one.
+            self._thumbnail = ""
+            self.thumbnailChanged.emit()
+        if self._thumbnail_proc.state() != QProcess.NotRunning:
+            # Dragging the frame number outruns a 0.7 s decode easily. Keep
+            # only the latest -- the intermediate frames were never wanted.
+            self._pending_thumbnail = key
+            return
+        self._pending_thumbnail = None
+        self._thumbnail_key = key
+        self._thumbnail_proc.setWorkingDirectory(core_root())
+        self._thumbnail_proc.setProgram(sys.executable)
+        self._thumbnail_proc.setArguments(
+            ["-m", "stereo360", path, "--thumbnail", self._thumbnail_path,
+             "--preview-frame", str(max(0, int(frame)))])
+        self._thumbnail_proc.start()
+
+    def _on_thumbnail_finished(self, code: int, _status) -> None:
+        if code == 0:
+            # Same cache defeat as the preview: the path never changes, so
+            # without a unique query Qt paints the previous frame's picture.
+            self._thumbnail = (
+                QUrl.fromLocalFile(self._thumbnail_path).toString()
+                + f"?t={time.time():.3f}")
+            self.thumbnailChanged.emit()
+        else:
+            self._thumbnail_key = None      # let a later attempt retry
+        pending, self._pending_thumbnail = self._pending_thumbnail, None
+        if pending:
+            self.requestThumbnail(pending[0], pending[1])
 
     def _on_probe_finished(self, code: int, _status) -> None:
         if code != 0:

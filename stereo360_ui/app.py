@@ -140,11 +140,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if (isinstance(label, str) and label
                         and child.property("labelWidth") is not None):
                     print(f"ROW\t{label}\t{bool(child.property('visible'))}")
+            # Controls that are not labelled rows -- the VR180 direction
+            # picker -- keyed by objectName. `startFrac` comes along because
+            # it is the one number that has to agree with what the render
+            # crops, and a picker pointing elsewhere is invisible here and
+            # obvious in a headset.
+            for child in window.findChildren(object):
+                name = child.objectName()
+                if name:
+                    # startFrac for the direction picker, currentIndex for a
+                    # dropdown -- the two things a screenshot cannot assert
+                    # and that can silently disagree with the state behind
+                    # them. A ComboBox that shows one row and renders another
+                    # is exactly the bug this catches.
+                    value = child.property("startFrac")
+                    if value is None:
+                        value = child.property("currentIndex")
+                    print(f"ITEM\t{name}\t{bool(child.property('visible'))}\t"
+                          f"{'' if value is None else value}")
             # Settings values too, so a state one control derives from another
             # can be asserted rather than eyeballed.
             for name in ("quality", "depthBackend", "depthModel", "onnxModel",
                          "sourceSubsampling", "spatialAudio", "depthTiles",
-                         "codec",
+                         "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
+                         "spatialAudioHint",
                          "strength", "gradientLimit"):
                 print(f"PROP\t{name}\t{window.property(name)}")
             for entry in controller.encoders:

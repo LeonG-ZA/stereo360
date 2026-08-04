@@ -39,6 +39,9 @@ ApplicationWindow {
     // ---- settings state -------------------------------------------------
     property string inputPath: ""
     property string outputPath: ""
+    property string outputMode: "360"
+    property real yaw: 0             // only meaningful in vr180
+    property int outputWidth: 0      // 0 = whatever the source implies
     property string quality: "standard"
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
@@ -67,7 +70,8 @@ ApplicationWindow {
     function currentOptions() {
         return {
             "input": inputPath, "output": outputPath, "quality": quality,
-            "codec": codec,
+            "codec": codec, "outputMode": outputMode, "yaw": yaw,
+            "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
             "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
@@ -84,19 +88,161 @@ ApplicationWindow {
     readonly property bool canRun: inputPath !== "" && outputPath !== ""
 
     // Whatever set inputPath -- the dialog or the text field -- ask what it is.
-    onInputPathChanged: app.probeInput(inputPath)
+    onInputPathChanged: {
+        app.probeInput(inputPath)
+        refreshThumbnail()
+        // A width picked for an 8K file is not a legal choice for a 4K one,
+        // and the CLI refuses to scale up rather than quietly obliging.
+        outputWidth = 0
+    }
 
     Component.onCompleted: app.probeBackends()
 
-    // Encoder availability depends on the output size, which is the source
-    // height doubled -- exactly the dimension the hardware limits bite on.
+    // Encoder availability depends on the output size, and the output mode is
+    // half of what decides that: the same source is 7680x7680 in 360 and
+    // 7680x3840 in VR180, which is exactly where the hardware limits bite.
+    function refreshEncoders() {
+        if (sourceWidth > 0)
+            app.probeEncoders(sourceWidth, app.sourceInfo.height,
+                              outputMode, outputWidth)
+    }
+
+    // Only fetched for the mode that has a direction to choose. Requesting it
+    // on the mode change as well as on the file means switching to VR180 finds
+    // the picture already there.
+    function refreshThumbnail() {
+        if (outputMode === "vr180" && inputPath !== "")
+            app.requestThumbnail(inputPath, previewFrame.value)
+    }
+
+    onOutputWidthChanged: refreshEncoders()
+
+    onOutputModeChanged: {
+        refreshEncoders()
+        refreshThumbnail()
+        // A yaw left over from a previous VR180 session would be silently
+        // dropped by the 360 render and silently reappear on switching back.
+        if (outputMode !== "vr180")
+            yaw = 0
+    }
+
     Connections {
         target: app
         function onSourceInfoChanged() {
-            if (app.sourceInfo && app.sourceInfo.width)
-                app.probeEncoders(app.sourceInfo.width,
-                                  app.sourceInfo.height * 2)
+            win.refreshEncoders()
+            // Set the spatial-audio switch from what the file turned out to
+            // be, rather than making someone notice a channel count and tick
+            // a box. Forgetting it is not a small mistake: with a yaw it
+            // leaves every sound at the wrong bearing, and there is nothing
+            // to hear that says so.
+            //
+            // Only on a *new source*, so it never argues with a decision
+            // already made -- changing the preview frame does not re-tick a
+            // box that was deliberately cleared.
+            //
+            // The CLI keeps requiring the flag. Guessing on someone's behalf
+            // is defensible in front of a switch they can see; it is not
+            // defensible in a batch run nobody is watching.
+            win.spatialAudio = win.sourceIsAmbisonic
         }
+    }
+
+    readonly property int sourceWidth:
+        app.sourceInfo && app.sourceInfo.width ? app.sourceInfo.width : 0
+
+    readonly property var resolutions:
+        sourceWidth > 0
+        ? app.resolutionChoices(sourceWidth, app.sourceInfo.height, outputMode)
+        : []
+
+    readonly property var outputSize:
+        sourceWidth > 0
+        ? app.outputSize(sourceWidth, app.sourceInfo.height, outputMode,
+                         outputWidth)
+        : null
+    readonly property string outputSizeText:
+        outputSize ? outputSize[0] + "×" + outputSize[1] : ""
+    readonly property bool outputExceedsLevelCap:
+        outputSize ? app.exceedsLevelLimit(outputSize[0], outputSize[1])
+                   : false
+    // The file's own SA3D box, which is the authoritative answer and the one
+    // VLC uses -- it reports "Channels: Ambisonics" for a track ffprobe
+    // describes as plain 4.0, because ffprobe does not surface SA3D at all.
+    readonly property bool sourceDeclaresAmbix:
+        app.sourceInfo ? app.sourceInfo.declares_ambix === true : false
+
+    // The fallback when the file says nothing: 4, 9 or 16 channels is what
+    // ambiX looks like. A guess, and it cannot tell a soundfield from four
+    // separate microphones -- but plenty of ambiX is delivered untagged, and
+    // the cost of missing it is every sound at the wrong bearing with nothing
+    // to hear that says so.
+    readonly property bool sourceCountLooksAmbisonic: {
+        var n = app.sourceInfo ? app.sourceInfo.audio_channels : 0
+        return n === 4 || n === 9 || n === 16
+    }
+
+    readonly property bool sourceIsAmbisonic:
+        sourceDeclaresAmbix || sourceCountLooksAmbisonic
+    // Four cases, and nested ternaries had stopped being readable at three.
+    readonly property string spatialAudioHint: {
+        var turning = outputMode === "vr180" && yaw !== 0
+        var channels = app.sourceInfo && app.sourceInfo.audio_channels
+                       ? app.sourceInfo.audio_channels : 0
+
+        if (spatialAudio && turning)
+            return "The soundfield will be turned " + yaw.toFixed(0)
+                 + "° to match the view, so sounds stay where you see them. "
+                 + "The audio is re-encoded once to do it — the log names the "
+                 + "codec — and the picture is unaffected."
+        if (spatialAudio && sourceDeclaresAmbix)
+            // No hedging needed here: the file says so itself.
+            return "Set from the file, which declares its audio as ambiX in "
+                 + "its own metadata — the same thing VLC reads when it says "
+                 + "\"Channels: Ambisonics\"."
+        if (spatialAudio && sourceCountLooksAmbisonic)
+            // Here it is a guess, and it says so: a channel count cannot tell
+            // ambiX from four separate microphones or a four-stem mix, and
+            // treating those as a soundfield would be worse than leaving them
+            // alone.
+            return "Set from the file: it has " + channels + " audio "
+                 + "channels, which is what ambiX looks like. It does not say "
+                 + "so outright, though — untick this if those are really "
+                 + "separate microphones or stems."
+        if (turning)
+            return "Tick this if the source audio really is ambiX: 4, 9 or 16 "
+                 + "channels. Without it the view turns and the sound does "
+                 + "not, leaving every source " + Math.abs(yaw).toFixed(0)
+                 + "° out of place."
+        return "Tick only if the source audio really is ambiX: 4, 9 or 16 "
+             + "channels. 360° and top-bottom are always written and need no "
+             + "setting."
+    }
+
+    readonly property string outputMegapixels:
+        outputSize ? (outputSize[0] * outputSize[1] / 1e6).toFixed(1) : ""
+
+    // The dropdown's rows. Each says what it is and what it is for, because
+    // "5760x5760" alone does not tell anyone which one they want.
+    readonly property var resolutionModel: {
+        var out = []
+        for (var i = 0; i < resolutions.length; ++i) {
+            var r = resolutions[i]
+            out.push({
+                width: r.width,
+                text: r.label + (r.native ? "  ·  full size" : ""),
+                sub: r.megapixels + " MP — "
+                     + (r.fits ? "plays on a headset"
+                               : "past the 35.6 MP decode limit; upload only")
+            })
+        }
+        return out
+    }
+    readonly property int resolutionIndex: {
+        var want = outputWidth === 0 ? sourceWidth : outputWidth
+        for (var i = 0; i < resolutions.length; ++i)
+            if (resolutions[i].width === want)
+                return i
+        return 0
     }
 
     function encoderEntry(name) {
@@ -294,7 +440,9 @@ ApplicationWindow {
                 }
                 Text {
                     visible: !Theme.compact   // the title alone carries it
-                    text: "monoscopic 360° → stereoscopic top-bottom"
+                    text: win.outputMode === "vr180"
+                          ? "monoscopic 360° → stereoscopic VR180, side-by-side"
+                          : "monoscopic 360° → stereoscopic 360°, top-bottom"
                     color: Theme.textFaint
                     font.pixelSize: Theme.fontS
                     elide: Text.ElideRight
@@ -369,11 +517,178 @@ ApplicationWindow {
                             // before the render, not discovered after.
                             Row2 {
                                 label: "Spatial audio"
-                                hint: "Tick only if the source audio really is ambiX: 4, 9 or 16 channels. 360° and top-bottom are always written and need no setting."
+                                hint: win.spatialAudioHint
                                 Switch {
                                     checked: win.spatialAudio
                                     onToggled: win.spatialAudio = checked
                                 }
+                            }
+                        }
+
+                        // ---- output shape --------------------------------
+                        Card {
+                            title: "Output"
+                            subtitle: "what kind of file to make"
+
+                            Row2 {
+                                label: "Format"
+                                hint: win.outputMode === "vr180"
+                                    ? "The middle 180°, eyes side by side. The same pixels spent on half the sphere, so twice the angular resolution — and the layout Apple Vision Pro content uses."
+                                    : "A full sphere per eye, stacked top over bottom. Plays anywhere that plays 360° video."
+                                ComboBox {
+                                    id: modeBox
+                                    Layout.fillWidth: true
+                                    textRole: "label"
+                                    valueRole: "key"
+                                    currentIndex: win.outputMode === "vr180" ? 1 : 0
+                                    model: [
+                                        {key: "360",    label: "360 VR — top-bottom"},
+                                        {key: "vr180",  label: "VR180 — side-by-side"}
+                                    ]
+                                    onActivated: win.outputMode = currentValue
+
+                                    // Same as the quality preset: activating
+                                    // the box severs its own binding, so a
+                                    // later change to the property has to be
+                                    // pushed back in by hand.
+                                    Connections {
+                                        target: win
+                                        function onOutputModeChanged() {
+                                            modeBox.currentIndex =
+                                                win.outputMode === "vr180" ? 1 : 0
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: win.outputSizeText
+                                    color: Theme.textFaint
+                                    font.pixelSize: Theme.fontS
+                                    font.family: "Consolas, monospace"
+                                }
+                            }
+
+                            // Only a choice when the source is big enough to
+                            // give one. From a 4K file there is a single entry
+                            // and nothing here to think about.
+                            Row2 {
+                                label: "Resolution"
+                                visible: win.resolutions.length > 1
+                                hint: win.outputWidth === 0
+                                    ? "Full size — the right master for uploading, whatever it measures."
+                                    : "Rendered at the source resolution and resized afterwards, so this is supersampled rather than rendered small. Costs the same time as full size."
+                                ComboBox {
+                                    id: resBox
+                                    objectName: "resolutionBox"
+                                    Layout.fillWidth: true
+                                    textRole: "text"
+                                    valueRole: "width"
+                                    model: win.resolutionModel
+                                    currentIndex: win.resolutionIndex
+
+                                    // Everything that touches currentIndex
+                                    // restores a *binding*, never a value.
+                                    //
+                                    // ComboBox severs the declared binding as
+                                    // soon as anything writes to currentIndex
+                                    // -- including a re-sync handler. Once
+                                    // severed it tracks only whatever signal
+                                    // that handler listened for, and goes
+                                    // stale on every other input: a mode
+                                    // switch, a new file, or simply the source
+                                    // probe arriving after the fact.
+                                    //
+                                    // That is not hypothetical. Picking a
+                                    // reduced size and then switching format
+                                    // left the box reading "full size" while
+                                    // the render used the reduced one -- a
+                                    // control showing one thing and doing
+                                    // another, which is the worst way for this
+                                    // to fail because there is nothing to see.
+                                    function trackIndex() {
+                                        currentIndex = Qt.binding(
+                                            function () { return win.resolutionIndex })
+                                    }
+                                    onActivated: {
+                                        win.outputWidth =
+                                            (currentValue === win.sourceWidth
+                                             ? 0 : currentValue)
+                                        trackIndex()
+                                    }
+                                    // Replacing the model resets currentIndex
+                                    // to 0 without changing resolutionIndex,
+                                    // so a binding alone would not re-fire.
+                                    onModelChanged: trackIndex()
+
+                                    delegate: ItemDelegate {
+                                        width: resBox.width
+                                        highlighted: resBox.highlightedIndex === index
+                                        contentItem: ColumnLayout {
+                                            spacing: 0
+                                            Text {
+                                                text: modelData.text
+                                                color: Theme.text
+                                                font.pixelSize: Theme.fontM
+                                            }
+                                            Text {
+                                                visible: modelData.sub !== ""
+                                                text: modelData.sub
+                                                color: Theme.textFaint
+                                                font.pixelSize: Theme.fontS
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // A note, not a warning. Over the cap is the
+                            // correct shape for a YouTube master, and saying
+                            // otherwise would talk people out of the one
+                            // workflow this tool is mostly used for. What it
+                            // costs is direct playback, which is invisible
+                            // until a headset refuses the file.
+                            Rectangle {
+                                Layout.fillWidth: true
+                                visible: win.outputExceedsLevelCap
+                                implicitHeight: levelNote.implicitHeight + 16
+                                color: Theme.surfaceAlt
+                                radius: 6
+                                border.width: 1
+                                border.color: Theme.border
+
+                                Text {
+                                    id: levelNote
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    text: win.outputSizeText + " is "
+                                        + win.outputMegapixels + " megapixels, "
+                                        + "past the 35.6 that H.264 and HEVC "
+                                        + "both cap at in their highest level. "
+                                        + "Confirmed on a Quest 3: a file this "
+                                        + "size loads and shows nothing, in "
+                                        + "either codec. Keep it for uploading "
+                                        + "— YouTube transcodes and this is the "
+                                        + "right 8K 3D 360 master — and for "
+                                        + "watching from a file, drop to "
+                                        + (win.resolutions.length > 1
+                                           ? win.resolutions[1].label : "a smaller size")
+                                        + " above, or switch to VR180 at "
+                                        + "full width."
+                                    color: Theme.textDim
+                                    font.pixelSize: Theme.fontS
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+
+                            DirectionPicker {
+                                objectName: "directionPicker"
+                                Layout.fillWidth: true
+                                visible: win.outputMode === "vr180"
+                                source: app.thumbnailSource
+                                loading: win.inputPath !== ""
+                                yaw: win.yaw
+                                onYawMoved: (degrees) => win.yaw = degrees
                             }
                         }
 
@@ -866,7 +1181,10 @@ ApplicationWindow {
                     // than the panel. The output is square and the panel is
                     // wide, so PreserveAspectFit leaves broad letterbox bars
                     // — labels pinned to the panel would sit in empty space
-                    // beside the picture they are naming.
+                    // beside the picture they are naming. They also follow
+                    // the packing: VR180 puts the eyes side by side, and a
+                    // label reading "right eye" over the left one would be
+                    // worse than no label at all.
                     readonly property real paintedW: previewImage.paintedWidth
                     readonly property real paintedH: previewImage.paintedHeight
                     readonly property real paintedX:
@@ -877,9 +1195,14 @@ ApplicationWindow {
                     Repeater {
                         model: parent.hasPreview ? ["Left eye", "Right eye"] : []
                         Rectangle {
+                            readonly property bool sideBySide:
+                                win.outputMode === "vr180"
                             x: previewPanel.paintedX + 10
+                               + (sideBySide
+                                  ? index * previewPanel.paintedW / 2 : 0)
                             y: previewPanel.paintedY + 10
-                               + index * previewPanel.paintedH / 2
+                               + (sideBySide
+                                  ? 0 : index * previewPanel.paintedH / 2)
                             width: tag.implicitWidth + 14
                             height: 22
                             radius: 5
@@ -919,6 +1242,9 @@ ApplicationWindow {
                             : 999999
                         stepSize: 15
                         value: 0
+                        // The direction picker drags on this frame, so it has
+                        // to follow the same one the preview would render.
+                        onValueModified: win.refreshThumbnail()
                     }
                     Text {
                         text: win.sourceSummary

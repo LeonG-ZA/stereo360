@@ -1,9 +1,9 @@
 # stereo360
 
-Convert monoscopic 360° equirectangular video into stereoscopic top-bottom 360°
-video for VR headsets.
+Convert monoscopic 360° equirectangular video into stereoscopic 3D for VR
+headsets — as full 360°, or as VR180.
 
-![The stereo360 desktop interface: left and right eye preview of a single frame, beside the file and encoding settings](docs/ui.png)
+![The stereo360 desktop interface: a left and right eye preview of one frame, beside the file, output and encoding settings](docs/ui.png)
 
 ## What it does
 
@@ -22,12 +22,41 @@ into one depth map, then re-rendering the scene from a second viewpoint.
   where two of them meet.
 - **Steady between frames.** Depth ranges are smoothed over time, and a
   temporal model is available for footage where flicker matters most.
-- **Ready to upload.** Google spherical metadata is written, the original audio
-  is copied through, and ambisonic audio can be tagged as such.
+- **360 or VR180.** A full sphere per eye stacked top over bottom, or the middle
+  180° side by side — the same pixels spent on half the sphere at twice the
+  angular resolution. Input is always a full 360° video either way.
+- **Ready to upload.** Google spherical metadata is written and the original
+  audio is copied through untouched. Ambisonic audio can be tagged as such, and
+  is rotated to match when a VR180 field points somewhere other than straight
+  ahead.
 - **8K capable**, with hardware encoder support on NVIDIA, Intel, AMD, Linux
   and macOS.
 
-Output is a top-bottom MP4 that VR players and YouTube detect automatically.
+The output is an MP4 that VR players and YouTube detect automatically.
+
+## Which output?
+
+Not a cosmetic choice, because an 8K 360 frame is **larger than any headset can
+decode**. 360 output stacks two full equirects, so an 8K source gives 7680×7680
+— 59 megapixels, against the 35.6 megapixel ceiling that H.264 and H.265 both
+reach at their highest level. Changing encoder does not help; both cap at the
+same figure.
+
+| Output | From an 8K source | Plays from a file on a Quest 3 | Good for |
+|---|---|---|---|
+| **360**, full size | 7680×7680 · 59.0 MP | **no** — loads, shows nothing | YouTube and other platforms, which transcode on upload |
+| **360**, reduced | 5760×5760 · 33.2 MP | yes | watching the whole sphere from a file |
+| **VR180** | 7680×3840 · 29.5 MP | yes | the most detail where you are actually looking |
+
+All three measured on a Quest 3's native player. From a 4K source none of this
+applies — nothing you can produce comes near the ceiling.
+
+VR180 keeps half the sphere, so it asks a question 360 never does: *which*
+half. You answer it by dragging the field across a frame of the video rather
+than typing an angle, and it costs nothing to move — the crop selects columns
+rather than rotating the picture.
+
+![The VR180 direction picker: a band drawn across an equirectangular frame showing which 180° the file will keep, with the resulting view beside it](docs/direction.png)
 
 ## Requirements
 
@@ -132,6 +161,12 @@ python -m stereo360 input.mp4 -o preview.png --preview-frame 0
 # final quality for VR viewing
 python -m stereo360 input.mp4 -o output.mp4 --codec libx265 --crf 16 --preset slow
 
+# VR180, pointed 40 degrees to the right of where the camera faced
+python -m stereo360 input.mp4 -o output.mp4 --output-mode vr180 --yaw 40
+
+# 360, small enough to play from a file on a headset
+python -m stereo360 input.mp4 -o output.mp4 --output-width 5760
+
 # steadiest depth, if flicker is what bothers you
 python -m stereo360 input.mp4 -o output.mp4 --depth-backend video-depth-anything
 ```
@@ -145,6 +180,9 @@ Every flag, and the measurements behind each default, are in
   behind the defaults: which depth model and why, what CRF is actually visually
   lossless in a headset, cube seam removal, stereo geometry, hardware encoders,
   colour handling.
+- **[plans/vr180.md](plans/vr180.md)** — how VR180 output works and what was
+  measured on a headset to settle it: frame size limits, spatial audio
+  rotation, and which audio codecs actually play.
 - **[plans/360-stereo-converter-design.md](plans/360-stereo-converter-design.md)**
   — design and milestone roadmap.
 
