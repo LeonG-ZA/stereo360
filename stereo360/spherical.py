@@ -189,17 +189,67 @@ def _audio_channels(data: bytes, entry_start: int) -> int:
                                     entry_start + 8 + 18])[0]
 
 
+#: Where a VisualSampleEntry's child boxes start, measured from the start of
+#: the entry box: 8 for the box header, 8 for SampleEntry's reserved fields and
+#: data_reference_index, then 70 of fixed visual fields ending in
+#: compressorname and depth.
+_VISUAL_SAMPLE_ENTRY_HEADER = 86
+
+
+def _has_v2_boxes(data: bytes, trak_start: int, trak_size: int,
+                  trak_header: int) -> bool:
+    """Whether this trak's sample entry carries `st3d` or `sv3d`.
+
+    Read by parsing the entry's own children rather than by extending `_walk`,
+    which deliberately stops at `stbl`. Teaching that walk to descend into
+    sample entries would change what `inject_spherical_metadata` sees while it
+    is deciding where to splice, and that is not a side effect worth risking
+    for a predicate.
+    """
+    if _track_handler(data, trak_start, trak_size, trak_header) != "vide":
+        return False
+    entry = _sample_entry(data, trak_start, trak_size, trak_header)
+    if entry is None:
+        return False
+    estart, esize = entry
+    try:
+        children = _parse_boxes(data, estart + _VISUAL_SAMPLE_ENTRY_HEADER,
+                                estart + esize)
+        return any(btype in ("st3d", "sv3d") for _, btype, _, _ in children)
+    except ValueError:
+        # An entry laid out differently from the spec is not something to
+        # guess at. Reporting "no metadata" makes an injection go ahead and
+        # fail loudly, which beats silently skipping it.
+        return False
+
+
 def has_spherical_metadata(path: str) -> bool:
+    """Whether the file already carries spherical metadata, V1 **or** V2.
+
+    Both, and that is the whole point. This used to find only V1 -- the `uuid`
+    box, which sits directly under `moov`. It tested for `st3d` and `sv3d` too,
+    but `_walk` stops at `stbl` and those live one level deeper still, inside
+    the video sample entry, so that branch could never match.
+
+    It went unnoticed while every file carried V1 as well. VR180 output omits
+    V1, because V1 cannot express a partial sphere, and the function then
+    reported "no metadata" about a file carrying `st3d`, `sv3d` and `equi`.
+
+    That matters because `inject_spherical_metadata` uses this as its "already
+    tagged, do nothing" guard. A guard that never fires would let a second
+    injection write a second set of boxes into the same file.
+    """
     data = Path(path).read_bytes()
     moov = _find_moov(data)
     if moov is None:
         return False
     start, size, header = moov
-    for pos, btype, _, bheader, _ in _walk(data, start + header, start + size):
+    for pos, btype, bsize, bheader, _ in _walk(data, start + header,
+                                               start + size):
         if btype == "uuid" and data[pos + bheader:pos + bheader + 16] == \
                 SPHERICAL_UUID:
             return True
-        if btype in ("st3d", "sv3d"):
+        if btype == "trak" and _has_v2_boxes(data, pos, bsize, bheader):
             return True
     return False
 

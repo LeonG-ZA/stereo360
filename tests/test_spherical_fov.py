@@ -164,3 +164,79 @@ def test_a_real_reader_still_sees_a_full_sphere_by_default(tmp_path):
     assert sd is not None
     assert sd["projection"] == "equirectangular", sd
     assert "bound_left" not in sd or sd["bound_left"] == 0
+
+
+# ------------------------------------------- detecting what is already there
+
+def test_v2_metadata_is_detected_without_v1(tmp_path):
+    """The bug this closes: `has_spherical_metadata` walked only as deep as
+    `stbl`, and `st3d`/`sv3d` live one level further in, inside the video
+    sample entry. So it found V1 and nothing else.
+
+    It went unnoticed while every file carried V1 too. VR180 omits V1 -- it
+    cannot express a partial sphere -- and the function then said "no
+    metadata" about a file full of it.
+    """
+    from stereo360 import spherical
+
+    out = _tagged(tmp_path, "v2.mp4", stereo_mode="left-right",
+                  horizontal_fov=180.0)
+    data = out.read_bytes()
+    assert spherical.SPHERICAL_UUID not in data, "V1 should be absent here"
+    assert b"st3d" in data and b"sv3d" in data
+    assert spherical.has_spherical_metadata(str(out))
+
+
+def test_v1_metadata_is_still_detected(tmp_path):
+    """360 output carries both; the V1 path must keep working."""
+    from stereo360 import spherical
+
+    out = _tagged(tmp_path, "v1.mp4", stereo_mode="top-bottom",
+                  horizontal_fov=360.0)
+    assert spherical.SPHERICAL_UUID in out.read_bytes()
+    assert spherical.has_spherical_metadata(str(out))
+
+
+def test_an_untagged_file_is_still_reported_as_untagged(tmp_path):
+    """The predicate has to be able to say no, or injection never happens."""
+    from stereo360 import spherical
+
+    plain = _plain_mp4(tmp_path, "plain.mp4")
+    assert not spherical.has_spherical_metadata(str(plain))
+
+
+@pytest.mark.parametrize("mode,fov", [("top-bottom", 360.0),
+                                      ("left-right", 180.0)])
+def test_injecting_twice_changes_nothing(tmp_path, mode, fov):
+    """What the guard is for. Before the fix it never fired for VR180, so a
+    second call would have written a second set of boxes into the file."""
+    from stereo360 import spherical
+
+    out = _tagged(tmp_path, "twice.mp4", stereo_mode=mode, horizontal_fov=fov)
+    first = out.read_bytes()
+    spherical.inject_spherical_metadata(str(out), stereo_mode=mode,
+                                        horizontal_fov=fov)
+    again = out.read_bytes()
+    assert again == first, "a second injection must be a no-op"
+    assert again.count(b"st3d") == 1 and again.count(b"sv3d") == 1
+
+
+def _plain_mp4(tmp_path, name):
+    """A small MP4 with no spherical metadata at all."""
+    out = tmp_path / name
+    if subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "testsrc=size=64x32:rate=10:duration=1", "-an", "-c:v",
+             "libx264", "-movflags", "-faststart", "-y", str(out)],
+            capture_output=True).returncode:
+        pytest.skip("ffmpeg could not build the fixture")
+    return out
+
+
+def _tagged(tmp_path, name, *, stereo_mode, horizontal_fov):
+    from stereo360 import spherical
+
+    out = _plain_mp4(tmp_path, name)
+    spherical.inject_spherical_metadata(str(out), stereo_mode=stereo_mode,
+                                        horizontal_fov=horizontal_fov)
+    return out

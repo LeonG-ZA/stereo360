@@ -193,9 +193,10 @@ def test_a_yaw_turns_the_soundfield_with_the_picture(tmp_path: Path):
     # that wrote the wrong number would leave the file claiming a different
     # order than it has -- or refuse to be tagged at all.
     assert ffmpeg_io.probe(dst).audio_channels == 4
-    # Not has_spherical_metadata(), which only looks for the V1 uuid box --
-    # deliberately absent in VR180, since V1 cannot express a partial sphere.
     assert b"SA3D" in Path(dst).read_bytes()
+    # has_spherical_metadata used to miss this: V1 is deliberately absent in
+    # VR180, and it could only ever find V1. See test_spherical_fov.py.
+    assert spherical.has_spherical_metadata(dst)
 
 
 def test_without_a_yaw_the_audio_is_copied_untouched(tmp_path: Path):
