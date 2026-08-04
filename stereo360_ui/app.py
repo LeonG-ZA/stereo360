@@ -163,6 +163,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             for name in ("quality", "depthBackend", "depthModel", "onnxModel",
                          "sourceSubsampling", "spatialAudio", "depthTiles",
                          "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
+                         "spatialAudioHint",
                          "strength", "gradientLimit"):
                 print(f"PROP\t{name}\t{window.property(name)}")
             for entry in controller.encoders:

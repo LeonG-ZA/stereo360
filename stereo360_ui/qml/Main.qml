@@ -128,7 +128,23 @@ ApplicationWindow {
 
     Connections {
         target: app
-        function onSourceInfoChanged() { win.refreshEncoders() }
+        function onSourceInfoChanged() {
+            win.refreshEncoders()
+            // Set the spatial-audio switch from what the file turned out to
+            // be, rather than making someone notice a channel count and tick
+            // a box. Forgetting it is not a small mistake: with a yaw it
+            // leaves every sound at the wrong bearing, and there is nothing
+            // to hear that says so.
+            //
+            // Only on a *new source*, so it never argues with a decision
+            // already made -- changing the preview frame does not re-tick a
+            // box that was deliberately cleared.
+            //
+            // The CLI keeps requiring the flag. Guessing on someone's behalf
+            // is defensible in front of a switch they can see; it is not
+            // defensible in a batch run nobody is watching.
+            win.spatialAudio = win.sourceIsAmbisonic
+        }
     }
 
     readonly property int sourceWidth:
@@ -157,6 +173,36 @@ ApplicationWindow {
         var n = app.sourceInfo ? app.sourceInfo.audio_channels : 0
         return n === 4 || n === 9 || n === 16
     }
+    // Four cases, and nested ternaries had stopped being readable at three.
+    readonly property string spatialAudioHint: {
+        var turning = outputMode === "vr180" && yaw !== 0
+        var channels = app.sourceInfo && app.sourceInfo.audio_channels
+                       ? app.sourceInfo.audio_channels : 0
+
+        if (spatialAudio && turning)
+            return "The soundfield will be turned " + yaw.toFixed(0)
+                 + "° to match the view, so sounds stay where you see them. "
+                 + "The audio is re-encoded once to do it — the log names the "
+                 + "codec — and the picture is unaffected."
+        if (spatialAudio && sourceIsAmbisonic)
+            // Say that this was decided rather than chosen, and on what
+            // evidence: a channel count cannot tell ambiX from four separate
+            // microphones or a four-stem mix, and treating those as a
+            // soundfield would be worse than leaving them alone.
+            return "Set from the file: it has " + channels + " audio "
+                 + "channels, which is what ambiX looks like. Untick it if "
+                 + "those are really separate microphones or stems rather "
+                 + "than a soundfield."
+        if (turning)
+            return "Tick this if the source audio really is ambiX: 4, 9 or 16 "
+                 + "channels. Without it the view turns and the sound does "
+                 + "not, leaving every source " + Math.abs(yaw).toFixed(0)
+                 + "° out of place."
+        return "Tick only if the source audio really is ambiX: 4, 9 or 16 "
+             + "channels. 360° and top-bottom are always written and need no "
+             + "setting."
+    }
+
     readonly property string outputMegapixels:
         outputSize ? (outputSize[0] * outputSize[1] / 1e6).toFixed(1) : ""
 
@@ -456,13 +502,7 @@ ApplicationWindow {
                             // before the render, not discovered after.
                             Row2 {
                                 label: "Spatial audio"
-                                hint: win.spatialAudio && win.outputMode === "vr180" && win.yaw !== 0
-                                    ? "The soundfield will be turned " + win.yaw.toFixed(0) + "° to match the view, so sounds stay where you see them. The audio is re-encoded once to do it — the log names the codec — and the picture is unaffected."
-                                    : win.outputMode === "vr180" && win.yaw !== 0
-                                      ? (win.sourceIsAmbisonic
-                                         ? "This source has " + app.sourceInfo.audio_channels + " audio channels, which is what ambiX looks like. Tick this and the soundfield turns with the view; leave it and every sound stays " + Math.abs(win.yaw).toFixed(0) + "° out of place."
-                                         : "Tick this if the source audio really is ambiX: 4, 9 or 16 channels. Without it the view turns and the sound does not, leaving every source " + Math.abs(win.yaw).toFixed(0) + "° out of place.")
-                                      : "Tick only if the source audio really is ambiX: 4, 9 or 16 channels. 360° and top-bottom are always written and need no setting."
+                                hint: win.spatialAudioHint
                                 Switch {
                                     checked: win.spatialAudio
                                     onToggled: win.spatialAudio = checked

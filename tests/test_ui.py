@@ -887,3 +887,79 @@ def test_the_resolution_box_shows_the_size_that_will_render(extra, mode,
     assert choices[shown]["width"] == expected_width, (
         f"box points at {choices[shown]['label']}, "
         f"but {expected_width} is what would render")
+
+
+# ------------------------------------------------ detecting ambisonic audio
+
+
+def _ambix_source(tmp_path: Path, channels: int) -> str:
+    """A clip whose audio has `channels` channels and says nothing else."""
+    import subprocess
+
+    out = str(tmp_path / f"src{channels}.mp4")
+    layout = {4: "4.0", 2: "stereo", 1: "mono", 6: "5.1"}.get(
+        channels, f"{channels}C")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", "testsrc=size=128x64:rate=10:duration=1",
+         "-f", "lavfi", "-i", f"anoisesrc=d=1:r=48000",
+         "-map", "0:v", "-map", "1:a", "-ac", str(channels),
+         "-c:a", "aac", "-c:v", "libx264", "-y", out],
+        check=True, capture_output=True)
+    return out
+
+
+@pytest.mark.parametrize("channels,expected", [
+    (4, True), (2, False), (1, False), (6, False),
+])
+def test_the_probe_reports_the_count_the_ui_decides_from(tmp_path, qapp,
+                                                          channels, expected):
+    """The UI ticks its spatial-audio switch from this number, so it has to
+    survive the probe. 6 is 5.1 -- a perfect trap, since it is multichannel
+    and emphatically not a soundfield."""
+    from stereo360 import ambisonics
+
+    src = _ambix_source(tmp_path, channels)
+    ctrl = Controller()
+    seen = []
+    ctrl.sourceInfoChanged.connect(lambda: seen.append(dict(ctrl.sourceInfo)))
+    ctrl.probeInput(src)
+    assert _pump(qapp, lambda: any(s.get("width") for s in seen), timeout=120)
+
+    info = next(s for s in seen if s.get("width"))
+    assert info["audio_channels"] == channels
+    assert (ambisonics.order_for_channels(info["audio_channels"])
+            is not None) is expected
+
+
+def test_the_switch_sets_itself_from_the_source(tmp_path):
+    """Forgetting the flag is not a small mistake -- with a yaw it leaves every
+    sound at the wrong bearing, and there is nothing to hear that says so. So
+    the interface reads the file instead of waiting to be told."""
+    four = _ambix_source(tmp_path, 4)
+    two = _ambix_source(tmp_path, 2)
+
+    props, _ = _dump(f"inputPath={four}")
+    assert props["spatialAudio"] == "True", "4 channels should tick it"
+
+    props, _ = _dump(f"inputPath={two}")
+    assert props["spatialAudio"] == "False", "stereo must not"
+
+
+def test_the_switch_says_it_decided_and_on_what_evidence(tmp_path):
+    """A channel count cannot tell ambiX from four separate microphones, so
+    the one thing the hint must not do is sound certain."""
+    props, _ = _dump(f"inputPath={_ambix_source(tmp_path, 4)}")
+    hint = props["spatialAudioHint"]
+    assert "Set from the file" in hint, "does not say it was decided for you"
+    assert "4 audio channels" in hint, "does not give the evidence"
+    assert "Untick" in hint, "does not say it can be wrong"
+
+
+def test_the_cli_still_requires_the_flag():
+    """Guessing is defensible in front of a switch someone can see. It is not
+    defensible in a batch run nobody is watching, so the CLI is unchanged."""
+    argv = options.build_argv(dict(BASE, sourceWidth=7680))
+    assert "--spatial-audio" not in argv
+    argv = options.build_argv(dict(BASE, spatialAudio=True))
+    assert "--spatial-audio" in argv
