@@ -450,6 +450,7 @@ def _probe_json(path: str) -> int:
     import json
 
     from .ffmpeg_io import probe
+    from .spherical import declares_ambix
 
     info = probe(path)
     print(json.dumps({
@@ -457,6 +458,10 @@ def _probe_json(path: str) -> int:
         "frame_count": info.frame_count, "duration": info.duration,
         "has_audio": info.has_audio, "pix_fmt": info.pix_fmt,
         "audio_channels": info.audio_channels,
+        # From the file's own SA3D box, which ffprobe does not surface at all
+        # -- it reports this camera's track as plain "4.0". VLC reads it, which
+        # is why VLC says "Channels: Ambisonics" about the same file.
+        "declares_ambix": declares_ambix(path),
         "chroma": info.chroma, "color_range": info.color.range,
         "color_space": info.color.space,
     }))

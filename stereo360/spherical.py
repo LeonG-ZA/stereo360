@@ -25,6 +25,7 @@ Requirement: `moov` must come AFTER `mdat` (we encode with `-movflags
 
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -242,6 +243,128 @@ def _has_v2_boxes(data: bytes, trak_start: int, trak_size: int,
     return any(btype in ("st3d", "sv3d") for _, btype, _, _
                in _video_sample_entry_children(data, trak_start, trak_size,
                                                trak_header))
+
+
+#: Where an AudioSampleEntry's child boxes start, measured from the start of
+#: the entry: the box header, the SampleEntry base (6 reserved + 2
+#: data_reference_index), then 20 bytes of audio fields -- 8 reserved,
+#: channelcount, samplesize, pre_defined, reserved, samplerate.
+_AUDIO_SAMPLE_ENTRY_FIELDS = 8 + 8 + 20
+
+#: SA3D's own vocabulary. Anything else is ambisonic but not what this tool
+#: assumes, and guessing would be worse than declining to.
+_ACN, _SN3D, _PERIPHONIC = 0, 0, 0
+
+
+def _read_moov(path: str) -> Optional[Tuple[bytes, int]]:
+    """(moov bytes, its offset) without reading the rest of the file.
+
+    Worth the seeking. Camera files put `moov` at the end -- an Insta360 X5
+    clip has it 1.2 GB in -- so a probe that wants one small box should not
+    pull a gigabyte through memory to reach it. Reading the front of the file
+    and giving up is worse still: that is how the SA3D box in exactly such a
+    file got reported as absent.
+    """
+    total = os.path.getsize(path)
+    with open(path, "rb") as f:
+        pos = 0
+        while pos + 8 <= total:
+            f.seek(pos)
+            head = f.read(16)
+            if len(head) < 8:
+                return None
+            size = struct.unpack(">I", head[0:4])[0]
+            btype = head[4:8].decode("latin-1", "replace")
+            if size == 1:
+                if len(head) < 16:
+                    return None
+                size = struct.unpack(">Q", head[8:16])[0]
+            elif size == 0:
+                size = total - pos
+            if size < 8 or pos + size > total:
+                return None
+            if btype == "moov":
+                f.seek(pos)
+                return f.read(size), pos
+            pos += size
+    return None
+
+
+def read_ambisonic_description(path: str) -> Optional[Dict[str, int]]:
+    """What the file's own `SA3D` box says its audio is, or None.
+
+    This is the authoritative answer to "is this ambisonics", and it is the
+    one VLC uses -- it reports "Channels: Ambisonics" for a file ffprobe
+    describes as plain `4.0`, because ffprobe does not surface SA3D at all.
+
+    None means the file does not say, which is not the same as "no". Plenty of
+    ambiX is delivered untagged, and the channel count is the only hint left
+    in that case.
+
+    Returns the fields rather than a bool so a caller can refuse what it
+    cannot handle: `channel_ordering` and `normalization` are ACN and SN3D
+    here, and a file declaring FuMa is genuinely ambisonic and genuinely not
+    what the rotation maths assumes.
+    """
+    found = _read_moov(path)
+    if found is None:
+        return None
+    moov, offset = found
+    size = struct.unpack(">I", moov[0:4])[0]
+    header = 16 if size == 1 else 8
+    try:
+        traks = list(_walk(moov, header, len(moov)))
+    except ValueError:
+        return None
+
+    for pos, btype, bsize, bheader, _ in traks:
+        if btype != "trak":
+            continue
+        if _track_handler(moov, pos, bsize, bheader) != "soun":
+            continue
+        entry = _sample_entry(moov, pos, bsize, bheader)
+        if entry is None:
+            continue
+        estart, esize = entry
+        if esize < _AUDIO_SAMPLE_ENTRY_FIELDS:
+            continue
+        try:
+            children = list(_parse_boxes(
+                moov, estart + _AUDIO_SAMPLE_ENTRY_FIELDS, estart + esize))
+        except ValueError:
+            continue
+        for kpos, ktype, _, kheader in children:
+            if ktype != "SA3D":
+                continue
+            p = kpos + kheader
+            if p + 12 > len(moov):
+                return None
+            return {
+                "version": moov[p],
+                "ambisonic_type": moov[p + 1],
+                "order": struct.unpack(">I", moov[p + 2:p + 6])[0],
+                "channel_ordering": moov[p + 6],
+                "normalization": moov[p + 7],
+                "channels": struct.unpack(">I", moov[p + 8:p + 12])[0],
+            }
+    return None
+
+
+def declares_ambix(path: str) -> bool:
+    """Whether the file declares ambiX this tool can actually work with.
+
+    ACN ordering and SN3D normalisation, periphonic, and a channel count that
+    matches the order it claims. A file failing any of those may still be
+    ambisonic; it is just not the thing `stereo360.ambisonics` rotates.
+    """
+    sa3d = read_ambisonic_description(path)
+    if sa3d is None:
+        return False
+    return (sa3d["ambisonic_type"] == _PERIPHONIC
+            and sa3d["channel_ordering"] == _ACN
+            and sa3d["normalization"] == _SN3D
+            and 1 <= sa3d["order"] <= 3
+            and sa3d["channels"] == (sa3d["order"] + 1) ** 2)
 
 
 def has_spherical_metadata(path: str) -> bool:

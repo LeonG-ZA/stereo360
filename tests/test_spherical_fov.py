@@ -278,3 +278,96 @@ def test_injecting_twice_does_not_duplicate_the_audio_box_either(tmp_path):
     moov = _moov(out)
     for tag in (b"st3d", b"sv3d", b"equi", b"SA3D"):
         assert moov.count(tag) == 1, f"{tag.decode()} appears more than once"
+
+
+# ----------------------------------------- reading what a file says it has
+
+def test_sa3d_is_read_back_from_a_file_we_wrote(tmp_path):
+    """Round trip through our own injector, so the reader is checked against
+    the writer rather than against a hand-built fixture."""
+    from stereo360 import spherical
+
+    out = tmp_path / "ambix.mp4"
+    if subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=size=64x32:rate=10:duration=1",
+             "-f", "lavfi", "-i", "anoisesrc=d=1:r=48000",
+             "-map", "0:v", "-map", "1:a", "-ac", "4", "-c:a", "aac",
+             "-c:v", "libx264", "-movflags", "-faststart", "-y", str(out)],
+            capture_output=True).returncode:
+        pytest.skip("ffmpeg could not build the fixture")
+
+    assert spherical.read_ambisonic_description(str(out)) is None, \
+        "nothing has declared anything yet"
+    assert not spherical.declares_ambix(str(out))
+
+    spherical.inject_spherical_metadata(str(out), stereo_mode="top-bottom",
+                                        spatial_audio=True)
+    sa3d = spherical.read_ambisonic_description(str(out))
+    assert sa3d == {"version": 0, "ambisonic_type": 0, "order": 1,
+                    "channel_ordering": 0, "normalization": 0, "channels": 4}
+    assert spherical.declares_ambix(str(out))
+
+
+def test_a_file_that_says_nothing_reads_as_nothing(tmp_path):
+    """None means "did not say", which is not "no" -- plenty of ambiX is
+    delivered untagged. The caller falls back to the channel count."""
+    from stereo360 import spherical
+
+    plain = _plain_mp4(tmp_path, "silent_about_it.mp4")
+    assert spherical.read_ambisonic_description(str(plain)) is None
+    assert not spherical.declares_ambix(str(plain))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("channel_ordering", 1),      # FuMa rather than ACN
+    ("normalization", 1),         # FuMa/maxN rather than SN3D
+    ("ambisonic_type", 1),        # not periphonic
+    ("order", 4),                 # beyond what SA3D is written for here
+])
+def test_ambisonic_but_not_what_we_rotate_is_refused(monkeypatch, field, value):
+    """A file declaring FuMa is genuinely ambisonic and genuinely not what the
+    rotation maths assumes. Saying "yes" to it would turn a correct file into
+    a wrong one."""
+    from stereo360 import spherical
+
+    good = {"version": 0, "ambisonic_type": 0, "order": 1,
+            "channel_ordering": 0, "normalization": 0, "channels": 4}
+    monkeypatch.setattr(spherical, "read_ambisonic_description",
+                        lambda _p: dict(good, **{field: value}))
+    assert not spherical.declares_ambix("ignored")
+
+    monkeypatch.setattr(spherical, "read_ambisonic_description",
+                        lambda _p: good)
+    assert spherical.declares_ambix("ignored")
+
+
+def test_a_channel_count_disagreeing_with_the_order_is_refused(monkeypatch):
+    """Order 1 is 4 channels. A box claiming otherwise describes a file that
+    does not exist, and trusting it would index off the end of the track."""
+    from stereo360 import spherical
+
+    monkeypatch.setattr(
+        spherical, "read_ambisonic_description",
+        lambda _p: {"version": 0, "ambisonic_type": 0, "order": 1,
+                    "channel_ordering": 0, "normalization": 0, "channels": 9})
+    assert not spherical.declares_ambix("ignored")
+
+
+def test_moov_is_found_without_reading_the_whole_file(tmp_path):
+    """Camera files put moov at the end -- an Insta360 X5 clip has it 1.2 GB
+    in. Searching only the front is how that file's SA3D box was first
+    reported as absent, so the reader seeks instead of loading."""
+    from stereo360 import spherical
+
+    out = _plain_mp4(tmp_path, "faststart_off.mp4")
+    data = out.read_bytes()
+    moov_at = spherical._find_moov(data)[0]
+    assert moov_at > len(data) / 2, "fixture should have moov at the end"
+
+    found = spherical._read_moov(str(out))
+    assert found is not None
+    moov, offset = found
+    assert offset == moov_at
+    assert moov[4:8] == b"moov"
+    assert len(moov) < len(data), "should not have read the whole file"

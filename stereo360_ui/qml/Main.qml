@@ -165,14 +165,24 @@ ApplicationWindow {
     readonly property bool outputExceedsLevelCap:
         outputSize ? app.exceedsLevelLimit(outputSize[0], outputSize[1])
                    : false
-    // 4, 9 or 16 channels is what ambiX looks like. Only a hint -- the file
-    // does not say, which is why --spatial-audio exists at all -- but a hint
-    // worth giving, because the cost of forgetting it is every sound at the
-    // wrong bearing and nothing to hear that says so.
-    readonly property bool sourceIsAmbisonic: {
+    // The file's own SA3D box, which is the authoritative answer and the one
+    // VLC uses -- it reports "Channels: Ambisonics" for a track ffprobe
+    // describes as plain 4.0, because ffprobe does not surface SA3D at all.
+    readonly property bool sourceDeclaresAmbix:
+        app.sourceInfo ? app.sourceInfo.declares_ambix === true : false
+
+    // The fallback when the file says nothing: 4, 9 or 16 channels is what
+    // ambiX looks like. A guess, and it cannot tell a soundfield from four
+    // separate microphones -- but plenty of ambiX is delivered untagged, and
+    // the cost of missing it is every sound at the wrong bearing with nothing
+    // to hear that says so.
+    readonly property bool sourceCountLooksAmbisonic: {
         var n = app.sourceInfo ? app.sourceInfo.audio_channels : 0
         return n === 4 || n === 9 || n === 16
     }
+
+    readonly property bool sourceIsAmbisonic:
+        sourceDeclaresAmbix || sourceCountLooksAmbisonic
     // Four cases, and nested ternaries had stopped being readable at three.
     readonly property string spatialAudioHint: {
         var turning = outputMode === "vr180" && yaw !== 0
@@ -184,15 +194,20 @@ ApplicationWindow {
                  + "° to match the view, so sounds stay where you see them. "
                  + "The audio is re-encoded once to do it — the log names the "
                  + "codec — and the picture is unaffected."
-        if (spatialAudio && sourceIsAmbisonic)
-            // Say that this was decided rather than chosen, and on what
-            // evidence: a channel count cannot tell ambiX from four separate
-            // microphones or a four-stem mix, and treating those as a
-            // soundfield would be worse than leaving them alone.
+        if (spatialAudio && sourceDeclaresAmbix)
+            // No hedging needed here: the file says so itself.
+            return "Set from the file, which declares its audio as ambiX in "
+                 + "its own metadata — the same thing VLC reads when it says "
+                 + "\"Channels: Ambisonics\"."
+        if (spatialAudio && sourceCountLooksAmbisonic)
+            // Here it is a guess, and it says so: a channel count cannot tell
+            // ambiX from four separate microphones or a four-stem mix, and
+            // treating those as a soundfield would be worse than leaving them
+            // alone.
             return "Set from the file: it has " + channels + " audio "
-                 + "channels, which is what ambiX looks like. Untick it if "
-                 + "those are really separate microphones or stems rather "
-                 + "than a soundfield."
+                 + "channels, which is what ambiX looks like. It does not say "
+                 + "so outright, though — untick this if those are really "
+                 + "separate microphones or stems."
         if (turning)
             return "Tick this if the source audio really is ambiX: 4, 9 or 16 "
                  + "channels. Without it the view turns and the sound does "

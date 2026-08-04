@@ -947,13 +947,15 @@ def test_the_switch_sets_itself_from_the_source(tmp_path):
 
 
 def test_the_switch_says_it_decided_and_on_what_evidence(tmp_path):
-    """A channel count cannot tell ambiX from four separate microphones, so
-    the one thing the hint must not do is sound certain."""
+    """With no declaration in the file, a channel count is all there is -- and
+    it cannot tell ambiX from four separate microphones. So the one thing this
+    hint must not do is sound certain."""
     props, _ = _dump(f"inputPath={_ambix_source(tmp_path, 4)}")
     hint = props["spatialAudioHint"]
     assert "Set from the file" in hint, "does not say it was decided for you"
     assert "4 audio channels" in hint, "does not give the evidence"
-    assert "Untick" in hint, "does not say it can be wrong"
+    assert "does not say so outright" in hint, "sounds more certain than it is"
+    assert "untick" in hint.lower(), "does not say it can be wrong"
 
 
 def test_the_cli_still_requires_the_flag():
@@ -963,3 +965,41 @@ def test_the_cli_still_requires_the_flag():
     assert "--spatial-audio" not in argv
     argv = options.build_argv(dict(BASE, spatialAudio=True))
     assert "--spatial-audio" in argv
+
+
+def test_a_declared_file_is_not_hedged_about(tmp_path):
+    """When the file says so itself there is nothing to guess, and the hint
+    should not pretend otherwise. This is the signal VLC uses -- it reports
+    "Channels: Ambisonics" for a track ffprobe describes as plain 4.0."""
+    from stereo360 import spherical
+
+    src = _ambix_source(tmp_path, 4)
+    spherical.inject_spherical_metadata(src, stereo_mode="top-bottom",
+                                        spatial_audio=True)
+    props, _ = _dump(f"inputPath={src}")
+    assert props["spatialAudio"] == "True"
+    hint = props["spatialAudioHint"]
+    assert "declares its audio as ambiX" in hint
+    assert "Untick" not in hint, "no hedging when the file is explicit"
+
+
+def test_the_probe_reports_what_the_file_declares(tmp_path, qapp):
+    """ffprobe does not surface SA3D, so the tool reads the box itself."""
+    from stereo360 import spherical
+
+    src = _ambix_source(tmp_path, 4)
+    ctrl = Controller()
+    seen = []
+    ctrl.sourceInfoChanged.connect(lambda: seen.append(dict(ctrl.sourceInfo)))
+    ctrl.probeInput(src)
+    assert _pump(qapp, lambda: any(s.get("width") for s in seen), timeout=120)
+    assert next(s for s in seen if s.get("width"))["declares_ambix"] is False
+
+    spherical.inject_spherical_metadata(src, stereo_mode="top-bottom",
+                                        spatial_audio=True)
+    ctrl2 = Controller()
+    seen2 = []
+    ctrl2.sourceInfoChanged.connect(lambda: seen2.append(dict(ctrl2.sourceInfo)))
+    ctrl2.probeInput(src)
+    assert _pump(qapp, lambda: any(s.get("width") for s in seen2), timeout=120)
+    assert next(s for s in seen2 if s.get("width"))["declares_ambix"] is True
