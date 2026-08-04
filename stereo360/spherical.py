@@ -46,6 +46,13 @@ xmlns:GSpherical="http://ns.google.com/videos/1.0/spherical/">
 _STEREO_MODES = {"mono": 0, "top-bottom": 1, "left-right": 2}
 
 # Boxes we descend into when walking the tree. Everything else is a leaf.
+#
+# `stsd` is deliberately absent, and so is every sample entry. Both do hold
+# child boxes, but neither starts them at its own header: `stsd` is a full box
+# with an entry count in front, and a sample entry opens with a block of fixed
+# codec fields whose length depends on whether the track is visual or audio. A
+# walk that does not know which handler it is under cannot know where those
+# children begin, so reaching them is `_video_sample_entry_children`'s job.
 _CONTAINERS = {"moov", "trak", "mdia", "minf", "stbl"}
 
 
@@ -189,38 +196,52 @@ def _audio_channels(data: bytes, entry_start: int) -> int:
                                     entry_start + 8 + 18])[0]
 
 
-#: Where a VisualSampleEntry's child boxes start, measured from the start of
-#: the entry box: 8 for the box header, 8 for SampleEntry's reserved fields and
-#: data_reference_index, then 70 of fixed visual fields ending in
-#: compressorname and depth.
-_VISUAL_SAMPLE_ENTRY_HEADER = 86
+#: Where a VisualSampleEntry's first child box starts, measured from the start
+#: of the entry: the box header, the SampleEntry base (6 reserved + 2
+#: data_reference_index), then 70 bytes of visual fields running from width and
+#: height through compressorname and depth (ISO/IEC 14496-12 12.1.3). Confirmed
+#: against a real file rather than trusted: parsing from here yields
+#: ['avcC', 'btrt', 'st3d', 'sv3d'].
+_VISUAL_SAMPLE_ENTRY_FIELDS = 8 + 8 + 70
 
 
-def _has_v2_boxes(data: bytes, trak_start: int, trak_size: int,
-                  trak_header: int) -> bool:
-    """Whether this trak's sample entry carries `st3d` or `sv3d`.
+def _video_sample_entry_children(data: bytes, trak_start: int, trak_size: int,
+                                 trak_header: int):
+    """Yield the boxes inside a video trak's first sample entry.
 
-    Read by parsing the entry's own children rather than by extending `_walk`,
-    which deliberately stops at `stbl`. Teaching that walk to descend into
+    That is `avcC`/`hvcC` and, once this module has been here, `st3d` and
+    `sv3d`. Nothing is yielded for a track that is not video, since only a
+    VisualSampleEntry has the fixed-field preamble measured above.
+
+    Separate from `_walk` on purpose. Teaching that walk to descend into
     sample entries would change what `inject_spherical_metadata` sees while it
     is deciding where to splice, and that is not a side effect worth risking
     for a predicate.
     """
     if _track_handler(data, trak_start, trak_size, trak_header) != "vide":
-        return False
+        return
     entry = _sample_entry(data, trak_start, trak_size, trak_header)
     if entry is None:
-        return False
+        return
     estart, esize = entry
+    if esize < _VISUAL_SAMPLE_ENTRY_FIELDS:
+        return
     try:
-        children = _parse_boxes(data, estart + _VISUAL_SAMPLE_ENTRY_HEADER,
+        yield from _parse_boxes(data, estart + _VISUAL_SAMPLE_ENTRY_FIELDS,
                                 estart + esize)
-        return any(btype in ("st3d", "sv3d") for _, btype, _, _ in children)
     except ValueError:
         # An entry laid out differently from the spec is not something to
-        # guess at. Reporting "no metadata" makes an injection go ahead and
-        # fail loudly, which beats silently skipping it.
-        return False
+        # guess at. Yielding nothing makes an injection go ahead and fail
+        # loudly, which beats silently skipping it.
+        return
+
+
+def _has_v2_boxes(data: bytes, trak_start: int, trak_size: int,
+                  trak_header: int) -> bool:
+    """Whether this trak's sample entry carries `st3d` or `sv3d`."""
+    return any(btype in ("st3d", "sv3d") for _, btype, _, _
+               in _video_sample_entry_children(data, trak_start, trak_size,
+                                               trak_header))
 
 
 def has_spherical_metadata(path: str) -> bool:

@@ -240,3 +240,41 @@ def _tagged(tmp_path, name, *, stereo_mode, horizontal_fov):
     spherical.inject_spherical_metadata(str(out), stereo_mode=stereo_mode,
                                         horizontal_fov=horizontal_fov)
     return out
+
+
+def _moov(path):
+    """Just the moov box, so counting tags cannot trip over sample data."""
+    from stereo360 import spherical
+
+    data = open(path, "rb").read()
+    start, size, _ = spherical._find_moov(data)
+    return data[start:start + size]
+
+
+def test_injecting_twice_does_not_duplicate_the_audio_box_either(tmp_path):
+    """SA3D goes into the *audio* sample entry, on a different track from
+    st3d/sv3d, so it needs its own check that the guard covers it. Counted
+    inside moov rather than across the file: a byte pattern can occur in
+    sample data by chance and would make this pass for the wrong reason."""
+    from stereo360 import spherical
+
+    out = tmp_path / "twice_audio.mp4"
+    if subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "testsrc=size=64x32:rate=10:duration=1",
+             "-f", "lavfi", "-i", "anoisesrc=d=1:r=48000",
+             "-map", "0:v", "-map", "1:a", "-ac", "4", "-c:a", "aac",
+             "-c:v", "libx264", "-movflags", "-faststart", "-y", str(out)],
+            capture_output=True).returncode:
+        pytest.skip("ffmpeg could not build the fixture")
+
+    inject = dict(stereo_mode="left-right", horizontal_fov=180.0,
+                  spatial_audio=True)
+    spherical.inject_spherical_metadata(str(out), **inject)
+    once = out.read_bytes()
+    spherical.inject_spherical_metadata(str(out), **inject)
+    assert out.read_bytes() == once, "the second pass rewrote the file"
+
+    moov = _moov(out)
+    for tag in (b"st3d", b"sv3d", b"equi", b"SA3D"):
+        assert moov.count(tag) == 1, f"{tag.decode()} appears more than once"
