@@ -148,14 +148,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             for child in window.findChildren(object):
                 name = child.objectName()
                 if name:
-                    start = child.property("startFrac")
+                    # startFrac for the direction picker, currentIndex for a
+                    # dropdown -- the two things a screenshot cannot assert
+                    # and that can silently disagree with the state behind
+                    # them. A ComboBox that shows one row and renders another
+                    # is exactly the bug this catches.
+                    value = child.property("startFrac")
+                    if value is None:
+                        value = child.property("currentIndex")
                     print(f"ITEM\t{name}\t{bool(child.property('visible'))}\t"
-                          f"{'' if start is None else start}")
+                          f"{'' if value is None else value}")
             # Settings values too, so a state one control derives from another
             # can be asserted rather than eyeballed.
             for name in ("quality", "depthBackend", "depthModel", "onnxModel",
                          "sourceSubsampling", "spatialAudio", "depthTiles",
-                         "codec", "outputMode", "yaw",
+                         "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
                          "strength", "gradientLimit"):
                 print(f"PROP\t{name}\t{window.property(name)}")
             for entry in controller.encoders:

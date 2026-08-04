@@ -523,21 +523,46 @@ ApplicationWindow {
                                     : "Rendered at the source resolution and resized afterwards, so this is supersampled rather than rendered small. Costs the same time as full size."
                                 ComboBox {
                                     id: resBox
+                                    objectName: "resolutionBox"
                                     Layout.fillWidth: true
                                     textRole: "text"
                                     valueRole: "width"
                                     model: win.resolutionModel
                                     currentIndex: win.resolutionIndex
-                                    onActivated: win.outputWidth =
-                                        (currentValue === win.sourceWidth ? 0
-                                                                          : currentValue)
 
-                                    Connections {
-                                        target: win
-                                        function onOutputWidthChanged() {
-                                            resBox.currentIndex = win.resolutionIndex
-                                        }
+                                    // Everything that touches currentIndex
+                                    // restores a *binding*, never a value.
+                                    //
+                                    // ComboBox severs the declared binding as
+                                    // soon as anything writes to currentIndex
+                                    // -- including a re-sync handler. Once
+                                    // severed it tracks only whatever signal
+                                    // that handler listened for, and goes
+                                    // stale on every other input: a mode
+                                    // switch, a new file, or simply the source
+                                    // probe arriving after the fact.
+                                    //
+                                    // That is not hypothetical. Picking a
+                                    // reduced size and then switching format
+                                    // left the box reading "full size" while
+                                    // the render used the reduced one -- a
+                                    // control showing one thing and doing
+                                    // another, which is the worst way for this
+                                    // to fail because there is nothing to see.
+                                    function trackIndex() {
+                                        currentIndex = Qt.binding(
+                                            function () { return win.resolutionIndex })
                                     }
+                                    onActivated: {
+                                        win.outputWidth =
+                                            (currentValue === win.sourceWidth
+                                             ? 0 : currentValue)
+                                        trackIndex()
+                                    }
+                                    // Replacing the model resets currentIndex
+                                    // to 0 without changing resolutionIndex,
+                                    // so a binding alone would not re-fire.
+                                    onModelChanged: trackIndex()
 
                                     delegate: ItemDelegate {
                                         width: resBox.width

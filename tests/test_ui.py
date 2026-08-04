@@ -855,3 +855,35 @@ def test_the_probe_is_told_the_size_actually_being_encoded(qapp):
     ctrl.probeEncoders(320, 240, "360", 160)
     assert _pump(qapp, lambda: len(calls) > 1, timeout=300), \
         "a different output width is a different probe"
+
+
+@pytest.mark.parametrize("extra,mode,expected_width", [
+    ((), "360", 7680),
+    (("outputWidth=5760",), "360", 5760),
+    # The reported bug: pick a reduced size, then change format. The box read
+    # "full size" and the render used 5760.
+    (("outputWidth=5760", "outputMode=vr180"), "vr180", 5760),
+    (("outputMode=vr180",), "vr180", 7680),
+])
+def test_the_resolution_box_shows_the_size_that_will_render(extra, mode,
+                                                            expected_width):
+    """A control showing one thing and doing another is the worst way for this
+    to fail: there is nothing to see and nothing to suspect.
+
+    ComboBox severs its own currentIndex binding as soon as anything writes to
+    it, and replacing the model resets the index to 0 without changing the
+    value the binding watched -- so a hand-written re-sync that listens for
+    one signal goes stale on every other one.
+    """
+    source = str(Path(__file__).resolve().parent.parent / "input.mp4")
+    if not Path(source).exists():
+        pytest.skip("needs the 8K sample to have several sizes to choose from")
+
+    items = _items(f"inputPath={source}", *extra)
+    assert "resolutionBox" in items, "the row should be showing for an 8K source"
+    shown = int(items["resolutionBox"][1])
+
+    choices = options.resolution_choices(7680, 3840, mode)
+    assert choices[shown]["width"] == expected_width, (
+        f"box points at {choices[shown]['label']}, "
+        f"but {expected_width} is what would render")
