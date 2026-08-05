@@ -193,6 +193,21 @@ class VideoInfo:
         return bool(self.stereo_layout) and self.stereo_layout != "2D"
 
 
+#: Treated as a single still rather than a video, on input and output alike.
+#:
+#: By extension, and deliberately so. Probing cannot tell the difference:
+#: ffmpeg reads a JPEG as a one-frame video and reports `fps=25.0,
+#: frame_count=None, duration=0.04`, which is indistinguishable from a very
+#: short clip. An extension is also the thing the user chose and can see, so a
+#: file behaving as a photo because it is called `.jpg` needs no explaining.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+
+
+def is_image_path(path: str) -> bool:
+    """Whether this path names a still rather than a video."""
+    return os.path.splitext(str(path))[1].lower() in IMAGE_SUFFIXES
+
+
 def _require(tool: str) -> str:
     path = shutil.which(tool)
     if path is None:

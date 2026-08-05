@@ -1131,7 +1131,9 @@ class PreviewResult(NamedTuple):
 
 
 # Written through cv2.imencode, so this is what OpenCV's encoders accept.
-_PREVIEW_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+# Shared with the image-input path, which reads the same set: a photo and a
+# preview are the same picture written the same way.
+_PREVIEW_SUFFIXES = ffmpeg_io.IMAGE_SUFFIXES
 
 
 def preview_frame(
@@ -1247,6 +1249,35 @@ def preview_frame(
     return PreviewResult(output_path, frame_index, stacked.shape[1],
                          stacked.shape[0])
 
+
+
+def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
+    """Turn one 360 photo into a stereoscopic one.
+
+    The same renderer as a video preview, and deliberately so -- a photo *is*
+    one frame through the same depth, warp and stack. What differs is only
+    what the caller means by it, and two defaults that follow from that:
+
+    * **Full resolution.** A preview is capped at 2048 wide because it exists
+      to be looked at quickly and thrown away. A photo is the deliverable, so
+      it comes out at the size the source implies. A 7680x7680 stereo photo
+      displays on a Quest 3, unlike the video of the same size -- the 35.6 Mpx
+      cap belongs to the video decoder and a JPEG is a texture.
+    * **Frame zero,** because a still has only one and asking which is noise.
+
+    Exists as its own name rather than leaving callers to spell
+    `preview_frame(..., frame_index=0, width=0)`. That incantation works, but
+    it describes the mechanism instead of the intent, and it invites getting
+    the width wrong and silently shipping a 2048-wide photo.
+    """
+    if not ffmpeg_io.is_image_path(output_path):
+        raise ValueError(
+            f"The input {os.path.basename(input_path)!r} is an image, so the "
+            f"output must be one too, but {output_path!r} is not. Expected "
+            f"one of {', '.join(ffmpeg_io.IMAGE_SUFFIXES)}. JPEG is the one "
+            f"format headsets read reliably.")
+    kw.setdefault("width", 0)                       # 0 = do not downscale
+    return preview_frame(input_path, output_path, frame_index=0, **kw)
 
 def _convert_chunked(
     frames,

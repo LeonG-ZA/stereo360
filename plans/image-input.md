@@ -272,8 +272,10 @@ longer on the path.
 
 ## Suggested order
 
-1. **Input**: accept image extensions, and a real entry point rather than
-   `--preview-frame 0 --preview-width 0`.
+1. ~~**Input**~~ — **done.** `stereo360 photo.jpg -o out.jpg` with no flags.
+   Stills are recognised by extension (probing cannot tell one from a short
+   clip), full resolution is the default, and the video-only flags are refused
+   by name rather than ignored.
 2. **Encoding**: q100, 4:4:4, optimize. Small, measured, immediately better.
 3. ~~**Device testing**~~ — **done**, nine files, results above.
 4. **GPano XMP writer**, projection only — it is all the spec has, and it is
