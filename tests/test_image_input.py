@@ -209,3 +209,88 @@ def test_convert_image_passes_settings_through(tmp_path):
                            output_mode="vr180", yaw=90.0)
     info = ffmpeg_io.probe(dst)
     assert (info.width, info.height) == (512, 256)
+
+
+# ----------------------------------------------------------------- encoding
+
+def test_jpeg_output_is_not_chroma_subsampled(tmp_path):
+    """OpenCV defaults to 4:2:0, which is sensible for a web image and wrong
+    for one that gets magnified across a headset's field of view. Measured on
+    a real 7680x7680 frame, dropping it cut rms error 26% for 17% more bytes
+    -- the cheapest win available here."""
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "out.jpg")
+    run(src, "-o", dst)
+    assert ffmpeg_io.probe(dst).pix_fmt == "yuvj444p"
+
+
+def test_the_jpeg_settings_are_the_measured_ones():
+    """Spelled out so a later "tidy-up" cannot quietly drop one. Each is here
+    for a reason recorded in image_encode_params."""
+    import cv2
+
+    params = pipeline.image_encode_params(".jpg")
+    pairs = dict(zip(params[::2], params[1::2]))
+    assert pairs[cv2.IMWRITE_JPEG_QUALITY] == 100
+    assert (pairs[cv2.IMWRITE_JPEG_SAMPLING_FACTOR]
+            == cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444)
+    assert pairs[cv2.IMWRITE_JPEG_OPTIMIZE] == 1
+
+
+def test_the_jpeg_is_deliberately_not_progressive():
+    """It would shave a little more, and a progressive 59-megapixel JPEG has
+    to be decoded in several passes on a mobile GPU. Bytes are cheap there;
+    decode time is not."""
+    import cv2
+
+    assert cv2.IMWRITE_JPEG_PROGRESSIVE not in pipeline.image_encode_params(".jpg")
+
+
+@pytest.mark.parametrize("suffix", [".png", ".webp", ".tif", ".bmp"])
+def test_lossless_formats_are_left_alone(suffix):
+    """PNG and TIFF lose nothing already and WebP defaults to its own maximum,
+    so there is nothing to improve and no setting to justify."""
+    assert pipeline.image_encode_params(suffix) == []
+
+
+def test_the_case_of_the_extension_does_not_matter(tmp_path):
+    assert (pipeline.image_encode_params(".JPG")
+            == pipeline.image_encode_params(".jpg"))
+
+
+def test_quality_settings_apply_to_video_previews_too(tmp_path):
+    """Deliberate. A preview exists so someone can judge --strength and
+    --gradient-limit by eye, and it cannot do that while adding compression
+    artifacts of its own that look like pipeline artifacts."""
+    from test_end_to_end import make_test_video
+
+    src = str(tmp_path / "in.mp4")
+    dst = str(tmp_path / "p.jpg")
+    make_test_video(src, w=128, h=64, frames=4, with_audio=False)
+    run(src, "-o", dst, "--preview-frame", "1", "--preview-width", "64",
+        "--face-size", "32", "--passthrough")
+    assert ffmpeg_io.probe(dst).pix_fmt == "yuvj444p"
+
+
+def test_the_settings_actually_reduce_error(tmp_path):
+    """The claim behind the choice, checked rather than cited: encoding the
+    same picture with OpenCV's defaults is measurably further from it."""
+    import cv2
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    # Smooth content with colour detail -- chroma subsampling shows up here,
+    # which is the point. Pure noise would hide it.
+    y, x = np.mgrid[0:256, 0:512]
+    img = np.stack([(np.sin(x / 9.0) * 110 + 128),
+                    (np.cos(y / 7.0) * 110 + 128),
+                    ((x + y) % 255)], axis=-1).astype(np.uint8)
+
+    def err(params):
+        ok, buf = cv2.imencode(".jpg", img, params)
+        assert ok
+        back = cv2.imdecode(buf, cv2.IMREAD_COLOR).astype(np.float32)
+        return float(np.sqrt(((img.astype(np.float32) - back) ** 2).mean()))
+
+    assert err(pipeline.image_encode_params(".jpg")) < err([]), \
+        "the chosen settings should beat OpenCV's defaults"

@@ -1136,6 +1136,54 @@ class PreviewResult(NamedTuple):
 _PREVIEW_SUFFIXES = ffmpeg_io.IMAGE_SUFFIXES
 
 
+#: JPEG quality. The top of the scale, because this is the deliverable and the
+#: encode costs 0.4 s against a render measured in minutes.
+JPEG_QUALITY = 100
+
+
+def image_encode_params(suffix: str) -> list:
+    """OpenCV encode parameters for writing a still.
+
+    OpenCV's defaults are quality 95 and **4:2:0 chroma**, which are sensible
+    for a web image and wrong for this. Measured on a real 7680x7680 stereo
+    frame, against the lossless render:
+
+        q95  4:2:0  (the default)   10.8 MB   rms 1.188
+        q95  4:4:4                  12.7 MB   rms 0.879
+        q100 4:4:4 + optimize       19.6 MB   rms 0.606
+
+    Two things worth keeping straight:
+
+    *Turning off chroma subsampling is the cheapest win available* -- 26% less
+    error for 17% more bytes. It is the same argument as `--source-subsampling`
+    for video, and it bites harder in a still that gets magnified across a
+    headset's field of view and then stared at.
+
+    *`OPTIMIZE` is free.* It only computes better Huffman tables, so the pixels
+    are bit-identical and the file is 10% smaller.
+
+    Applied to previews as well as photos, which is deliberate: a preview
+    exists so someone can judge `--strength` and `--gradient-limit` by eye, and
+    it cannot do that job while adding compression artifacts of its own that
+    look like pipeline artifacts.
+
+    Not progressive, though it would shave a little more. A progressive
+    59-megapixel JPEG has to be decoded in multiple passes, and the target is a
+    mobile GPU opening the largest image it will ever see. Bytes are cheap
+    there; decode time is not.
+    """
+    import cv2
+
+    if suffix.lower() in (".jpg", ".jpeg"):
+        return [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY,
+                cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444,
+                cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+    # PNG and TIFF are lossless already, and WebP defaults to its own maximum.
+    # Nothing to improve, so nothing to say.
+    return []
+
+
 def preview_frame(
     input_path: str,
     output_path: str,
@@ -1233,7 +1281,8 @@ def preview_frame(
         stacked = cv2.resize(stacked, (width, height),
                              interpolation=cv2.INTER_AREA)
 
-    ok, buf = cv2.imencode(suffix, cv2.cvtColor(stacked, cv2.COLOR_RGB2BGR))
+    ok, buf = cv2.imencode(suffix, cv2.cvtColor(stacked, cv2.COLOR_RGB2BGR),
+                           image_encode_params(suffix))
     if not ok:
         raise RuntimeError(f"OpenCV could not encode a {suffix} image")
     # imencode plus a plain write, not cv2.imwrite: on Windows imwrite goes

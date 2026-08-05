@@ -276,7 +276,11 @@ longer on the path.
    Stills are recognised by extension (probing cannot tell one from a short
    clip), full resolution is the default, and the video-only flags are refused
    by name rather than ignored.
-2. **Encoding**: q100, 4:4:4, optimize. Small, measured, immediately better.
+2. ~~**Encoding**~~ — **done.** q100, 4:4:4, optimize; `yuvj420p` to
+   `yuvj444p`, 10.8 to 19.6 MB on the 8K frame. Applied to video previews as
+   well, so a preview cannot add artifacts that look like pipeline ones.
+   Deliberately not progressive: a multi-pass 59 MP decode on a mobile GPU
+   costs more than the bytes it saves.
 3. ~~**Device testing**~~ — **done**, nine files, results above.
 4. **GPano XMP writer**, projection only — it is all the spec has, and it is
    enough. Describe one eye; the dimensions are not read for layout.
