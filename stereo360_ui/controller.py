@@ -134,6 +134,31 @@ class Controller(QObject):
         """A picture of the source frame, for the direction picker, or ''."""
         return self._thumbnail
 
+    @Property("QVariantList", constant=True)
+    def openFilters(self) -> list:
+        """Name filters for the open dialog, covering video and photo both."""
+        return options.open_filters()
+
+    @Slot(bool, result="QVariantList")
+    def saveFilters(self, photo: bool) -> list:
+        """Name filters for the save dialog, for a photo job or a video one."""
+        return options.save_filters(bool(photo))
+
+    @Slot(str, str, str, str, result="QVariantMap")
+    def resolveOutput(self, current: str, previous_suggestion: str,
+                      input_url: str, mode: str) -> dict:
+        """{output, suggested} for the Output box after the job changed.
+
+        Returns both, because the caller has to remember what was suggested
+        in order to know next time whether the box still holds its own idea
+        or someone's.
+        """
+        suggestion = self.suggestOutput(input_url, mode)
+        return {"output": options.resolve_output(
+                    current, previous_suggestion, suggestion,
+                    options.is_image(self.toLocalPath(input_url))),
+                "suggested": suggestion}
+
     # ------------------------------------------------------------- probing
 
     @Slot()
@@ -321,15 +346,36 @@ class Controller(QObject):
         """file:// URL from a FileDialog -> a plain path for the command."""
         return QUrl(url).toLocalFile() if url.startswith("file:") else url
 
+    # Both arities registered. Declaring only `(str)` -- as this did -- does
+    # not fail when QML passes two: Qt drops the extra silently and `mode`
+    # falls back to its default, so every VR180 photo was named `_360_TB`.
+    # The token is what the Quest gallery reads, so the file did not merely
+    # look wrong, it described the wrong layout.
+    @Slot(str, str, result=str)
     @Slot(str, result=str)
-    def suggestOutput(self, input_url: str) -> str:
+    def suggestOutput(self, input_url: str, mode: str = "360") -> str:
         """A sensible default output beside the input, so the second file
-        picker is usually unnecessary."""
+        picker is usually unnecessary.
+
+        For a photo the name carries the layout tokens, since that is how
+        players that read filenames rather than metadata learn what the file
+        is -- and it saves the person having to know the convention. Always
+        `.jpg`, whatever went in: it is the one format headsets read reliably.
+        """
         path = self.toLocalPath(input_url)
         if not path:
             return ""
         stem, _ = os.path.splitext(path)
+        if options.is_image(path):
+            from stereo360 import vr_naming
+
+            return vr_naming.suggest(f"{stem}.jpg", str(mode))
         return f"{stem}_stereo.mp4"
+
+    @Slot(str, result=bool)
+    def isImage(self, path: str) -> bool:
+        """Whether this input makes it a photo job rather than a video one."""
+        return options.is_image(self.toLocalPath(path))
 
     @Slot(str, result=str)
     def presetNote(self, quality: str) -> str:
@@ -415,6 +461,14 @@ class Controller(QObject):
                 # changes, so without a unique query the second preview shows
                 # the first one's picture.
                 self._preview = (QUrl.fromLocalFile(self._preview_path).toString()
+                                 + f"?t={time.time():.3f}")
+                self.previewChanged.emit()
+            elif options.is_image(output):
+                # A photo *is* the deliverable, so the panel shows it rather
+                # than the source it came from. Same cache-buster: the second
+                # conversion to the same path would otherwise show the first.
+                self._set_status("Finished", output)
+                self._preview = (QUrl.fromLocalFile(output).toString()
                                  + f"?t={time.time():.3f}")
                 self.previewChanged.emit()
             else:

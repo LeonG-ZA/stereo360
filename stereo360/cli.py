@@ -360,6 +360,37 @@ def _stdin_cancel_watcher():
     return flag.is_set
 
 
+#: Flags that only mean something for a video. Given with an image input they
+#: are a mistake worth naming: silently ignoring a --max-frames someone typed
+#: is how a tool teaches people that its flags are decorative.
+_VIDEO_ONLY_FLAGS = (
+    ("max_frames", "--max-frames", "a still has one frame"),
+    ("start_frame", "--start-frame", "there is nothing to skip"),
+    ("preview_frame", "--preview-frame",
+     "the output already is that one frame"),
+    ("spatial_audio", "--spatial-audio", "an image has no audio track"),
+)
+
+
+def _refuse_video_only_flags(args) -> None:
+    # Against the parser's own defaults, not truthiness. `--preview-frame 0`
+    # is a perfectly ordinary thing to type and is falsy, so a truthiness test
+    # lets exactly the most likely mistake through. Reading the defaults back
+    # from the parser also means they cannot drift from the definitions above.
+    #
+    # It does mean `--start-frame 0` typed out is indistinguishable from not
+    # typing it, since argparse does not record what was on the command line.
+    # Harmless: it asks for the behaviour it would have got anyway.
+    defaults = build_parser()
+    given = [(flag, why) for attr, flag, why in _VIDEO_ONLY_FLAGS
+             if getattr(args, attr, None) != defaults.get_default(attr)]
+    if not given:
+        return
+    lines = ", ".join(f"{flag} ({why})" for flag, why in given)
+    build_parser().error(
+        f"the input is an image, so these do not apply: {lines}")
+
+
 def _run(args, reporter, cancel, backends, pipeline):
     built = backends.build(
         passthrough=args.passthrough,
@@ -379,6 +410,27 @@ def _run(args, reporter, cancel, backends, pipeline):
     # Resolved here rather than in the parser so `--help` stays import-free.
     face_overlap = (pipeline.projection.FACE_OVERLAP
                     if args.face_overlap is None else args.face_overlap)
+
+    if pipeline.ffmpeg_io.is_image_path(args.input):
+        _refuse_video_only_flags(args)
+        return pipeline.convert_image(
+            input_path=args.input,
+            output_path=args.output,
+            face_size=args.face_size,
+            use_cubemap=not args.no_cubemap,
+            depth_backend=built.backend,
+            strength=args.strength,
+            fg_erode=args.fg_erode,
+            inpaint_mode=args.inpaint,
+            depth_tiles=args.depth_tiles,
+            split_baseline=args.split_baseline,
+            gradient_limit=args.gradient_limit,
+            input_projection=args.input_projection,
+            face_overlap=face_overlap,
+            output_mode=args.output_mode,
+            yaw=args.yaw,
+            reporter=reporter,
+        )
 
     if args.preview_frame is not None:
         if built.name == "video-depth-anything":
@@ -539,6 +591,15 @@ def main(argv=None) -> int:
         reporter.error(str(exc), kind=type(exc).__name__)
         return 1
 
+    if pipeline.ffmpeg_io.is_image_path(args.input):
+        # Both single-image paths return here. Falling through would reach the
+        # video summary, which asks a PreviewResult for `cancelled` and frame
+        # counts it does not have.
+        reporter.info(f"Wrote {result.output_path} "
+                      f"({result.width}x{result.height})",
+                      output=result.output_path,
+                      width=result.width, height=result.height)
+        return 0
     if args.preview_frame is not None:
         reporter.info(f"Preview of frame {result.frame_index} -> "
                       f"{result.output_path} ({result.width}x{result.height})",

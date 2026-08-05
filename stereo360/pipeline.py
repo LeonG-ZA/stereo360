@@ -13,7 +13,8 @@ from typing import Callable, NamedTuple, Optional
 
 import numpy as np
 
-from . import ambisonics, ffmpeg_io, projection, spherical, warp
+from . import (ambisonics, ffmpeg_io, gpano, projection, spherical,
+               vr_naming, warp)
 from .depth.base import DepthBackend
 from .events import Cancelled, Reporter
 
@@ -1002,6 +1003,17 @@ def convert(
               playable file containing the frames completed so far.
     """
     reporter = reporter or Reporter()
+    # Before anything expensive. A still's extension here means ffmpeg is
+    # asked to mux a video stream into a picture: it renders every frame,
+    # then dies in `encoder.close()` with "exited with code 4294967274" and
+    # leaves a truncated file behind. Measured -- and on an 8K job that is
+    # hours of work for a number nobody can read.
+    if ffmpeg_io.is_image_path(output_path):
+        raise ValueError(
+            f"{os.path.basename(output_path)!r} names a picture, but "
+            f"{os.path.basename(input_path)!r} is a video, so the output "
+            f"must be a video too. For a single frame out of a video, use "
+            f"--preview-frame.")
     info = ffmpeg_io.probe(input_path)
 
     # What the file says it is decides how it is read. Everything downstream
@@ -1130,8 +1142,58 @@ class PreviewResult(NamedTuple):
     height: int
 
 
-# Written through cv2.imencode, so this is what OpenCV's encoders accept.
-_PREVIEW_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+# Written through cv2.imencode, so this is what OpenCV's encoders accept --
+# which is narrower than what ffmpeg will *read*. AVIF and HEIC go in and
+# cannot come out, and that asymmetry is fine: the output is a JPEG either way.
+_PREVIEW_SUFFIXES = ffmpeg_io.WRITABLE_IMAGE_SUFFIXES
+
+
+#: JPEG quality. The top of the scale, because this is the deliverable and the
+#: encode costs 0.4 s against a render measured in minutes.
+JPEG_QUALITY = 100
+
+
+def image_encode_params(suffix: str) -> list:
+    """OpenCV encode parameters for writing a still.
+
+    OpenCV's defaults are quality 95 and **4:2:0 chroma**, which are sensible
+    for a web image and wrong for this. Measured on a real 7680x7680 stereo
+    frame, against the lossless render:
+
+        q95  4:2:0  (the default)   10.8 MB   rms 1.188
+        q95  4:4:4                  12.7 MB   rms 0.879
+        q100 4:4:4 + optimize       19.6 MB   rms 0.606
+
+    Two things worth keeping straight:
+
+    *Turning off chroma subsampling is the cheapest win available* -- 26% less
+    error for 17% more bytes. It is the same argument as `--source-subsampling`
+    for video, and it bites harder in a still that gets magnified across a
+    headset's field of view and then stared at.
+
+    *`OPTIMIZE` is free.* It only computes better Huffman tables, so the pixels
+    are bit-identical and the file is 10% smaller.
+
+    Applied to previews as well as photos, which is deliberate: a preview
+    exists so someone can judge `--strength` and `--gradient-limit` by eye, and
+    it cannot do that job while adding compression artifacts of its own that
+    look like pipeline artifacts.
+
+    Not progressive, though it would shave a little more. A progressive
+    59-megapixel JPEG has to be decoded in multiple passes, and the target is a
+    mobile GPU opening the largest image it will ever see. Bytes are cheap
+    there; decode time is not.
+    """
+    import cv2
+
+    if suffix.lower() in (".jpg", ".jpeg"):
+        return [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY,
+                cv2.IMWRITE_JPEG_SAMPLING_FACTOR,
+                cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444,
+                cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+    # PNG and TIFF are lossless already, and WebP defaults to its own maximum.
+    # Nothing to improve, so nothing to say.
+    return []
 
 
 def preview_frame(
@@ -1231,7 +1293,8 @@ def preview_frame(
         stacked = cv2.resize(stacked, (width, height),
                              interpolation=cv2.INTER_AREA)
 
-    ok, buf = cv2.imencode(suffix, cv2.cvtColor(stacked, cv2.COLOR_RGB2BGR))
+    ok, buf = cv2.imencode(suffix, cv2.cvtColor(stacked, cv2.COLOR_RGB2BGR),
+                           image_encode_params(suffix))
     if not ok:
         raise RuntimeError(f"OpenCV could not encode a {suffix} image")
     # imencode plus a plain write, not cv2.imwrite: on Windows imwrite goes
@@ -1246,6 +1309,65 @@ def preview_frame(
                     width=stacked.shape[1], height=stacked.shape[0])
     return PreviewResult(output_path, frame_index, stacked.shape[1],
                          stacked.shape[0])
+
+
+
+def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
+    """Turn one 360 photo into a stereoscopic one.
+
+    The same renderer as a video preview, and deliberately so -- a photo *is*
+    one frame through the same depth, warp and stack. What differs is only
+    what the caller means by it, and two defaults that follow from that:
+
+    * **Full resolution.** A preview is capped at 2048 wide because it exists
+      to be looked at quickly and thrown away. A photo is the deliverable, so
+      it comes out at the size the source implies. A 7680x7680 stereo photo
+      displays on a Quest 3, unlike the video of the same size -- the 35.6 Mpx
+      cap belongs to the video decoder and a JPEG is a texture.
+    * **Frame zero,** because a still has only one and asking which is noise.
+
+    Exists as its own name rather than leaving callers to spell
+    `preview_frame(..., frame_index=0, width=0)`. That incantation works, but
+    it describes the mechanism instead of the intent, and it invites getting
+    the width wrong and silently shipping a 2048-wide photo.
+    """
+    # Writable, not readable: `-o out.heic` names a still, but OpenCV has no
+    # encoder for it, so accepting it here only moves the failure to a place
+    # that cannot explain itself.
+    if os.path.splitext(output_path)[1].lower() not in _PREVIEW_SUFFIXES:
+        raise ValueError(
+            f"The input {os.path.basename(input_path)!r} is an image, so the "
+            f"output must be an image this tool can write, but "
+            f"{os.path.basename(output_path)!r} is not one of "
+            f"{', '.join(_PREVIEW_SUFFIXES)}. JPEG is the one format headsets "
+            f"read reliably.")
+    kw.setdefault("width", 0)                       # 0 = do not downscale
+    reporter = kw.get("reporter") or Reporter()
+    kw["reporter"] = reporter
+    result = preview_frame(input_path, output_path, frame_index=0, **kw)
+
+    mode = kw.get("output_mode", DEFAULT_OUTPUT_MODE)
+    if ffmpeg_io.is_jpeg_path(output_path):
+        gpano.inject_into_jpeg(output_path, result.width, result.height, mode)
+        reporter.info(
+            "Tagged as a 360 photo (GPano). A stacked stereo frame is read as "
+            "3D from this alone on a Quest 3, and from the filename alone -- "
+            "so naming it with the usual tokens as well costs nothing and "
+            "helps players that only read one of the two.",
+            projection="equirectangular", output_mode=mode)
+        naming = vr_naming.advice(output_path, mode)
+        if naming:
+            reporter.info(naming, suggested=vr_naming.suggest(output_path,
+                                                              mode))
+    else:
+        # XMP goes in a JPEG APP1 segment. PNG can carry it in an iTXt chunk
+        # and TIFF in a tag, but neither is what a headset reads, so writing
+        # them would be work in service of a file nobody can view properly.
+        reporter.warning(
+            f"No 360 metadata was written: {os.path.splitext(output_path)[1]} "
+            f"cannot carry it the way players read. JPEG is the format "
+            f"headsets handle reliably.", output=output_path)
+    return result
 
 
 def _convert_chunked(

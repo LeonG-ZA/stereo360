@@ -1003,3 +1003,269 @@ def test_the_probe_reports_what_the_file_declares(tmp_path, qapp):
     ctrl2.probeInput(src)
     assert _pump(qapp, lambda: any(s.get("width") for s in seen2), timeout=120)
     assert next(s for s in seen2 if s.get("width"))["declares_ambix"] is True
+
+
+# ------------------------------------------------------------- photo mode
+
+
+def _still(tmp_path: Path, name="src.jpg", w=256, h=128) -> str:
+    import subprocess
+
+    out = str(tmp_path / name)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", f"testsrc2=size={w}x{h}", "-frames:v", "1", "-y", out],
+        check=True, capture_output=True)
+    return out
+
+
+def test_the_ui_and_the_core_agree_on_what_a_still_is():
+    """Mirrored rather than imported, for the same reason as output_size: the
+    window's process must never pull numpy in. Drift would mean the UI
+    building a video command for a file the CLI treats as a photo."""
+    from stereo360 import ffmpeg_io
+
+    assert options.IMAGE_SUFFIXES == ffmpeg_io.IMAGE_SUFFIXES
+    assert options.VIDEO_SUFFIXES == ffmpeg_io.VIDEO_SUFFIXES
+    for path in ("a.jpg", "a.JPG", "a.png", "a.mp4", "a", "a.jpeg.mp4",
+                 "a.avif", "a.heic"):
+        assert options.is_image(path) == ffmpeg_io.is_image_path(path), path
+
+
+def test_the_open_dialog_offers_every_format_the_tool_accepts():
+    """The bug this exists for: the dialog listed five video extensions and
+    nothing else, so a photo could only be opened by typing its name in. A
+    filter list kept by hand is a second answer to "what does this open", and
+    it was the wrong one for three commits."""
+    combined = options.open_filters()[0]
+    for suffix in options.IMAGE_SUFFIXES + options.VIDEO_SUFFIXES:
+        assert "*" + suffix in combined, suffix
+
+
+def test_the_open_dialog_never_traps_anyone():
+    """Whatever the filters say, an unlisted extension must still be
+    reachable -- ffmpeg sniffs content and does not care about names."""
+    assert "All files (*)" in options.open_filters()
+
+
+@pytest.mark.parametrize("photo,expected", [(True, ".jpg"), (False, ".mp4")])
+def test_the_save_dialog_leads_with_the_right_format(photo, expected):
+    """A photo job offered "MP4 video (*.mp4)" and a default suffix of mp4,
+    which names the output of a JPEG conversion out.mp4."""
+    assert expected in options.save_filters(photo)[0]
+
+
+# ------------------------------------------------- the output box goes stale
+
+def test_a_photos_name_does_not_survive_into_a_video_job():
+    """The reported bug. Opening a photo and then a video left
+    `pano_360_TB.jpg` in Output, and the box only ever filled when empty."""
+    out = options.resolve_output("C:/x/pano_360_TB.jpg",
+                                 "C:/x/pano_360_TB.jpg",
+                                 "C:/x/clip_stereo.mp4", input_is_image=False)
+    assert out == "C:/x/clip_stereo.mp4"
+
+
+def test_a_hand_picked_name_that_fits_the_job_is_left_alone():
+    """Only names this program proposed are its to revise."""
+    out = options.resolve_output("C:/mine/my_edit.mkv", "C:/x/clip_stereo.mp4",
+                                 "C:/x/other_stereo.mp4", input_is_image=False)
+    assert out == "C:/mine/my_edit.mkv"
+
+
+def test_a_hand_picked_name_of_the_wrong_kind_is_replaced_anyway():
+    """Deliberately overriding someone's choice, because keeping it preserves
+    a render that cannot succeed -- a video muxed into a .jpg, or a photo
+    written to a .mkv."""
+    assert options.resolve_output(
+        "C:/mine/my_edit.mkv", "", "C:/x/pano_360_TB.jpg",
+        input_is_image=True) == "C:/x/pano_360_TB.jpg"
+    assert options.resolve_output(
+        "C:/mine/my_pic.jpg", "", "C:/x/clip_stereo.mp4",
+        input_is_image=False) == "C:/x/clip_stereo.mp4"
+
+
+def test_an_empty_box_is_filled():
+    assert options.resolve_output("", "", "C:/x/clip_stereo.mp4",
+                                  input_is_image=False) == "C:/x/clip_stereo.mp4"
+
+
+def test_the_output_mode_reaches_python_from_qml(qapp):
+    """`@Slot(str, result=str)` on a two-argument method does not fail when
+    QML passes both -- Qt drops the extra and the Python default applies. So
+    `suggestOutput(url, "vr180")` returned a `_360_TB` name, and that token is
+    what the Quest gallery reads to decide the layout.
+
+    Asserted against the meta-object, since that is what QML resolves against;
+    calling the method from Python passes either way and proves nothing.
+    """
+    mo = Controller().metaObject()
+    assert mo.indexOfMethod("suggestOutput(QString,QString)") >= 0, \
+        "QML calls this with two arguments"
+    assert mo.indexOfMethod("suggestOutput(QString)") >= 0, \
+        "and the one-argument form must keep working"
+
+
+def test_every_slot_accepts_as_many_arguments_as_it_takes(qapp):
+    """The general form of the bug above, which is silent in both directions:
+    Qt drops surplus arguments rather than raising, so the only symptom is a
+    parameter mysteriously stuck at its default."""
+    import inspect
+
+    mo = Controller().metaObject()
+    wrong = []
+    for name, fn in inspect.getmembers(Controller, inspect.isfunction):
+        params = [p for p in inspect.signature(fn).parameters if p != "self"]
+        if not params or not any(
+                mo.method(i).name().data().decode() == name
+                for i in range(mo.methodCount())):
+            continue
+        registered = {mo.method(i).methodSignature().data().decode()
+                      for i in range(mo.methodCount())
+                      if mo.method(i).name().data().decode() == name}
+        widest = max(s.count(",") + 1 if "()" not in s else 0
+                     for s in registered)
+        if widest < len(params):
+            wrong.append(f"{name}: takes {len(params)} args "
+                         f"({', '.join(params)}), widest slot accepts "
+                         f"{widest} -- {sorted(registered)}")
+    assert not wrong, "slots that silently drop arguments:\n" + "\n".join(wrong)
+
+
+def test_a_photo_command_drops_the_flags_the_cli_would_refuse():
+    """Not cosmetic. The CLI *refuses* --max-frames, --start-frame and
+    --spatial-audio for an image rather than ignoring them, so emitting one --
+    a spatial-audio switch left on from the last video, say -- would fail
+    every photo conversion."""
+    argv = options.build_argv({
+        "input": "photo.jpg", "output": "out.jpg",
+        "spatialAudio": True, "maxFrames": 30, "startFrame": 5})
+    for flag in ("--spatial-audio", "--max-frames", "--start-frame"):
+        assert flag not in argv, flag
+
+
+def test_a_photo_command_drops_the_encoder_settings():
+    """CRF and codec describe a video encoder. A photo is written by OpenCV at
+    settings the pipeline chooses, so passing them would imply an effect."""
+    argv = options.build_argv(dict(BASE, input="photo.jpg", output="out.jpg",
+                                   quality="archival"))
+    assert not {"--crf", "--codec", "--preset", "--bitdepth"} & set(argv)
+
+
+def test_a_photo_command_keeps_what_still_applies():
+    """Format, direction and the 3D controls all mean exactly what they mean
+    for video."""
+    argv = options.build_argv({
+        "input": "photo.jpg", "output": "out.jpg", "outputMode": "vr180",
+        "yaw": 30, "strength": 1.4, "sourceWidth": 7680, "outputWidth": 5760})
+    assert argv[argv.index("--output-mode") + 1] == "vr180"
+    assert argv[argv.index("--yaw") + 1] == "30"
+    assert argv[argv.index("--strength") + 1] == "1.4"
+    assert argv[argv.index("--output-width") + 1] == "5760"
+
+
+def test_a_video_command_is_unchanged():
+    """The photo branch must not leak into the path everything else uses."""
+    argv = options.build_argv(dict(BASE, quality="archival", maxFrames=30,
+                                   spatialAudio=True))
+    assert "--spatial-audio" in argv and "--max-frames" in argv
+    assert argv[argv.index("--crf") + 1] == "13"
+
+
+def test_a_preview_of_a_video_is_not_treated_as_a_photo():
+    """A preview writes a .png, but the *input* is a video, so it is still a
+    preview and keeps its own flags."""
+    argv = options.build_argv(dict(BASE), preview_frame=3,
+                              preview_output="p.png")
+    assert "--preview-frame" in argv
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("360", "holiday_360_TB.jpg"),
+    ("vr180", "holiday_180x180_3dh.jpg"),
+])
+def test_a_photo_gets_an_output_name_a_player_can_read(qapp, mode, expected):
+    """It knows the format and the convention; the person should not have to.
+    Always .jpg whatever went in, since that is what headsets read."""
+    ctrl = Controller()
+    got = ctrl.suggestOutput("file:///photos/holiday.png", mode)
+    assert Path(got).name == expected
+
+
+def test_a_video_still_gets_the_old_name(qapp):
+    ctrl = Controller()
+    got = ctrl.suggestOutput("file:///clips/trip.mp4", "360")
+    assert Path(got).name == "trip_stereo.mp4"
+
+
+def test_the_controller_can_tell_a_photo_from_a_video(qapp):
+    ctrl = Controller()
+    assert ctrl.isImage("file:///a/b.jpg") is True
+    assert ctrl.isImage("file:///a/b.mp4") is False
+
+
+def test_photo_mode_hides_what_cannot_apply(tmp_path):
+    """Showing a control that does nothing implies it does something."""
+    props, rows = _dump(f"inputPath={_still(tmp_path)}")
+    assert props["photoMode"] == "True"
+    for label in ("Preset", "Encoder", "Start at", "Limit", "Spatial audio",
+                  "Chunk size", "Chunk overlap", "Temporal fill"):
+        assert rows[label] is False, f"{label} should be hidden for a photo"
+
+
+def test_photo_mode_keeps_what_does_apply(tmp_path):
+    props, rows = _dump(f"inputPath={_still(tmp_path)}")
+    for label in ("Format", "Strength", "Gradient limit", "Model",
+                  "Depth tiles", "Device"):
+        assert rows[label] is True, f"{label} should still be shown"
+
+
+def test_a_video_still_shows_the_video_controls(tmp_path):
+    """The hiding must be scoped to photo mode, not applied everywhere."""
+    from test_end_to_end import make_test_video
+
+    src = str(tmp_path / "in.mp4")
+    make_test_video(src, w=128, h=64, frames=4, with_audio=False)
+    props, rows = _dump(f"inputPath={src}")
+    assert props["photoMode"] == "False"
+    for label in ("Preset", "Encoder", "Start at", "Spatial audio"):
+        assert rows[label] is True, label
+
+
+def test_the_panel_shows_the_result_once_it_exists(qapp, tmp_path):
+    """For a photo the panel is not a preview: the converted image *is* the
+    deliverable, so it replaces the source in the same panel."""
+    src = _still(tmp_path)
+    dst = str(tmp_path / "out.jpg")
+
+    ctrl = Controller()
+    done = []
+    ctrl.completed.connect(lambda *a: done.append(a))
+    ctrl.convert({"input": src, "output": dst, "faceSizeAuto": False,
+                  "faceSize": 64})
+
+    assert _pump(qapp, lambda: bool(done), timeout=600), "never finished"
+    ok, cancelled, output = done[0]
+    assert ok and not cancelled
+    assert Path(dst).exists()
+    assert ctrl.previewSource.startswith("file:")
+    assert "out.jpg" in ctrl.previewSource, "the panel should show the result"
+    assert "?t=" in ctrl.previewSource, "needs a cache-buster to refresh"
+
+
+def test_a_video_conversion_does_not_hijack_the_panel(qapp, tmp_path):
+    """An MP4 is not something the panel can show, and claiming otherwise
+    would leave it displaying the previous job's picture."""
+    from test_end_to_end import make_test_video
+
+    src = str(tmp_path / "in.mp4")
+    dst = str(tmp_path / "out.mp4")
+    make_test_video(src, w=128, h=64, frames=4, with_audio=False)
+
+    ctrl = Controller()
+    done = []
+    ctrl.completed.connect(lambda *a: done.append(a))
+    ctrl.convert({"input": src, "output": dst, "faceSizeAuto": False,
+                  "faceSize": 32, "maxFrames": 2})
+    assert _pump(qapp, lambda: bool(done), timeout=600)
+    assert ctrl.previewSource == "", "a video render is not a picture"

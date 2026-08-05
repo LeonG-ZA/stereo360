@@ -193,6 +193,54 @@ class VideoInfo:
         return bool(self.stereo_layout) and self.stereo_layout != "2D"
 
 
+#: Read as a single still rather than a video.
+#:
+#: By extension, and deliberately so. Probing cannot tell the difference:
+#: ffmpeg reads a JPEG as a one-frame video and reports `fps=25.0,
+#: frame_count=None, duration=0.04`, which is indistinguishable from a very
+#: short clip. An extension is also the thing the user chose and can see, so a
+#: file behaving as a photo because it is called `.jpg` needs no explaining.
+#:
+#: The modern still formats are here on purpose, and with different amounts of
+#: evidence behind them. **AVIF is verified**: four real files off the web and
+#: a synthetic one all decode, through the generic ISOBMFF demuxer, carrying
+#: the same `mif1`/`miaf` brands HEIF uses. **HEIC and HIF are not** -- this
+#: ffmpeg has no libheif, and no sample was available to try.
+#:
+#: They are listed anyway, because the list only decides *what kind of job
+#: this is*, never whether ffmpeg can decode it. Left out, a HEIC is treated
+#: as a video and fails somewhere confusing; listed, it is treated as the
+#: photo it is and fails, if it fails, with ffmpeg saying so.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+                  ".avif", ".heic", ".heif", ".hif")
+
+#: What can be *written*. Narrower, because these go through `cv2.imencode`
+#: and OpenCV encodes none of the ISOBMFF stills. Reading a format the tool
+#: cannot write is perfectly reasonable -- the output is a JPEG either way.
+WRITABLE_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif",
+                           ".tiff")
+
+#: Offered by the file dialog. Not used for any decision -- ffmpeg sniffs
+#: content and ignores extensions -- but a dialog that hides the file someone
+#: wants makes the tool look as though it cannot open it.
+VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts",
+                  ".m2ts", ".insv")
+
+
+def is_image_path(path: str) -> bool:
+    """Whether this path names a still rather than a video."""
+    return os.path.splitext(str(path))[1].lower() in IMAGE_SUFFIXES
+
+
+def is_jpeg_path(path: str) -> bool:
+    """Whether this path names a JPEG specifically.
+
+    Narrower than `is_image_path` because only a JPEG carries the XMP that
+    marks a photo as a sphere, and only JPEG is read reliably by headsets.
+    """
+    return os.path.splitext(str(path))[1].lower() in (".jpg", ".jpeg")
+
+
 def _require(tool: str) -> str:
     path = shutil.which(tool)
     if path is None:
@@ -206,8 +254,17 @@ def probe(path: str) -> VideoInfo:
         ffprobe, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", path,
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    data = json.loads(out)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        # A CalledProcessError here prints the whole ffprobe command line and
+        # says nothing about the file, which is the wrong end of the problem.
+        # More likely now that HEIC and AVIF are accepted: those depend on how
+        # ffmpeg was built, and "could not read" is the honest answer.
+        raise ValueError(
+            f"ffmpeg could not read {os.path.basename(path)!r}. It may be "
+            f"corrupt, or a format this build of ffmpeg does not support -- "
+            f"HEIC in particular needs an ffmpeg built with libheif.")
+    data = json.loads(result.stdout)
 
     vstream = next(s for s in data["streams"] if s["codec_type"] == "video")
 

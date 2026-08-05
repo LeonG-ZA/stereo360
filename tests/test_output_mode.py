@@ -164,8 +164,24 @@ def test_the_cli_exposes_both_modes():
     assert set(action.choices) == set(pipeline.OUTPUT_MODES)
     assert action.default == pipeline.DEFAULT_OUTPUT_MODE
     src = inspect_source(cli._run)
-    assert src.count("output_mode=args.output_mode") == 2, \
-        "both convert and preview_frame must receive it"
+    assert src.count("output_mode=args.output_mode") == _render_paths(src), \
+        "every render path must receive it"
+
+
+def _render_paths(src):
+    """How many ways `_run` can render something.
+
+    Counted from the source rather than written down, because it has changed
+    twice: `convert` and `preview_frame`, then `convert_image` for photos. A
+    hardcoded number turns "a new path forgot the setting" -- the bug worth
+    catching -- into the same failure as "a new path exists", which is not.
+    """
+    import re
+
+    paths = re.findall(r"pipeline\.(convert_image|preview_frame|convert)\(",
+                       src)
+    assert paths, "found no render calls at all, so this proves nothing"
+    return len(paths)
 
 
 def inspect_source(fn):
@@ -249,7 +265,8 @@ def test_the_cli_exposes_yaw_and_passes_it_to_both():
     assert parser.parse_args(["i.mp4", "-o", "o.mp4"]).yaw == 0.0
     assert parser.parse_args(["i.mp4", "-o", "o.mp4",
                               "--yaw", "-37.5"]).yaw == -37.5
-    assert inspect_source(cli._run).count("yaw=args.yaw") == 2
+    src = inspect_source(cli._run)
+    assert src.count("yaw=args.yaw") == _render_paths(src)
 
 
 # ------------------------------------------------------------ output width

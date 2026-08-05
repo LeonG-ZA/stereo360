@@ -11,7 +11,92 @@ how someone graduates from the UI to the CLI.
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Dict, List, Optional
+
+#: Stills, mirrored from `ffmpeg_io.IMAGE_SUFFIXES`. Two lines rather than an
+#: import, for the same reason as `output_size`: this process must never pull
+#: numpy in to draw a window. A test pins the two lists together.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+                  ".avif", ".heic", ".heif", ".hif")
+
+
+#: Offered by the open dialog alongside the stills. Mirrored for the same
+#: reason as the rest.
+VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts",
+                  ".m2ts", ".insv")
+
+
+def is_image(path: Any) -> bool:
+    """Whether this path names a still, and so a photo job rather than a
+    video one."""
+    return os.path.splitext(str(path or ""))[1].lower() in IMAGE_SUFFIXES
+
+
+def _glob(suffixes) -> str:
+    return " ".join("*" + s for s in suffixes)
+
+
+def open_filters() -> List[str]:
+    """Name filters for the open dialog, built from the accepted lists.
+
+    Built rather than written out, because writing them out is how the dialog
+    came to offer video only while the tool had accepted photos for three
+    commits. A filter list that is maintained by hand is a second source of
+    truth about what the tool opens, and it was already wrong.
+
+    A dialog filter is only a filter -- ffmpeg sniffs content and ignores
+    extensions entirely -- but one that hides the file someone wants makes the
+    tool look as though it cannot open it, which is exactly what happened.
+    """
+    both = tuple(VIDEO_SUFFIXES) + tuple(IMAGE_SUFFIXES)
+    return [f"Video or photo ({_glob(both)})",
+            f"Video ({_glob(VIDEO_SUFFIXES)})",
+            f"Photo ({_glob(IMAGE_SUFFIXES)})",
+            "All files (*)"]
+
+
+def resolve_output(current: str, previous_suggestion: str, suggestion: str,
+                   input_is_image: bool) -> str:
+    """What belongs in the Output box once the job has changed.
+
+    `current` is what is there now, `previous_suggestion` the last name this
+    program proposed -- the two being equal is how it knows the name is its
+    own to revise rather than someone's choice to respect.
+
+    Three cases:
+
+    * Nothing there, or a name this program proposed -> take the suggestion.
+    * A hand-picked name that suits the job -> leave it alone.
+    * A hand-picked name that suits the *wrong kind* of job -> replace it.
+
+    The third is the one that matters. Opening a photo and then a video left
+    the photo's `..._360_TB.jpg` in the box, and nothing downstream caught it:
+    the render ran every frame and only then died muxing a video into a JPEG,
+    leaving a truncated file. Keeping that name is not respecting a choice,
+    it is preserving a guaranteed failure -- and the core now refuses it up
+    front regardless, so keeping it would only move the complaint.
+    """
+    if not current or current == previous_suggestion:
+        return suggestion
+    if is_image(current) != bool(input_is_image):
+        return suggestion
+    return current
+
+
+def save_filters(photo: bool) -> List[str]:
+    """Name filters for the save dialog.
+
+    JPEG leads for photos, and not merely by convention: it is the only still
+    format the headsets read the projection tags out of, so the others are
+    offered as a way to get pixels, not as a way to get a VR photo.
+    """
+    if photo:
+        return ["JPEG photo (*.jpg *.jpeg)", "PNG image (*.png)",
+                "All files (*)"]
+    return ["MP4 video (*.mp4)"]
+
 
 #: Quality presets, and what each costs. The encoder timings are measured on
 #: an 8K top-bottom render whose pipeline produces a frame every 0.80 s, so
@@ -200,6 +285,10 @@ def build_argv(
         raise ValueError("Choose an input video first.")
 
     is_preview = preview_frame is not None
+    # A photo job. Not a preview -- the CLI decides that from the input's own
+    # extension, exactly as this does, so the two cannot disagree about what
+    # kind of job it is.
+    photo = is_image(opts["input"]) and not is_preview
     out = preview_output if is_preview else opts.get("output")
     if not out:
         raise ValueError("Choose where to save the output first.")
@@ -210,7 +299,7 @@ def build_argv(
                                   QUALITY_PRESETS["standard"])
     # Encoder settings are meaningless for a still, and passing them would
     # only make the displayed command look more complicated than it is.
-    if not is_preview:
+    if not is_preview and not photo:
         # An explicit encoder choice overrides the preset's; everything else
         # about the preset (quality, speed, bit depth) still applies, so the
         # two controls compose instead of one shadowing the other.
@@ -319,6 +408,12 @@ def build_argv(
     if is_preview:
         argv += ["--preview-frame", str(int(preview_frame)),
                  "--preview-width", str(int(preview_width))]
+    elif photo:
+        # Nothing to add, and several things not to. The CLI *refuses*
+        # --max-frames, --start-frame and --spatial-audio for an image rather
+        # than ignoring them, so emitting one -- a spatial-audio switch left
+        # on from the last video, say -- would fail every photo conversion.
+        pass
     else:
         # Frame range only applies to a real render; a preview names its own
         # frame and would be cut short by a max-frames cap.

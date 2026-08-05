@@ -39,6 +39,9 @@ ApplicationWindow {
     // ---- settings state -------------------------------------------------
     property string inputPath: ""
     property string outputPath: ""
+    // The last name this window proposed. Kept so it can tell a suggestion it
+    // is free to revise from a path the person typed or picked themselves.
+    property string suggestedOutput: ""
     property string outputMode: "360"
     property real yaw: 0             // only meaningful in vr180
     property int outputWidth: 0      // 0 = whatever the source implies
@@ -87,6 +90,22 @@ ApplicationWindow {
 
     readonly property bool canRun: inputPath !== "" && outputPath !== ""
 
+    // Refresh the Output box for `fileUrl`. The rule for when a name may be
+    // replaced lives in options.resolve_output, where it can be tested --
+    // this stays a call so the two cannot say different things.
+    function adoptSuggestedOutput(fileUrl) {
+        var r = app.resolveOutput(win.outputPath, win.suggestedOutput,
+                                  fileUrl, win.outputMode)
+        win.outputPath = r.output
+        win.suggestedOutput = r.suggested
+    }
+
+    // A photo job. Most of this window is about video, and showing controls
+    // that do nothing implies they do something -- so the ones that cannot
+    // apply are hidden rather than disabled. The CLI decides the same way,
+    // from the input's extension, so the two cannot disagree.
+    readonly property bool photoMode: inputPath !== "" && app.isImage(inputPath)
+
     // Whatever set inputPath -- the dialog or the text field -- ask what it is.
     onInputPathChanged: {
         app.probeInput(inputPath)
@@ -110,9 +129,20 @@ ApplicationWindow {
     // Only fetched for the mode that has a direction to choose. Requesting it
     // on the mode change as well as on the file means switching to VR180 finds
     // the picture already there.
+    // Wanted in two places now: the VR180 direction picker drags on it, and
+    // in photo mode the panel shows it as the source before conversion.
     function refreshThumbnail() {
-        if (outputMode === "vr180" && inputPath !== "")
-            app.requestThumbnail(inputPath, previewFrame.value)
+        if (inputPath === "")
+            return
+        // Asks `app` directly rather than reading the `photoMode` binding.
+        // This runs from onInputPathChanged, and a change handler can fire
+        // before the bindings depending on the same property have
+        // re-evaluated -- so photoMode would still describe the *previous*
+        // file. The same trap is documented on _clampModel below; here it
+        // cost a panel that stayed on "Opening the photo..." forever.
+        var photo = app.isImage(inputPath)
+        if (photo || outputMode === "vr180")
+            app.requestThumbnail(inputPath, photo ? 0 : previewFrame.value)
     }
 
     onOutputWidthChanged: refreshEncoders()
@@ -124,6 +154,14 @@ ApplicationWindow {
         // dropped by the 360 render and silently reappear on switching back.
         if (outputMode !== "vr180")
             yaw = 0
+        // A photo's suggested name carries `_360_TB` or `_180x180_3dh`, and
+        // those tokens are not decoration -- the Quest gallery reads the
+        // filename to decide the layout, so a mode switch after the name was
+        // proposed would ship a file that lies about itself. Only a name this
+        // window proposed is revised; a hand-picked one is left alone, the
+        // cost there being a wrong token rather than a failed render.
+        if (inputPath !== "" && outputPath === suggestedOutput)
+            adoptSuggestedOutput(inputPath)
     }
 
     Connections {
@@ -353,13 +391,13 @@ ApplicationWindow {
     // ---- dialogs --------------------------------------------------------
     FileDialog {
         id: openDialog
-        title: "Choose a 360° video"
-        nameFilters: ["Video files (*.mp4 *.mov *.mkv *.webm *.avi)",
-                      "All files (*)"]
+        title: "Choose a 360° video or photo"
+        // From the accepted lists, never written out here: a hand-kept copy
+        // is how this dialog came to hide every photo the tool could open.
+        nameFilters: app.openFilters
         onAccepted: {
             win.inputPath = app.toLocalPath(selectedFile.toString())
-            if (win.outputPath === "")
-                win.outputPath = app.suggestOutput(selectedFile.toString())
+            win.adoptSuggestedOutput(selectedFile.toString())
         }
     }
 
@@ -372,10 +410,11 @@ ApplicationWindow {
 
     FileDialog {
         id: saveDialog
-        title: "Save stereoscopic video as"
+        title: win.photoMode ? "Save stereoscopic photo as"
+                             : "Save stereoscopic video as"
         fileMode: FileDialog.SaveFile
-        defaultSuffix: "mp4"
-        nameFilters: ["MP4 video (*.mp4)"]
+        defaultSuffix: win.photoMode ? "jpg" : "mp4"
+        nameFilters: app.saveFilters(win.photoMode)
         onAccepted: win.outputPath = app.toLocalPath(selectedFile.toString())
     }
 
@@ -487,7 +526,7 @@ ApplicationWindow {
                                 TextField {
                                     Layout.fillWidth: true
                                     text: win.inputPath
-                                    placeholderText: "Choose a video…"
+                                    placeholderText: "Choose a video or photo…"
                                     onEditingFinished: win.inputPath = text
                                 }
                                 Button {
@@ -517,6 +556,7 @@ ApplicationWindow {
                             // before the render, not discovered after.
                             Row2 {
                                 label: "Spatial audio"
+                                visible: !win.photoMode
                                 hint: win.spatialAudioHint
                                 Switch {
                                     checked: win.spatialAudio
@@ -696,6 +736,7 @@ ApplicationWindow {
                         Card {
                             title: "Encoding"
                             subtitle: "file size and compression only"
+                            visible: !win.photoMode
 
                             Row2 {
                                 label: "Preset"
@@ -1025,6 +1066,7 @@ ApplicationWindow {
                         Card {
                             title: "Frame range"
                             subtitle: "for test renders"
+                            visible: !win.photoMode
 
                             Row2 {
                                 label: "Start at"
@@ -1084,6 +1126,7 @@ ApplicationWindow {
 
                             Row2 {
                                 label: "Chunk size"
+                                visible: !win.photoMode
                                 hint: "Temporal context length. Only used by video-depth-anything."
                                 enabled: win.depthBackend === "video-depth-anything"
                                 SpinBox {
@@ -1095,6 +1138,7 @@ ApplicationWindow {
 
                             Row2 {
                                 label: "Chunk overlap"
+                                visible: !win.photoMode
                                 enabled: win.depthBackend === "video-depth-anything"
                                 SpinBox {
                                     from: 0; to: 16
@@ -1105,6 +1149,7 @@ ApplicationWindow {
 
                             Row2 {
                                 label: "Temporal fill"
+                                visible: !win.photoMode
                                 enabled: win.depthBackend === "video-depth-anything"
                                 Switch {
                                     checked: win.temporalFill
@@ -1146,30 +1191,70 @@ ApplicationWindow {
                     // eye labels both showed with nothing rendered.
                     readonly property bool hasPreview: app.previewSource !== ""
 
+                    // For a photo this panel is not a preview at all. A
+                    // preview exists so you can judge one frame before
+                    // committing to an hour; here that frame *is* the
+                    // deliverable, so the panel shows the source you opened
+                    // and then the result that replaced it.
+                    readonly property bool showingSource:
+                        win.photoMode && !hasPreview
+                                      && app.thumbnailSource !== ""
+
                     Image {
                         id: previewImage
                         anchors.fill: parent
                         anchors.margins: 1
-                        source: app.previewSource
+                        source: previewPanel.hasPreview
+                                ? app.previewSource
+                                : (previewPanel.showingSource
+                                   ? app.thumbnailSource : "")
                         fillMode: Image.PreserveAspectFit
                         asynchronous: true
                         cache: false
-                        visible: parent.hasPreview
+                        visible: previewPanel.hasPreview
+                                 || previewPanel.showingSource
+                    }
+
+                    // Which of the two you are looking at. Without this the
+                    // panel changes picture on Convert with nothing saying
+                    // whether that is the input or the output.
+                    Rectangle {
+                        visible: win.photoMode && previewImage.visible
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: 10
+                        width: stageTag.implicitWidth + 16
+                        height: 24
+                        radius: 5
+                        color: "#c0000000"
+                        Text {
+                            id: stageTag
+                            anchors.centerIn: parent
+                            text: previewPanel.hasPreview
+                                  ? "Result" : "Source photo"
+                            color: previewPanel.hasPreview ? Theme.success
+                                                           : Theme.textDim
+                            font.pixelSize: Theme.fontS
+                        }
                     }
 
                     ColumnLayout {
                         anchors.centerIn: parent
                         spacing: 6
-                        visible: !parent.hasPreview
+                        visible: !previewPanel.hasPreview
+                                 && !previewPanel.showingSource
                         Text {
-                            text: "No preview yet"
+                            text: win.photoMode ? "Opening the photo…"
+                                                : "No preview yet"
                             color: Theme.textDim
                             font.pixelSize: Theme.fontL
                             Layout.alignment: Qt.AlignHCenter
                         }
                         Text {
-                            text: "Render one frame to judge strength and depth\n" +
-                                  "before committing to the whole video."
+                            text: win.photoMode
+                                  ? "The converted photo appears here."
+                                  : "Render one frame to judge strength and depth\n"
+                                    + "before committing to the whole video."
                             color: Theme.textFaint
                             font.pixelSize: Theme.fontS
                             horizontalAlignment: Text.AlignHCenter
@@ -1193,7 +1278,11 @@ ApplicationWindow {
                         (height - paintedH) / 2
 
                     Repeater {
-                        model: parent.hasPreview ? ["Left eye", "Right eye"] : []
+                        // Only over the finished stereo pair. The source
+                        // photo is one picture, and labelling half of it
+                        // "Right eye" would be a plain lie.
+                        model: previewPanel.hasPreview
+                               ? ["Left eye", "Right eye"] : []
                         Rectangle {
                             readonly property bool sideBySide:
                                 win.outputMode === "vr180"
@@ -1228,6 +1317,10 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
+                    // A photo has one frame and the conversion produces the
+                    // finished thing, so there is nothing here to choose and
+                    // nothing to preview.
+                    visible: !win.photoMode
 
                     Text {
                         text: "Preview frame"
