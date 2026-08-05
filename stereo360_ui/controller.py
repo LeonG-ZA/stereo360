@@ -134,6 +134,16 @@ class Controller(QObject):
         """A picture of the source frame, for the direction picker, or ''."""
         return self._thumbnail
 
+    @Property("QVariantList", constant=True)
+    def openFilters(self) -> list:
+        """Name filters for the open dialog, covering video and photo both."""
+        return options.open_filters()
+
+    @Slot(bool, result="QVariantList")
+    def saveFilters(self, photo: bool) -> list:
+        """Name filters for the save dialog, for a photo job or a video one."""
+        return options.save_filters(bool(photo))
+
     # ------------------------------------------------------------- probing
 
     @Slot()

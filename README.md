@@ -58,6 +58,37 @@ rather than rotating the picture.
 
 ![The VR180 direction picker: a band drawn across an equirectangular frame showing which 180° the file will keep, with the resulting view beside it](docs/direction.png)
 
+## Photos
+
+A single 360° photo works the same way, and needs no flags to say so:
+
+```bash
+stereo360 photo.jpg -o photo_stereo_360_TB.jpg
+```
+
+Stills are recognised by extension — `.jpg`, `.png`, `.webp`, `.tif`, `.bmp`,
+`.avif`, and `.heic`/`.heif`/`.hif` if your ffmpeg was built with libheif.
+Output is always JPEG, written at quality 100 with no chroma subsampling,
+because the artifacts of the default settings sit right where a headset puts
+your attention.
+
+Two differences from video, both because the file is one frame:
+
+- **Full size, always.** 7680×7680 is fine for a photo. The 35.6 MP ceiling
+  above is a limit of the *video decoder*; a JPEG becomes a texture, and the
+  Quest 3 displays a 59 MP stereo one without complaint. There is no reason to
+  reduce the output.
+- **Time is free, so spend it where it helps.** Not on `--depth-model large`,
+  which measured *worse* than the default rather than merely slower. Spend it
+  on `--depth-tiles 3` for finer depth on thin structures like railings and
+  cables, and `--inpaint learned` for better texture behind foreground edges.
+  Both are prohibitive for video and unremarkable for one frame.
+
+The result carries GPano XMP marking it as a panorama, and the tool suggests a
+filename ending `_360_TB` or `_180x180_3dh`. Either signal alone is enough for
+the Quest gallery to show the photo in stereo; writing both costs nothing.
+Nothing is ever renamed for you — the suggestion is only a suggestion.
+
 ## Requirements
 
 - Python 3.10+

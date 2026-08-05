@@ -1131,10 +1131,10 @@ class PreviewResult(NamedTuple):
     height: int
 
 
-# Written through cv2.imencode, so this is what OpenCV's encoders accept.
-# Shared with the image-input path, which reads the same set: a photo and a
-# preview are the same picture written the same way.
-_PREVIEW_SUFFIXES = ffmpeg_io.IMAGE_SUFFIXES
+# Written through cv2.imencode, so this is what OpenCV's encoders accept --
+# which is narrower than what ffmpeg will *read*. AVIF and HEIC go in and
+# cannot come out, and that asymmetry is fine: the output is a JPEG either way.
+_PREVIEW_SUFFIXES = ffmpeg_io.WRITABLE_IMAGE_SUFFIXES
 
 
 #: JPEG quality. The top of the scale, because this is the deliverable and the
@@ -1320,12 +1320,16 @@ def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
     it describes the mechanism instead of the intent, and it invites getting
     the width wrong and silently shipping a 2048-wide photo.
     """
-    if not ffmpeg_io.is_image_path(output_path):
+    # Writable, not readable: `-o out.heic` names a still, but OpenCV has no
+    # encoder for it, so accepting it here only moves the failure to a place
+    # that cannot explain itself.
+    if os.path.splitext(output_path)[1].lower() not in _PREVIEW_SUFFIXES:
         raise ValueError(
             f"The input {os.path.basename(input_path)!r} is an image, so the "
-            f"output must be one too, but {output_path!r} is not. Expected "
-            f"one of {', '.join(ffmpeg_io.IMAGE_SUFFIXES)}. JPEG is the one "
-            f"format headsets read reliably.")
+            f"output must be an image this tool can write, but "
+            f"{os.path.basename(output_path)!r} is not one of "
+            f"{', '.join(_PREVIEW_SUFFIXES)}. JPEG is the one format headsets "
+            f"read reliably.")
     kw.setdefault("width", 0)                       # 0 = do not downscale
     reporter = kw.get("reporter") or Reporter()
     kw["reporter"] = reporter

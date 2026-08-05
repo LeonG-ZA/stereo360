@@ -1026,8 +1026,33 @@ def test_the_ui_and_the_core_agree_on_what_a_still_is():
     from stereo360 import ffmpeg_io
 
     assert options.IMAGE_SUFFIXES == ffmpeg_io.IMAGE_SUFFIXES
-    for path in ("a.jpg", "a.JPG", "a.png", "a.mp4", "a", "a.jpeg.mp4"):
+    assert options.VIDEO_SUFFIXES == ffmpeg_io.VIDEO_SUFFIXES
+    for path in ("a.jpg", "a.JPG", "a.png", "a.mp4", "a", "a.jpeg.mp4",
+                 "a.avif", "a.heic"):
         assert options.is_image(path) == ffmpeg_io.is_image_path(path), path
+
+
+def test_the_open_dialog_offers_every_format_the_tool_accepts():
+    """The bug this exists for: the dialog listed five video extensions and
+    nothing else, so a photo could only be opened by typing its name in. A
+    filter list kept by hand is a second answer to "what does this open", and
+    it was the wrong one for three commits."""
+    combined = options.open_filters()[0]
+    for suffix in options.IMAGE_SUFFIXES + options.VIDEO_SUFFIXES:
+        assert "*" + suffix in combined, suffix
+
+
+def test_the_open_dialog_never_traps_anyone():
+    """Whatever the filters say, an unlisted extension must still be
+    reachable -- ffmpeg sniffs content and does not care about names."""
+    assert "All files (*)" in options.open_filters()
+
+
+@pytest.mark.parametrize("photo,expected", [(True, ".jpg"), (False, ".mp4")])
+def test_the_save_dialog_leads_with_the_right_format(photo, expected):
+    """A photo job offered "MP4 video (*.mp4)" and a default suffix of mp4,
+    which names the output of a JPEG conversion out.mp4."""
+    assert expected in options.save_filters(photo)[0]
 
 
 def test_a_photo_command_drops_the_flags_the_cli_would_refuse():

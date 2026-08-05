@@ -370,9 +370,10 @@ ApplicationWindow {
     // ---- dialogs --------------------------------------------------------
     FileDialog {
         id: openDialog
-        title: "Choose a 360° video"
-        nameFilters: ["Video files (*.mp4 *.mov *.mkv *.webm *.avi)",
-                      "All files (*)"]
+        title: "Choose a 360° video or photo"
+        // From the accepted lists, never written out here: a hand-kept copy
+        // is how this dialog came to hide every photo the tool could open.
+        nameFilters: app.openFilters
         onAccepted: {
             win.inputPath = app.toLocalPath(selectedFile.toString())
             if (win.outputPath === "")
@@ -390,10 +391,11 @@ ApplicationWindow {
 
     FileDialog {
         id: saveDialog
-        title: "Save stereoscopic video as"
+        title: win.photoMode ? "Save stereoscopic photo as"
+                             : "Save stereoscopic video as"
         fileMode: FileDialog.SaveFile
-        defaultSuffix: "mp4"
-        nameFilters: ["MP4 video (*.mp4)"]
+        defaultSuffix: win.photoMode ? "jpg" : "mp4"
+        nameFilters: app.saveFilters(win.photoMode)
         onAccepted: win.outputPath = app.toLocalPath(selectedFile.toString())
     }
 

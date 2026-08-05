@@ -18,13 +18,56 @@ from typing import Any, Dict, List, Optional
 #: Stills, mirrored from `ffmpeg_io.IMAGE_SUFFIXES`. Two lines rather than an
 #: import, for the same reason as `output_size`: this process must never pull
 #: numpy in to draw a window. A test pins the two lists together.
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+                  ".avif", ".heic", ".heif", ".hif")
+
+
+#: Offered by the open dialog alongside the stills. Mirrored for the same
+#: reason as the rest.
+VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts",
+                  ".m2ts", ".insv")
 
 
 def is_image(path: Any) -> bool:
     """Whether this path names a still, and so a photo job rather than a
     video one."""
     return os.path.splitext(str(path or ""))[1].lower() in IMAGE_SUFFIXES
+
+
+def _glob(suffixes) -> str:
+    return " ".join("*" + s for s in suffixes)
+
+
+def open_filters() -> List[str]:
+    """Name filters for the open dialog, built from the accepted lists.
+
+    Built rather than written out, because writing them out is how the dialog
+    came to offer video only while the tool had accepted photos for three
+    commits. A filter list that is maintained by hand is a second source of
+    truth about what the tool opens, and it was already wrong.
+
+    A dialog filter is only a filter -- ffmpeg sniffs content and ignores
+    extensions entirely -- but one that hides the file someone wants makes the
+    tool look as though it cannot open it, which is exactly what happened.
+    """
+    both = tuple(VIDEO_SUFFIXES) + tuple(IMAGE_SUFFIXES)
+    return [f"Video or photo ({_glob(both)})",
+            f"Video ({_glob(VIDEO_SUFFIXES)})",
+            f"Photo ({_glob(IMAGE_SUFFIXES)})",
+            "All files (*)"]
+
+
+def save_filters(photo: bool) -> List[str]:
+    """Name filters for the save dialog.
+
+    JPEG leads for photos, and not merely by convention: it is the only still
+    format the headsets read the projection tags out of, so the others are
+    offered as a way to get pixels, not as a way to get a VR photo.
+    """
+    if photo:
+        return ["JPEG photo (*.jpg *.jpeg)", "PNG image (*.png)",
+                "All files (*)"]
+    return ["MP4 video (*.mp4)"]
 
 
 #: Quality presets, and what each costs. The encoder timings are measured on

@@ -290,6 +290,24 @@ longer on the path.
 6. ~~**UI**~~ — **done.** Photo mode hides the encoding, frame-range, spatial
    audio and temporal controls; the panel shows the source photo and then the
    result, tagged so it is obvious which.
+
+   The open dialog then had to be fixed: it still filtered on five video
+   extensions, so for three commits the tool accepted photos that its own
+   file browser hid, and the only way in was to paste a filename. Both
+   dialogs now build their filters from the accepted lists rather than
+   repeating them. The save dialog was wrong in the same way — it offered
+   `*.mp4` and defaulted the suffix to `mp4` for a JPEG job.
+
+   Input formats widened at the same time: `.avif`, `.heic`, `.heif`, `.hif`.
+   AVIF is verified — ffmpeg reads it through the `mov,mp4,m4a` demuxer with
+   no libheif involved, and by content rather than extension. **HEIC is
+   not verified**: this build has no libheif, and the `avif` muxer will not
+   write HEVC, so no fixture could be made. It is listed on the argument that
+   a phone photo shouldn't be hidden by a dialog when the failure, if it
+   comes, is one readable line: probe failures now name the file and mention
+   libheif instead of raising `CalledProcessError`. Neither can be written —
+   `cv2.imencode` has no encoder for either — so the readable and writable
+   sets are now separate, with a test pinning the difference.
 7. ~~**Cardboard/VR Photo output**~~ — **not needed.** The stacked frame is
    read as stereo, so the largest piece of work in this plan is cancelled.
    Revisit only for Google Photos, which is a different reader and untested.

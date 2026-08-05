@@ -60,11 +60,50 @@ def test_a_still_probes_as_a_video_which_is_why_extension_is_used(tmp_path):
     assert not info.has_audio
 
 
-def test_the_reader_and_the_writer_agree_on_the_set():
+def test_everything_written_can_also_be_read():
     """A format the pipeline will write must be one it recognises as a still,
     or `-o out.png` from an image input would be refused by one and accepted
-    by the other."""
-    assert pipeline._PREVIEW_SUFFIXES is ffmpeg_io.IMAGE_SUFFIXES
+    by the other.
+
+    Subset, not equality: the read set is deliberately the larger one. AVIF
+    and HEIC go in and cannot come out, because `cv2.imencode` writes neither
+    and the point of the feature is a JPEG anyway.
+    """
+    assert set(pipeline._PREVIEW_SUFFIXES) <= set(ffmpeg_io.IMAGE_SUFFIXES)
+    assert pipeline._PREVIEW_SUFFIXES is ffmpeg_io.WRITABLE_IMAGE_SUFFIXES
+
+
+def test_the_read_only_formats_are_the_phone_ones():
+    """Named, so that widening the read set stays a decision rather than a
+    drift. These are what a phone or a camera hands you."""
+    read_only = set(ffmpeg_io.IMAGE_SUFFIXES) - set(
+        ffmpeg_io.WRITABLE_IMAGE_SUFFIXES)
+    assert read_only == {".avif", ".heic", ".heif", ".hif"}
+
+
+def test_a_real_avif_is_accepted(tmp_path):
+    """AVIF is not taken on trust: ffmpeg reads it here through the mp4
+    demuxer, with no libheif involved, which is why it is in the set while
+    HEIC's presence is a hope rather than a measurement."""
+    src = tmp_path / "in.avif"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=size=512x256",
+                    "-frames:v", "1", "-y", str(src)],
+                   check=True, capture_output=True)
+    assert ffmpeg_io.is_image_path(src)
+    info = ffmpeg_io.probe(str(src))
+    assert (info.width, info.height) == (512, 256)
+
+
+def test_an_unreadable_still_says_so_in_words(tmp_path):
+    """A build without libheif is the likely reason a .heic fails, and a
+    CalledProcessError traceback does not say that to anyone."""
+    bad = tmp_path / "broken.heic"
+    bad.write_bytes(b"not a picture")
+    with pytest.raises(ValueError) as excinfo:
+        ffmpeg_io.probe(str(bad))
+    assert "libheif" in str(excinfo.value)
+    assert "broken.heic" in str(excinfo.value)
 
 
 # ------------------------------------------------------------- the front door
@@ -116,7 +155,17 @@ def test_the_exit_code_is_zero(tmp_path):
 def test_an_image_will_not_write_a_video(tmp_path):
     src = equirect(tmp_path)
     proc = run(src, "-o", str(tmp_path / "out.mp4"), expect=1)
-    assert "output must be one too" in proc.stderr
+    assert "must be an image this tool can write" in proc.stderr
+
+
+def test_an_image_will_not_write_a_format_opencv_cannot_encode(tmp_path):
+    """`.heic` names a still, so the old check -- "is the output an image?" --
+    waved it through and left the failure to cv2.imencode, which returns
+    False and explains nothing."""
+    src = equirect(tmp_path)
+    proc = run(src, "-o", str(tmp_path / "out.heic"), expect=1)
+    assert "must be an image this tool can write" in proc.stderr
+    assert ".jpg" in proc.stderr, "the message should name what does work"
 
 
 @pytest.mark.parametrize("flag,value", [
