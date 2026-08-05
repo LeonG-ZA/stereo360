@@ -186,7 +186,72 @@ question, not an architectural one — `options.build_argv` already keys off a
 plain dict, so an image mode is a different set of controls feeding the same
 builder.
 
-## Open, and needing the headset
+## Answered on a Quest 3
+
+Nine files, one variable at a time, neutral filenames wherever the name was not
+the thing under test.
+
+| file | MP | XMP | filename | stereo? |
+|---|---|---|---|---|
+| `a_size_big` | 59.0 | — | — | no |
+| `b_size_small` | 33.2 | — | — | no |
+| `e_stereo_gpano_oneeye` | 59.0 | GPano 2:1 | — | **yes** |
+| `f_stereo_gpano_fullframe` | 59.0 | GPano 1:1 | — | **yes** |
+| `g_stereo_360_TB` | 59.0 | GPano 2:1 | `_360_TB` | **yes** |
+| `h_stereo_bare_360_TB` | 59.0 | — | `_360_TB` | **yes** |
+| `i_vr180_180x180_3dh` | 29.5 | GPano 180 | `_180x180_3dh` | **yes** |
+
+### 59 megapixels is fine for an image
+
+Four of the five that worked are 7680x7680. **The 35.6 Mpx cap does not apply
+to stills** — as expected, because it constrains the video decoder and a JPEG
+is a texture. The size that makes 8K 360 *video* unplayable is a non-issue for
+8K 360 *photos*, so the full-resolution output needs no compromise here and
+`--output-width` is not needed for images.
+
+### GPano alone is enough, and so is the filename alone
+
+`e` and `f` carry no filename tokens and worked. `h` carries no metadata at all
+and worked. `a` has neither and did not. So either signal is sufficient and
+neither is required — which means writing both is belt and braces, not a
+choice to agonise over.
+
+### The GPano dimensions do not matter
+
+`e` and `f` disagree about what the panorama is — one says 7680x3840 on a
+7680x7680 file, the other says 7680x7680 — and **both worked**. So the reader
+is not doing arithmetic on those fields to infer the layout. The presence of
+GPano marks the file as a panorama; the 1:1 aspect then reads as top-bottom.
+
+That also removes the question the plan could not answer from the spec. Either
+form is acceptable, so write the honest one: GPano describing **one eye**, which
+is the panorama the projection fields are actually about.
+
+### The Cardboard / VR Photo format is not needed
+
+This is the significant one. Step 7 was the only genuinely large piece of work
+here — ExtendedXMP, base64 of a whole second JPEG, and an exact `rdf`
+serialization or Google Photos silently shows both eyes the same. **A plain
+stacked frame is read as stereo**, so none of it is required.
+
+It stays worth knowing about for Google Photos specifically, which was never
+tested here and is a different reader from the headset gallery. But it is no
+longer on the path.
+
+### VR180 stills work too
+
+`i` is the other output mode, side by side, and it worked with GPano plus
+`_180x180_3dh`. Both output modes are viable for photos.
+
+## Still open
+
+- **Google Photos** was not tested, and is the one reader likely to want the
+  Cardboard format. Only matters if sharing through it is wanted.
+- **Whether `c` wrapped and `d` stayed flat** — the mono pair, testing whether
+  GPano drives projection on its own. Informational only: every output this
+  tool produces is stereo, and stereo detection is already settled.
+
+## Superseded: needing the headset
 
 - **Does 7680x7680 display as an image?** The 35.6 Mpx cap is a property of the
   *video decoder*; a JPEG is decoded and uploaded as a texture, where the limit
@@ -210,12 +275,14 @@ builder.
 1. **Input**: accept image extensions, and a real entry point rather than
    `--preview-frame 0 --preview-width 0`.
 2. **Encoding**: q100, 4:4:4, optimize. Small, measured, immediately better.
-3. **Device testing** with the three files above, before any XMP is written.
-4. **GPano XMP writer**, projection only — it is all the spec has.
+3. ~~**Device testing**~~ — **done**, nine files, results above.
+4. **GPano XMP writer**, projection only — it is all the spec has, and it is
+   enough. Describe one eye; the dimensions are not read for layout.
 5. **Filename suggestion** following the player conventions.
 6. **UI**: the reduced control set and the input/output panel.
-7. **Cardboard/VR Photo output**, only if step 3 says the stacked form is not
-   read. It is the one genuinely large piece here.
+7. ~~**Cardboard/VR Photo output**~~ — **not needed.** The stacked frame is
+   read as stereo, so the largest piece of work in this plan is cancelled.
+   Revisit only for Google Photos, which is a different reader and untested.
 
 Sources: [GPano spec](https://developers.google.com/streetview/spherical-metadata),
 [Cardboard Camera VR Photo format](https://developers.google.com/vr/reference/cardboard-camera-vr-photo-format),
