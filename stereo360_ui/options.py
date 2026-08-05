@@ -57,6 +57,34 @@ def open_filters() -> List[str]:
             "All files (*)"]
 
 
+def resolve_output(current: str, previous_suggestion: str, suggestion: str,
+                   input_is_image: bool) -> str:
+    """What belongs in the Output box once the job has changed.
+
+    `current` is what is there now, `previous_suggestion` the last name this
+    program proposed -- the two being equal is how it knows the name is its
+    own to revise rather than someone's choice to respect.
+
+    Three cases:
+
+    * Nothing there, or a name this program proposed -> take the suggestion.
+    * A hand-picked name that suits the job -> leave it alone.
+    * A hand-picked name that suits the *wrong kind* of job -> replace it.
+
+    The third is the one that matters. Opening a photo and then a video left
+    the photo's `..._360_TB.jpg` in the box, and nothing downstream caught it:
+    the render ran every frame and only then died muxing a video into a JPEG,
+    leaving a truncated file. Keeping that name is not respecting a choice,
+    it is preserving a guaranteed failure -- and the core now refuses it up
+    front regardless, so keeping it would only move the complaint.
+    """
+    if not current or current == previous_suggestion:
+        return suggestion
+    if is_image(current) != bool(input_is_image):
+        return suggestion
+    return current
+
+
 def save_filters(photo: bool) -> List[str]:
     """Name filters for the save dialog.
 

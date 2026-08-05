@@ -144,6 +144,21 @@ class Controller(QObject):
         """Name filters for the save dialog, for a photo job or a video one."""
         return options.save_filters(bool(photo))
 
+    @Slot(str, str, str, str, result="QVariantMap")
+    def resolveOutput(self, current: str, previous_suggestion: str,
+                      input_url: str, mode: str) -> dict:
+        """{output, suggested} for the Output box after the job changed.
+
+        Returns both, because the caller has to remember what was suggested
+        in order to know next time whether the box still holds its own idea
+        or someone's.
+        """
+        suggestion = self.suggestOutput(input_url, mode)
+        return {"output": options.resolve_output(
+                    current, previous_suggestion, suggestion,
+                    options.is_image(self.toLocalPath(input_url))),
+                "suggested": suggestion}
+
     # ------------------------------------------------------------- probing
 
     @Slot()
@@ -331,6 +346,12 @@ class Controller(QObject):
         """file:// URL from a FileDialog -> a plain path for the command."""
         return QUrl(url).toLocalFile() if url.startswith("file:") else url
 
+    # Both arities registered. Declaring only `(str)` -- as this did -- does
+    # not fail when QML passes two: Qt drops the extra silently and `mode`
+    # falls back to its default, so every VR180 photo was named `_360_TB`.
+    # The token is what the Quest gallery reads, so the file did not merely
+    # look wrong, it described the wrong layout.
+    @Slot(str, str, result=str)
     @Slot(str, result=str)
     def suggestOutput(self, input_url: str, mode: str = "360") -> str:
         """A sensible default output beside the input, so the second file

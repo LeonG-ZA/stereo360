@@ -39,6 +39,9 @@ ApplicationWindow {
     // ---- settings state -------------------------------------------------
     property string inputPath: ""
     property string outputPath: ""
+    // The last name this window proposed. Kept so it can tell a suggestion it
+    // is free to revise from a path the person typed or picked themselves.
+    property string suggestedOutput: ""
     property string outputMode: "360"
     property real yaw: 0             // only meaningful in vr180
     property int outputWidth: 0      // 0 = whatever the source implies
@@ -86,6 +89,16 @@ ApplicationWindow {
     }
 
     readonly property bool canRun: inputPath !== "" && outputPath !== ""
+
+    // Refresh the Output box for `fileUrl`. The rule for when a name may be
+    // replaced lives in options.resolve_output, where it can be tested --
+    // this stays a call so the two cannot say different things.
+    function adoptSuggestedOutput(fileUrl) {
+        var r = app.resolveOutput(win.outputPath, win.suggestedOutput,
+                                  fileUrl, win.outputMode)
+        win.outputPath = r.output
+        win.suggestedOutput = r.suggested
+    }
 
     // A photo job. Most of this window is about video, and showing controls
     // that do nothing implies they do something -- so the ones that cannot
@@ -141,6 +154,14 @@ ApplicationWindow {
         // dropped by the 360 render and silently reappear on switching back.
         if (outputMode !== "vr180")
             yaw = 0
+        // A photo's suggested name carries `_360_TB` or `_180x180_3dh`, and
+        // those tokens are not decoration -- the Quest gallery reads the
+        // filename to decide the layout, so a mode switch after the name was
+        // proposed would ship a file that lies about itself. Only a name this
+        // window proposed is revised; a hand-picked one is left alone, the
+        // cost there being a wrong token rather than a failed render.
+        if (inputPath !== "" && outputPath === suggestedOutput)
+            adoptSuggestedOutput(inputPath)
     }
 
     Connections {
@@ -376,9 +397,7 @@ ApplicationWindow {
         nameFilters: app.openFilters
         onAccepted: {
             win.inputPath = app.toLocalPath(selectedFile.toString())
-            if (win.outputPath === "")
-                win.outputPath = app.suggestOutput(selectedFile.toString(),
-                                                   win.outputMode)
+            win.adoptSuggestedOutput(selectedFile.toString())
         }
     }
 

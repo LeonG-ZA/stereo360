@@ -1003,6 +1003,17 @@ def convert(
               playable file containing the frames completed so far.
     """
     reporter = reporter or Reporter()
+    # Before anything expensive. A still's extension here means ffmpeg is
+    # asked to mux a video stream into a picture: it renders every frame,
+    # then dies in `encoder.close()` with "exited with code 4294967274" and
+    # leaves a truncated file behind. Measured -- and on an 8K job that is
+    # hours of work for a number nobody can read.
+    if ffmpeg_io.is_image_path(output_path):
+        raise ValueError(
+            f"{os.path.basename(output_path)!r} names a picture, but "
+            f"{os.path.basename(input_path)!r} is a video, so the output "
+            f"must be a video too. For a single frame out of a video, use "
+            f"--preview-frame.")
     info = ffmpeg_io.probe(input_path)
 
     # What the file says it is decides how it is read. Everything downstream

@@ -1055,6 +1055,83 @@ def test_the_save_dialog_leads_with_the_right_format(photo, expected):
     assert expected in options.save_filters(photo)[0]
 
 
+# ------------------------------------------------- the output box goes stale
+
+def test_a_photos_name_does_not_survive_into_a_video_job():
+    """The reported bug. Opening a photo and then a video left
+    `pano_360_TB.jpg` in Output, and the box only ever filled when empty."""
+    out = options.resolve_output("C:/x/pano_360_TB.jpg",
+                                 "C:/x/pano_360_TB.jpg",
+                                 "C:/x/clip_stereo.mp4", input_is_image=False)
+    assert out == "C:/x/clip_stereo.mp4"
+
+
+def test_a_hand_picked_name_that_fits_the_job_is_left_alone():
+    """Only names this program proposed are its to revise."""
+    out = options.resolve_output("C:/mine/my_edit.mkv", "C:/x/clip_stereo.mp4",
+                                 "C:/x/other_stereo.mp4", input_is_image=False)
+    assert out == "C:/mine/my_edit.mkv"
+
+
+def test_a_hand_picked_name_of_the_wrong_kind_is_replaced_anyway():
+    """Deliberately overriding someone's choice, because keeping it preserves
+    a render that cannot succeed -- a video muxed into a .jpg, or a photo
+    written to a .mkv."""
+    assert options.resolve_output(
+        "C:/mine/my_edit.mkv", "", "C:/x/pano_360_TB.jpg",
+        input_is_image=True) == "C:/x/pano_360_TB.jpg"
+    assert options.resolve_output(
+        "C:/mine/my_pic.jpg", "", "C:/x/clip_stereo.mp4",
+        input_is_image=False) == "C:/x/clip_stereo.mp4"
+
+
+def test_an_empty_box_is_filled():
+    assert options.resolve_output("", "", "C:/x/clip_stereo.mp4",
+                                  input_is_image=False) == "C:/x/clip_stereo.mp4"
+
+
+def test_the_output_mode_reaches_python_from_qml(qapp):
+    """`@Slot(str, result=str)` on a two-argument method does not fail when
+    QML passes both -- Qt drops the extra and the Python default applies. So
+    `suggestOutput(url, "vr180")` returned a `_360_TB` name, and that token is
+    what the Quest gallery reads to decide the layout.
+
+    Asserted against the meta-object, since that is what QML resolves against;
+    calling the method from Python passes either way and proves nothing.
+    """
+    mo = Controller().metaObject()
+    assert mo.indexOfMethod("suggestOutput(QString,QString)") >= 0, \
+        "QML calls this with two arguments"
+    assert mo.indexOfMethod("suggestOutput(QString)") >= 0, \
+        "and the one-argument form must keep working"
+
+
+def test_every_slot_accepts_as_many_arguments_as_it_takes(qapp):
+    """The general form of the bug above, which is silent in both directions:
+    Qt drops surplus arguments rather than raising, so the only symptom is a
+    parameter mysteriously stuck at its default."""
+    import inspect
+
+    mo = Controller().metaObject()
+    wrong = []
+    for name, fn in inspect.getmembers(Controller, inspect.isfunction):
+        params = [p for p in inspect.signature(fn).parameters if p != "self"]
+        if not params or not any(
+                mo.method(i).name().data().decode() == name
+                for i in range(mo.methodCount())):
+            continue
+        registered = {mo.method(i).methodSignature().data().decode()
+                      for i in range(mo.methodCount())
+                      if mo.method(i).name().data().decode() == name}
+        widest = max(s.count(",") + 1 if "()" not in s else 0
+                     for s in registered)
+        if widest < len(params):
+            wrong.append(f"{name}: takes {len(params)} args "
+                         f"({', '.join(params)}), widest slot accepts "
+                         f"{widest} -- {sorted(registered)}")
+    assert not wrong, "slots that silently drop arguments:\n" + "\n".join(wrong)
+
+
 def test_a_photo_command_drops_the_flags_the_cli_would_refuse():
     """Not cosmetic. The CLI *refuses* --max-frames, --start-frame and
     --spatial-audio for an image rather than ignoring them, so emitting one --

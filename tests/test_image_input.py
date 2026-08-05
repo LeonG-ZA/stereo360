@@ -158,6 +158,27 @@ def test_an_image_will_not_write_a_video(tmp_path):
     assert "must be an image this tool can write" in proc.stderr
 
 
+def test_a_video_will_not_write_a_picture_and_says_so_before_rendering(
+        tmp_path):
+    """The counterpart, and the expensive one. ffmpeg accepts the job, renders
+    every frame, and only then fails in `encoder.close()` with "exited with
+    code 4294967274", leaving a truncated file. On an 8K render that is hours
+    spent for a number nobody can read, so it is refused before the first
+    frame -- which is also what makes this test fast enough to keep.
+    """
+    src = str(tmp_path / "clip.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f",
+                    "lavfi", "-i", "testsrc2=size=256x128:d=1:r=4",
+                    "-frames:v", "4", "-y", src], check=True,
+                   capture_output=True)
+    out = tmp_path / "stale.jpg"
+    with pytest.raises(ValueError) as excinfo:
+        pipeline.convert(input_path=src, output_path=str(out))
+    assert "--preview-frame" in str(excinfo.value), \
+        "should point at the flag that does write one frame of a video"
+    assert not out.exists(), "refused before anything was written"
+
+
 def test_an_image_will_not_write_a_format_opencv_cannot_encode(tmp_path):
     """`.heic` names a still, so the old check -- "is the output an image?" --
     waved it through and left the failure to cv2.imencode, which returns
