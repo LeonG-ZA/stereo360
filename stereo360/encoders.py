@@ -25,20 +25,39 @@ import subprocess
 from typing import List, NamedTuple, Optional, Tuple
 
 #: name, is_hardware, vendor/summary
+#:
+#: This is also the order the dropdown shows, so it runs best quality first:
+#: software before hardware, and H.265 before H.264 within each group, since
+#: HEVC gives the better picture per bit at these sizes. Grouping by codec
+#: rather than by vendor means the list reads as a quality ranking, which is
+#: what someone scanning it is actually choosing between -- only one vendor's
+#: entries can work on any given machine anyway.
+#:
+#: Ordering here is presentation only. What the tool *defaults* to is
+#: `_DEFAULT_ORDER` below, deliberately kept separate: this list is about what
+#: looks best, that one is about what is safe to pick unattended.
 CANDIDATES: Tuple[Tuple[str, bool, str], ...] = (
-    ("libx264", False, "CPU · H.264 · most compatible"),
     ("libx265", False, "CPU · H.265 · better compression"),
+    ("libx264", False, "CPU · H.264 · most compatible"),
     ("hevc_nvenc", True, "NVIDIA NVENC · H.265"),
-    ("h264_nvenc", True, "NVIDIA NVENC · H.264"),
     ("hevc_qsv", True, "Intel Quick Sync · H.265"),
-    ("h264_qsv", True, "Intel Quick Sync · H.264"),
-    ("hevc_amf", True, "AMD AMF · H.265"),
-    ("h264_amf", True, "AMD AMF · H.264"),
-    ("hevc_vaapi", True, "VAAPI · H.265 · Linux"),
-    ("h264_vaapi", True, "VAAPI · H.264 · Linux"),
     ("hevc_videotoolbox", True, "VideoToolbox · H.265 · macOS"),
+    ("hevc_amf", True, "AMD AMF · H.265"),
+    ("hevc_vaapi", True, "VAAPI · H.265 · Linux"),
+    ("h264_nvenc", True, "NVIDIA NVENC · H.264"),
+    ("h264_qsv", True, "Intel Quick Sync · H.264"),
     ("h264_videotoolbox", True, "VideoToolbox · H.264 · macOS"),
+    ("h264_amf", True, "AMD AMF · H.264"),
+    ("h264_vaapi", True, "VAAPI · H.264 · Linux"),
 )
+
+#: What `recommended()` reaches for, in order. Named rather than inferred from
+#: position in CANDIDATES, because the two answer different questions and the
+#: display order is now the reverse of this one. Leaving it implicit would
+#: mean a reordering of the dropdown silently changing what the tool encodes
+#: with -- libx264 stays the default for its compatibility, which is the right
+#: property for a choice nobody made.
+_DEFAULT_ORDER: Tuple[str, ...] = ("libx264", "libx265")
 
 
 class EncoderInfo(NamedTuple):
@@ -185,7 +204,17 @@ def probe(width: int, height: int, timeout: float = 60.0,
 
 
 def recommended(infos: List[EncoderInfo]) -> Optional[str]:
-    """The encoder to default to: the best available software one."""
+    """The encoder to default to: the most compatible available software one.
+
+    Asks `_DEFAULT_ORDER` by name before falling back to list order, so that
+    reordering CANDIDATES for display cannot quietly change what a run with
+    no explicit `--codec` encodes with.
+    """
+    by_name = {i.name: i for i in infos}
+    for name in _DEFAULT_ORDER:
+        info = by_name.get(name)
+        if info is not None and info.available:
+            return name
     for info in infos:
         if info.available and not info.hardware:
             return info.name

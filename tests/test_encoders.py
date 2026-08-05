@@ -92,6 +92,41 @@ def test_recommended_prefers_a_software_encoder():
     assert encoders.recommended(reordered) == "libx264"
 
 
+def test_the_default_does_not_follow_the_display_order():
+    """The list is ordered best-quality-first for the dropdown, which puts
+    libx265 above libx264. `recommended` must not drift along with it: it
+    answers "what is safe to encode with when nobody chose", and the answer
+    is the most compatible one, not the best-looking one."""
+    assert encoders.CANDIDATES[0][0] == "libx265", "display order"
+    assert encoders.recommended(encoders.probe(*SMALL)) == "libx264"
+
+
+def test_the_list_reads_as_a_quality_ranking():
+    """Ordered for the dropdown: software first, then H.265 hardware, then
+    H.264 hardware. Grouped by codec rather than by vendor, since only one
+    vendor's entries can work on a given machine and the codec is the part
+    that is actually a choice."""
+    names = [c[0] for c in encoders.CANDIDATES]
+    hardware = {c[0]: c[1] for c in encoders.CANDIDATES}
+
+    groups = [[], [], []]
+    for name in names:
+        if not hardware[name]:
+            groups[0].append(name)
+        elif name.startswith("hevc_"):
+            groups[1].append(name)
+        else:
+            groups[2].append(name)
+    assert names == groups[0] + groups[1] + groups[2], \
+        "software, then HEVC hardware, then H.264 hardware"
+    assert groups[0] == ["libx265", "libx264"], "better compression first"
+
+    # Every hardware backend offered for one codec is offered for the other,
+    # so a machine does not lose its accelerator by picking H.264.
+    assert ([n[len("hevc_"):] for n in groups[1]]
+            == [n[len("h264_"):] for n in groups[2]])
+
+
 def test_probe_is_resolution_dependent():
     """The whole reason for probing per project rather than once."""
     small = {i.name: i.available for i in encoders.probe(*SMALL)}
