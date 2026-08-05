@@ -441,3 +441,93 @@ def test_video_output_is_untouched_by_any_of_this(tmp_path):
         "32")
     assert spherical.has_spherical_metadata(dst)
     assert b"GPano" not in Path(dst).read_bytes()
+
+
+# ---------------------------------------------------------- filename tokens
+
+@pytest.mark.parametrize("name,described", [
+    ("garden_360_TB.jpg", True),
+    ("garden_180x180_3dh.jpg", True),
+    ("holiday_sbs.jpg", True),
+    ("clip_OU.jpg", True),
+    ("x_3DV.jpg", True),
+    ("plain.jpg", False),
+    # The two traps. A substring match would call both of these described.
+    ("IMG_0180.jpg", False),
+    ("artbook.jpg", False),
+])
+def test_a_filename_is_read_by_token_not_by_substring(name, described):
+    """"tb" appears inside "artbook", and `IMG_0180.jpg` is a photo number
+    rather than a projection. Splitting on separators avoids both; substring
+    matching would claim each file already says what it is."""
+    from stereo360 import vr_naming
+
+    assert vr_naming.describes_stereo(name) is described
+
+
+def test_only_the_stereo_token_counts_not_the_projection():
+    """GPano carries the projection perfectly well, so the filename is needed
+    for the thing GPano cannot say. Looking for `180` too is what would make
+    `IMG_0180.jpg` look self-describing."""
+    from stereo360 import vr_naming
+
+    assert not vr_naming.describes_stereo("holiday_360.jpg")
+    assert vr_naming.describes_stereo("holiday_TB.jpg")
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("360", "garden_360_TB.jpg"),
+    ("vr180", "garden_180x180_3dh.jpg"),
+])
+def test_the_suggested_tokens_are_the_ones_that_were_tested(mode, expected):
+    """Both spellings were measured displaying correctly on a Quest 3. Other
+    documented spellings were not tested here, and picking an untried variant
+    is how you end up debugging a filename."""
+    from stereo360 import vr_naming
+
+    assert vr_naming.suggest("garden.jpg", mode) == expected
+
+
+def test_a_deliberate_name_is_never_argued_with():
+    from stereo360 import vr_naming
+
+    for name in ("holiday_sbs.jpg", "trip_360_TB.jpg"):
+        assert vr_naming.suggest(name, "360") == name
+        assert vr_naming.advice(name, "360") is None
+
+
+def test_the_suggestion_keeps_the_directory_and_extension():
+    from stereo360 import vr_naming
+
+    got = vr_naming.suggest(str(Path("some") / "dir" / "my photo.jpeg"), "360")
+    assert Path(got).parent == Path("some") / "dir"
+    assert got.endswith("_360_TB.jpeg")
+
+
+def test_a_plain_name_gets_advice_naming_the_players(tmp_path):
+    src = equirect(tmp_path)
+    proc = run(src, "-o", str(tmp_path / "garden.jpg"))
+    assert "garden_360_TB.jpg" in proc.stdout
+    assert "SKYBOX" in proc.stdout, "should say who reads filenames"
+
+
+def test_a_named_file_is_not_nagged(tmp_path):
+    """Advice that fires when it is not needed stops being read."""
+    src = equirect(tmp_path)
+    proc = run(src, "-o", str(tmp_path / "garden_360_TB.jpg"))
+    assert "filename does not say" not in proc.stdout
+
+
+def test_vr180_is_advised_its_own_tokens(tmp_path):
+    src = equirect(tmp_path)
+    proc = run(src, "-o", str(tmp_path / "half.jpg"), "--output-mode", "vr180")
+    assert "half_180x180_3dh.jpg" in proc.stdout
+
+
+def test_nothing_is_renamed_behind_your_back(tmp_path):
+    """It suggests. The file goes exactly where it was asked to go."""
+    src = equirect(tmp_path)
+    dst = tmp_path / "garden.jpg"
+    run(src, "-o", str(dst))
+    assert dst.exists()
+    assert not (tmp_path / "garden_360_TB.jpg").exists()

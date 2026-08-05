@@ -284,7 +284,9 @@ longer on the path.
 3. ~~**Device testing**~~ — **done**, nine files, results above.
 4. ~~**GPano XMP writer**~~ — **done.** `stereo360/gpano.py`. Projection only,
    describing one eye, with the exact geometry the device test validated.
-5. **Filename suggestion** following the player conventions.
+5. ~~**Filename suggestion**~~ — **done.** `stereo360/vr_naming.py`. Suggests
+   `_360_TB` and `_180x180_3dh` -- the two spellings that were measured
+   working -- and never renames anything itself.
 6. **UI**: the reduced control set and the input/output panel.
 7. ~~**Cardboard/VR Photo output**~~ — **not needed.** The stacked frame is
    read as stereo, so the largest piece of work in this plan is cancelled.

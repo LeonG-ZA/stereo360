@@ -13,7 +13,8 @@ from typing import Callable, NamedTuple, Optional
 
 import numpy as np
 
-from . import ambisonics, ffmpeg_io, gpano, projection, spherical, warp
+from . import (ambisonics, ffmpeg_io, gpano, projection, spherical,
+               vr_naming, warp)
 from .depth.base import DepthBackend
 from .events import Cancelled, Reporter
 
@@ -1339,6 +1340,10 @@ def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
             "so naming it with the usual tokens as well costs nothing and "
             "helps players that only read one of the two.",
             projection="equirectangular", output_mode=mode)
+        naming = vr_naming.advice(output_path, mode)
+        if naming:
+            reporter.info(naming, suggested=vr_naming.suggest(output_path,
+                                                              mode))
     else:
         # XMP goes in a JPEG APP1 segment. PNG can carry it in an iTXt chunk
         # and TIFF in a tag, but neither is what a headset reads, so writing
