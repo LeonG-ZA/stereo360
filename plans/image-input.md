@@ -287,7 +287,9 @@ longer on the path.
 5. ~~**Filename suggestion**~~ — **done.** `stereo360/vr_naming.py`. Suggests
    `_360_TB` and `_180x180_3dh` -- the two spellings that were measured
    working -- and never renames anything itself.
-6. **UI**: the reduced control set and the input/output panel.
+6. ~~**UI**~~ — **done.** Photo mode hides the encoding, frame-range, spatial
+   audio and temporal controls; the panel shows the source photo and then the
+   result, tagged so it is obvious which.
 7. ~~**Cardboard/VR Photo output**~~ — **not needed.** The stacked frame is
    read as stereo, so the largest piece of work in this plan is cancelled.
    Revisit only for Google Photos, which is a different reader and untested.

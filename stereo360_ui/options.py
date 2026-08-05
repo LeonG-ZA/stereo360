@@ -11,7 +11,21 @@ how someone graduates from the UI to the CLI.
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, Dict, List, Optional
+
+#: Stills, mirrored from `ffmpeg_io.IMAGE_SUFFIXES`. Two lines rather than an
+#: import, for the same reason as `output_size`: this process must never pull
+#: numpy in to draw a window. A test pins the two lists together.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+
+
+def is_image(path: Any) -> bool:
+    """Whether this path names a still, and so a photo job rather than a
+    video one."""
+    return os.path.splitext(str(path or ""))[1].lower() in IMAGE_SUFFIXES
+
 
 #: Quality presets, and what each costs. The encoder timings are measured on
 #: an 8K top-bottom render whose pipeline produces a frame every 0.80 s, so
@@ -200,6 +214,10 @@ def build_argv(
         raise ValueError("Choose an input video first.")
 
     is_preview = preview_frame is not None
+    # A photo job. Not a preview -- the CLI decides that from the input's own
+    # extension, exactly as this does, so the two cannot disagree about what
+    # kind of job it is.
+    photo = is_image(opts["input"]) and not is_preview
     out = preview_output if is_preview else opts.get("output")
     if not out:
         raise ValueError("Choose where to save the output first.")
@@ -210,7 +228,7 @@ def build_argv(
                                   QUALITY_PRESETS["standard"])
     # Encoder settings are meaningless for a still, and passing them would
     # only make the displayed command look more complicated than it is.
-    if not is_preview:
+    if not is_preview and not photo:
         # An explicit encoder choice overrides the preset's; everything else
         # about the preset (quality, speed, bit depth) still applies, so the
         # two controls compose instead of one shadowing the other.
@@ -319,6 +337,12 @@ def build_argv(
     if is_preview:
         argv += ["--preview-frame", str(int(preview_frame)),
                  "--preview-width", str(int(preview_width))]
+    elif photo:
+        # Nothing to add, and several things not to. The CLI *refuses*
+        # --max-frames, --start-frame and --spatial-audio for an image rather
+        # than ignoring them, so emitting one -- a spatial-audio switch left
+        # on from the last video, say -- would fail every photo conversion.
+        pass
     else:
         # Frame range only applies to a real render; a preview names its own
         # frame and would be cut short by a max-frames cap.
