@@ -13,7 +13,7 @@ from typing import Callable, NamedTuple, Optional
 
 import numpy as np
 
-from . import ambisonics, ffmpeg_io, projection, spherical, warp
+from . import ambisonics, ffmpeg_io, gpano, projection, spherical, warp
 from .depth.base import DepthBackend
 from .events import Cancelled, Reporter
 
@@ -1326,7 +1326,29 @@ def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
             f"one of {', '.join(ffmpeg_io.IMAGE_SUFFIXES)}. JPEG is the one "
             f"format headsets read reliably.")
     kw.setdefault("width", 0)                       # 0 = do not downscale
-    return preview_frame(input_path, output_path, frame_index=0, **kw)
+    reporter = kw.get("reporter") or Reporter()
+    kw["reporter"] = reporter
+    result = preview_frame(input_path, output_path, frame_index=0, **kw)
+
+    mode = kw.get("output_mode", DEFAULT_OUTPUT_MODE)
+    if ffmpeg_io.is_jpeg_path(output_path):
+        gpano.inject_into_jpeg(output_path, result.width, result.height, mode)
+        reporter.info(
+            "Tagged as a 360 photo (GPano). A stacked stereo frame is read as "
+            "3D from this alone on a Quest 3, and from the filename alone -- "
+            "so naming it with the usual tokens as well costs nothing and "
+            "helps players that only read one of the two.",
+            projection="equirectangular", output_mode=mode)
+    else:
+        # XMP goes in a JPEG APP1 segment. PNG can carry it in an iTXt chunk
+        # and TIFF in a tag, but neither is what a headset reads, so writing
+        # them would be work in service of a file nobody can view properly.
+        reporter.warning(
+            f"No 360 metadata was written: {os.path.splitext(output_path)[1]} "
+            f"cannot carry it the way players read. JPEG is the format "
+            f"headsets handle reliably.", output=output_path)
+    return result
+
 
 def _convert_chunked(
     frames,

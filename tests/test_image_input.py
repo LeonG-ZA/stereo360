@@ -294,3 +294,150 @@ def test_the_settings_actually_reduce_error(tmp_path):
 
     assert err(pipeline.image_encode_params(".jpg")) < err([]), \
         "the chosen settings should beat OpenCV's defaults"
+
+
+# ------------------------------------------------------------- GPano metadata
+
+def test_a_photo_is_tagged_as_a_sphere(tmp_path):
+    """Without this a viewer sees a large flat JPEG. Measured on a Quest 3,
+    GPano alone is enough to get a stacked frame read as stereo 360."""
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "out.jpg")
+    run(src, "-o", dst)
+
+    tags = gpano.read_projection(dst)
+    assert tags is not None, "no XMP was written"
+    assert tags["ProjectionType"] == "equirectangular"
+    assert tags["UsePanoramaViewer"] == "True"
+    assert tags["StitchingSoftware"] == "stereo360"
+
+
+def test_the_tag_describes_one_eye_not_the_stacked_frame(tmp_path):
+    """GPano cannot describe a stacked pair, so it describes the panorama one
+    eye covers. Device testing showed the dimensions are not read for layout
+    at all -- two files disagreeing about them both worked -- so this is the
+    description that happens to be true rather than the one that is required.
+    """
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)                       # 512x256 -> 512x512 output
+    dst = str(tmp_path / "out.jpg")
+    run(src, "-o", dst)
+
+    tags = gpano.read_projection(dst)
+    assert tags["CroppedAreaImageWidthPixels"] == "512"
+    assert tags["CroppedAreaImageHeightPixels"] == "256", "one eye, not 512"
+    assert tags["FullPanoWidthPixels"] == "512"
+    assert tags["CroppedAreaLeftPixels"] == "0", "360 crops nothing"
+
+
+def test_vr180_is_tagged_as_a_crop_from_the_middle(tmp_path):
+    """A VR180 eye covers 180 degrees, which in GPano's terms is a crop from
+    the middle of a sphere twice as wide. These are the exact numbers of the
+    test file that displayed correctly on a Quest 3."""
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "half.jpg")
+    run(src, "-o", dst, "--output-mode", "vr180")
+
+    tags = gpano.read_projection(dst)
+    assert tags["CroppedAreaImageWidthPixels"] == "256", "half the frame"
+    assert tags["FullPanoWidthPixels"] == "512", "of a sphere twice as wide"
+    assert tags["CroppedAreaLeftPixels"] == "128", "from the middle"
+
+
+@pytest.mark.parametrize("mode,size,expected", [
+    ("360", (7680, 7680),
+     {"crop_w": 7680, "crop_h": 3840, "full_w": 7680, "full_h": 3840,
+      "left": 0, "top": 0}),
+    ("vr180", (7680, 3840),
+     {"crop_w": 3840, "crop_h": 3840, "full_w": 7680, "full_h": 3840,
+      "left": 1920, "top": 0}),
+])
+def test_the_geometry_matches_what_was_tested_on_the_device(mode, size,
+                                                            expected):
+    """These exact numbers were in the files that worked, so they are pinned
+    rather than left to be re-derived."""
+    from stereo360 import gpano
+
+    assert gpano.eye_geometry(*size, mode) == expected
+
+
+def test_no_stereo_field_is_invented(tmp_path):
+    """GPano defines none. Writing one anyway would be a plausible-looking
+    property that no reader honours, and it would imply the file is described
+    when the filename is doing that work."""
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "out.jpg")
+    run(src, "-o", dst)
+    assert not any("stereo" in k.lower()
+                   for k in gpano.read_projection(dst)), "invented a field"
+
+
+def test_tagging_twice_leaves_one_packet(tmp_path):
+    """Nothing writes a JPEG that already has XMP, so this is not a live bug.
+    The equivalent guard on the MP4 side was quietly broken for months, which
+    is reason enough to get it right where it costs ten lines."""
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "twice.jpg")
+    run(src, "-o", dst)
+
+    gpano.inject_into_jpeg(dst, 512, 512, "360")
+    once = Path(dst).read_bytes()
+    gpano.inject_into_jpeg(dst, 512, 512, "360")
+    assert Path(dst).read_bytes() == once, "a second pass changed the file"
+    assert once.count(gpano.XMP_APP1_HEADER) == 1
+
+
+def test_the_packet_is_found_by_walking_markers_not_searching(tmp_path):
+    """Searching for the namespace string would also match those bytes inside
+    compressed image data. Not hypothetical: the same shortcut on MP4 found an
+    SA3D 187 MB into a file, inside mdat, with nonsense in every field."""
+    from stereo360 import gpano
+
+    src = equirect(tmp_path)
+    dst = str(tmp_path / "planted.jpg")
+    run(src, "-o", dst)
+
+    data = Path(dst).read_bytes()
+    # Bury a convincing decoy in the image data, past the real segment.
+    planted = data + gpano.XMP_APP1_HEADER + b'GPano:ProjectionType="lies"'
+    Path(dst).write_bytes(planted)
+    assert gpano.read_projection(dst)["ProjectionType"] == "equirectangular"
+
+
+def test_a_non_jpeg_says_it_carries_no_metadata(tmp_path):
+    """PNG can hold XMP in an iTXt chunk, but that is not what players read,
+    so writing it would be work in service of a file nobody can view."""
+    src = equirect(tmp_path)
+    proc = run(src, "-o", str(tmp_path / "out.png"))
+    assert "No 360 metadata" in proc.stdout or "No 360 metadata" in proc.stderr
+
+
+def test_an_untagged_jpeg_reads_as_untagged(tmp_path):
+    """The reader has to be able to say no, or the tests above prove nothing."""
+    from stereo360 import gpano
+
+    assert gpano.read_projection(equirect(tmp_path)) is None
+
+
+def test_video_output_is_untouched_by_any_of_this(tmp_path):
+    """GPano is for stills. An MP4 carries st3d/sv3d and must not grow an
+    APP1 segment or lose what it already has."""
+    from stereo360 import spherical
+    from test_end_to_end import make_test_video
+
+    src = str(tmp_path / "in.mp4")
+    dst = str(tmp_path / "out.mp4")
+    make_test_video(src, w=128, h=64, frames=3, with_audio=False)
+    run(src, "-o", dst, "--max-frames", "2", "--passthrough", "--face-size",
+        "32")
+    assert spherical.has_spherical_metadata(dst)
+    assert b"GPano" not in Path(dst).read_bytes()

@@ -282,8 +282,8 @@ longer on the path.
    Deliberately not progressive: a multi-pass 59 MP decode on a mobile GPU
    costs more than the bytes it saves.
 3. ~~**Device testing**~~ — **done**, nine files, results above.
-4. **GPano XMP writer**, projection only — it is all the spec has, and it is
-   enough. Describe one eye; the dimensions are not read for layout.
+4. ~~**GPano XMP writer**~~ — **done.** `stereo360/gpano.py`. Projection only,
+   describing one eye, with the exact geometry the device test validated.
 5. **Filename suggestion** following the player conventions.
 6. **UI**: the reduced control set and the input/output panel.
 7. ~~**Cardboard/VR Photo output**~~ — **not needed.** The stacked frame is

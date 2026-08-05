@@ -208,6 +208,15 @@ def is_image_path(path: str) -> bool:
     return os.path.splitext(str(path))[1].lower() in IMAGE_SUFFIXES
 
 
+def is_jpeg_path(path: str) -> bool:
+    """Whether this path names a JPEG specifically.
+
+    Narrower than `is_image_path` because only a JPEG carries the XMP that
+    marks a photo as a sphere, and only JPEG is read reliably by headsets.
+    """
+    return os.path.splitext(str(path))[1].lower() in (".jpg", ".jpeg")
+
+
 def _require(tool: str) -> str:
     path = shutil.which(tool)
     if path is None:
