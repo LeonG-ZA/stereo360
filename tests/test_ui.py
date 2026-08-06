@@ -858,11 +858,16 @@ def test_the_probe_is_told_the_size_actually_being_encoded(qapp):
 
 
 @pytest.mark.parametrize("extra,mode,expected_width", [
-    ((), "360", 7680),
+    # An 8K 360 source now starts reduced, because full size at that shape is
+    # 7680x7680 and does not decode on a headset. This is that default seen
+    # end to end -- a real window, a real probe -- rather than the rule on
+    # its own.
+    ((), "360", 5760),
     (("outputWidth=5760",), "360", 5760),
     # The reported bug: pick a reduced size, then change format. The box read
     # "full size" and the render used 5760.
     (("outputWidth=5760", "outputMode=vr180"), "vr180", 5760),
+    # VR180 keeps full size: 7680x3840 is under the cap and plays.
     (("outputMode=vr180",), "vr180", 7680),
 ])
 def test_the_resolution_box_shows_the_size_that_will_render(extra, mode,
@@ -1053,6 +1058,47 @@ def test_the_save_dialog_leads_with_the_right_format(photo, expected):
     """A photo job offered "MP4 video (*.mp4)" and a default suffix of mp4,
     which names the output of a JPEG conversion out.mp4."""
     assert expected in options.save_filters(photo)[0]
+
+
+# ------------------------------------------------ where the size picker starts
+
+def test_a_big_360_video_starts_at_a_size_that_plays():
+    """Full size is the better master, but it is black on a Quest 3 at 8K --
+    so defaulting to it means the commonest outcome is a file that will not
+    play, found out after a three-hour render."""
+    assert options.default_output_width(7680, 3840, "360") == 5760
+    assert options.default_output_width(11904, 5952, "360") == 5760
+
+
+def test_full_size_is_still_offered():
+    """Reduced by default, not removed. The ask was a default, and uploading
+    still wants the full-size master."""
+    choices = options.resolution_choices(7680, 3840, "360")
+    native = [c for c in choices if c["native"]]
+    assert native and native[0]["width"] == 7680
+    assert native[0]["label"] == "7680×7680"
+
+
+@pytest.mark.parametrize("width,height,mode,photo,why", [
+    (7680, 3840, "vr180", False, "VR180 at 8K is 29.5 MP and plays"),
+    (7680, 3840, "360", True, "the cap belongs to the video decoder"),
+    (5760, 2880, "360", False, "already at the safe width"),
+    (3840, 1920, "360", False, "a 4K source cannot reach the cap"),
+])
+def test_the_default_is_left_alone_where_the_cap_does_not_bite(
+        width, height, mode, photo, why):
+    """0 means the source's own width. Reducing where nothing required it
+    would cost resolution for no reason."""
+    assert options.default_output_width(width, height, mode, photo) == 0, why
+
+
+def test_the_chosen_width_reaches_the_command_line():
+    """The reduction has to be explicit in the argv, not implied. The CLI
+    default is still full size, so an omitted flag renders 7680x7680 while
+    the box says 5760 -- which is the failure this control has had before."""
+    argv = options.build_argv({"input": "in.mp4", "output": "out.mp4",
+                               "outputWidth": 5760, "sourceWidth": 7680})
+    assert argv[argv.index("--output-width") + 1] == "5760"
 
 
 # ------------------------------------------------- the output box goes stale

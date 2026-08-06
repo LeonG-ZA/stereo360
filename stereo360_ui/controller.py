@@ -189,6 +189,13 @@ class Controller(QObject):
         """Output sizes worth offering for this source, largest first."""
         return options.resolution_choices(int(width), int(height), str(mode))
 
+    @Slot(int, int, str, bool, result=int)
+    def defaultOutputWidth(self, width: int, height: int, mode: str,
+                           is_photo: bool) -> int:
+        """Width to start this source on; 0 means the source's own."""
+        return options.default_output_width(int(width), int(height), str(mode),
+                                            bool(is_photo))
+
     @Slot(int, int, result=bool)
     def exceedsLevelLimit(self, width: int, height: int) -> bool:
         """Whether a frame this size is past the top level of both codecs."""

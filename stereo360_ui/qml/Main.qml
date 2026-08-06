@@ -45,6 +45,10 @@ ApplicationWindow {
     property string outputMode: "360"
     property real yaw: 0             // only meaningful in vr180
     property int outputWidth: 0      // 0 = whatever the source implies
+    // The width this window chose on the source's behalf, so it can tell its
+    // own suggestion from a size someone picked. Same reasoning as
+    // suggestedOutput above.
+    property int suggestedOutputWidth: 0
     property string quality: "standard"
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
@@ -117,6 +121,30 @@ ApplicationWindow {
 
     Component.onCompleted: app.probeBackends()
 
+    // Start a big 360 source at a size that plays, rather than at full size.
+    // Resolved to a real number the moment the probe lands, never left as a
+    // sentinel: the box, the encoder probe and the command line all read
+    // `outputWidth`, and a "0 means work it out" that each resolved for
+    // itself is how this control once displayed one size and rendered
+    // another.
+    //
+    // Reads `app` rather than the `sourceWidth` and `photoMode` bindings,
+    // because this runs from a property-changed handler and those may not
+    // have re-evaluated yet -- the trap documented on _clampModel.
+    //
+    // Only revises a width this window chose. A size picked by hand survives
+    // a mode switch.
+    function adoptDefaultResolution() {
+        if (!app.sourceInfo || !app.sourceInfo.width)
+            return
+        var w = app.defaultOutputWidth(app.sourceInfo.width,
+                                       app.sourceInfo.height, outputMode,
+                                       app.isImage(inputPath))
+        if (outputWidth === 0 || outputWidth === suggestedOutputWidth)
+            outputWidth = w
+        suggestedOutputWidth = w
+    }
+
     // Encoder availability depends on the output size, and the output mode is
     // half of what decides that: the same source is 7680x7680 in 360 and
     // 7680x3840 in VR180, which is exactly where the hardware limits bite.
@@ -148,6 +176,11 @@ ApplicationWindow {
     onOutputWidthChanged: refreshEncoders()
 
     onOutputModeChanged: {
+        // The cap only bites in 360: the same source is 7680x7680 there and
+        // 7680x3840 in VR180, which plays. So the right default moves with
+        // the mode, and switching back should not leave a reduction behind
+        // that only the other mode needed.
+        adoptDefaultResolution()
         refreshEncoders()
         refreshThumbnail()
         // A yaw left over from a previous VR180 session would be silently
@@ -167,6 +200,9 @@ ApplicationWindow {
     Connections {
         target: app
         function onSourceInfoChanged() {
+            // Before the encoder probe, which is asked about a specific
+            // output size and would otherwise be run twice.
+            win.adoptDefaultResolution()
             win.refreshEncoders()
             // Set the spatial-audio switch from what the file turned out to
             // be, rather than making someone notice a channel count and tick

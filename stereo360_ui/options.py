@@ -205,6 +205,33 @@ def output_size(width: int, height: int, output_mode: str = "360",
     return width, height * 2
 
 
+#: The largest 360 width whose stacked output a headset still decodes.
+#: 5760x5760 is 33.2 MP against the 35.6 MP ceiling, and played on a Quest 3
+#: where 7680x7680 showed nothing at all.
+HEADSET_SAFE_WIDTH = 5760
+
+
+def default_output_width(width: int, height: int, output_mode: str = "360",
+                         is_photo: bool = False) -> int:
+    """The width to start on for this source. 0 means the source's own.
+
+    Full size is the better *master* -- it is what you upload, and YouTube
+    transcodes anyway -- but it is not what most people are about to do with
+    the file. An 8K 360 render at 7680x7680 is black on a Quest 3, so
+    defaulting to it means the commonest outcome is a file that does not
+    play, discovered after a three-hour render. Starting at a size that plays
+    fails the other way, which is recoverable: the full size is still one
+    click away and the dropdown says which is which.
+
+    Only 360 video. VR180 at 8K is 7680x3840, comfortably under the ceiling,
+    and stills are not subject to it at all -- a 59 MP stereo JPEG displays
+    fine, because that limit belongs to the video decoder.
+    """
+    if is_photo or output_mode != "360" or width <= HEADSET_SAFE_WIDTH:
+        return 0
+    return HEADSET_SAFE_WIDTH
+
+
 def resolution_choices(width: int, height: int,
                        output_mode: str = "360") -> List[Dict[str, Any]]:
     """Every output size worth offering for this source, largest first.
