@@ -2,5 +2,10 @@ numpy>=1.24
 opencv-python>=4.8
 tqdm>=4.65
 torch>=2.2
+# transformers reaches for torchvision inside AutoImageProcessor, so without
+# it the default depth backend cannot be constructed at all -- the failure is
+# an ImportError at build time, not a missing feature. Install it from the
+# same index as torch: a CPU torchvision beside a CUDA torch is its own mess.
+torchvision>=0.17
 transformers>=4.45
 Pillow>=10.0

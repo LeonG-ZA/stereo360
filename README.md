@@ -91,12 +91,68 @@ Nothing is ever renamed for you — the suggestion is only a suggestion.
 
 ## Requirements
 
-- Python 3.10+
-- FFmpeg and ffprobe on `PATH`
 - A GPU is strongly recommended. On the CPU, depth estimation is roughly an
-  order of magnitude slower and becomes ~90% of the runtime.
+  order of magnitude slower and becomes ~90% of the runtime. It does not have
+  to be an NVIDIA one — see the accelerator table below.
+- 64-bit Windows, macOS or Linux.
 
-## Installing
+The Windows installer below supplies everything else. Installing by hand
+instead needs **Python 3.10+** and **FFmpeg and ffprobe on `PATH`**.
+
+## Installing on Windows: the one-click way
+
+Download **`Install stereo360.bat`** and **`install.ps1`** from the
+[latest release](https://github.com/LeonG-ZA/stereo360/releases/latest), keep
+them together, and double-click the `.bat`. It does not matter which folder
+they are in — your Downloads folder is fine, and is what the installer
+expects.
+
+It installs everything: a private copy of Python, the right PyTorch for your
+GPU, PySide6 for the interface, ffmpeg, and the depth model. Nothing is added
+to `PATH`, no administrator rights are needed, and no Python you already have
+is touched. It takes about **5.6 GB**, and anywhere from 4 minutes to half an
+hour depending entirely on your connection — nearly all of it spent
+downloading PyTorch.
+
+**Windows will warn you.** The installer is unsigned, so SmartScreen shows
+*"Windows protected your PC"* — click **More info**, then **Run anyway**. If
+you would rather not, the manual install below does the same thing by hand.
+
+It installs to `%LOCALAPPDATA%\Programs\stereo360`. To uninstall, delete that folder.
+
+### Picking the accelerator
+
+Left alone it detects your card and chooses. To override:
+
+```bash
+powershell -ExecutionPolicy Bypass -File install.ps1 -Accelerator directml
+```
+
+| `-Accelerator` | For | Size |
+|---|---|---|
+| `auto` (default) | NVIDIA if present, otherwise DirectML | — |
+| `cuda` | NVIDIA | ~2.5 GB |
+| `directml` | **AMD, Intel, or any Direct3D 12 GPU** | ~200 MB |
+| `cpu` | no usable GPU; roughly 10× slower | ~200 MB |
+
+The CUDA build is chosen from your card's compute capability and then
+**verified by running an actual kernel** — not by asking
+`torch.cuda.is_available()`, which returns `True` on a build that cannot run
+a single kernel on your card. That mismatch is the usual reason a fresh
+install silently falls back to the CPU, and it is why an RTX 50 series card
+needs a cu128 build specifically. If the check fails, the installer says so
+and falls back rather than leaving you to find out mid-render.
+
+### About the bundled ffmpeg
+
+A GPL build with libx264 and libx265, and deliberately without libfdk_aac:
+ffmpeg built with that encoder requires `--enable-nonfree`, and its licence
+does not permit redistributing the result. stereo360 uses libfdk_aac when it
+finds it and warns when it does not, so if you want it, put your own
+`ffmpeg.exe` in `%LOCALAPPDATA%\Programs\stereo360\ffmpeg`. At the bitrates used for
+ambisonic audio the difference is small.
+
+## Installing manually
 
 ```bash
 git clone https://github.com/LeonG-ZA/stereo360.git
@@ -110,13 +166,29 @@ any other setting** — the wrong one silently runs everything on the CPU.
 ### NVIDIA
 
 The default `pip install torch` wheel is CPU-only on Windows, so install the
-CUDA build explicitly:
+CUDA build explicitly — and **install it before `requirements.txt`**, or pip
+will already have pulled the CPU wheel and will report "requirement already
+satisfied" instead of replacing it:
 
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 ```
 
-Nothing else to configure. The tool detects CUDA and uses it.
+**Match the build to your card.** cu128 covers Volta through Blackwell, which
+is everything from a GTX 1660 to an RTX 50 series. Only Pascal and older
+(GTX 10 series) need `cu118` instead.
+
+Then check it, because a mismatch does not announce itself:
+
+```bash
+python -c "import torch; print(torch.cuda.get_device_capability(0), torch.cuda.get_arch_list())"
+```
+
+Your card's capability must appear in that list — `(12, 0)` needs `sm_120`.
+If it does not, CUDA quietly JIT-compiles from embedded PTX: everything still
+works, nothing uses the tuned kernels for your card, and
+`torch.cuda.is_available()` cheerfully returns `True` throughout. The Windows
+installer above does this check for you.
 
 ### AMD or Intel
 
