@@ -1303,6 +1303,20 @@ def preview_frame(
     with open(output_path, "wb") as fh:
         fh.write(buf)
 
+    # Tag it, whatever asked for it. What lands here is a full stereo frame
+    # in the output's own layout, so a JPEG of it is a viewable 360 photo --
+    # and an untagged one is a file no headset will open. That is not
+    # hypothetical: previews of a *video* went out untagged for a while,
+    # because the injection lived only on the photo path, and the resulting
+    # JPEGs could not be opened on a Quest at all despite the pixels being
+    # identical to ones that could.
+    #
+    # Size does not matter to the tag: a downscaled preview is still a
+    # correctly proportioned equirect, so it displays.
+    if ffmpeg_io.is_jpeg_path(output_path):
+        gpano.inject_into_jpeg(output_path, stacked.shape[1],
+                               stacked.shape[0], output_mode)
+
     reporter.advance(1)
     reporter.finish(output=output_path, frames=1, cancelled=False,
                     preview=True, frame_index=frame_index,
@@ -1348,7 +1362,9 @@ def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
 
     mode = kw.get("output_mode", DEFAULT_OUTPUT_MODE)
     if ffmpeg_io.is_jpeg_path(output_path):
-        gpano.inject_into_jpeg(output_path, result.width, result.height, mode)
+        # preview_frame already wrote the GPano tag -- every stereo JPEG this
+        # pipeline produces gets one. What is added here is the advice, which
+        # only makes sense for a photo somebody intends to keep.
         reporter.info(
             "Tagged as a 360 photo (GPano). A stacked stereo frame is read as "
             "3D from this alone on a Quest 3, and from the filename alone -- "

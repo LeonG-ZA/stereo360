@@ -395,6 +395,47 @@ own relative depth scale, a coarse full-face pass is run first and every
 tile is scale-aligned to it (least squares) before blending. `--depth-tiles 4`
 gives 480² tiles at 8K (no downsample at all); cost scales with N².
 
+#### It is not monotonic — more tiling can be worse
+
+Measured on frame 0 of a tram-roof shot, judged on a Quest 3, on a scene with
+both thin cables and long diagonal struts:
+
+| | result |
+|---|---|
+| no tiling | cables kink where they cross a depth boundary |
+| 2 | cables resolved but thinned; a tile seam lands on a diagonal strut and aliases it |
+| **3** | **best — cables and strut both intact** |
+| 4 | the strut's edge is almost gone |
+
+The reason 4 is worse is the trade tiling actually makes: it raises detail per
+tile by *shrinking the context* each tile sees. A thin cable only needs local
+detail and gains. A long diagonal spans several tiles, each of which now
+judges its depth from a fragment; the pieces disagree slightly and the
+cross-fade softens the edge away. At 4×4 there is not enough of the strut in
+any one tile to place it.
+
+So the optimum moves with the scale of the structures in the shot, and the
+"quality at any cost" framing above is wrong past a point: beyond it, tiling
+costs quality as well as time. A shot with fine detail and no long diagonals
+may well prefer 4.
+
+Cost is far gentler than N² suggests, because this box is encode-bound at 8K
+and much of the extra depth work hides behind the encoder:
+
+| | s/frame | vs default | 8446-frame render |
+|---|---|---|---|
+| none | 1.51 | 1.00× | 3 h 32 m |
+| 2 | 1.94 | 1.28× | 4 h 33 m |
+| 3 | 2.70 | 1.79× | 6 h 20 m |
+
+**A caution on measuring this.** The kink was first "measured" at 22 px by
+tracing the cable through both eyes and differencing. That number was wrong —
+the tracer lost the cable behind an occluder and re-acquired a different one,
+and the statistic described the tracer rather than the footage. The real
+displacements are a few pixels. Human judgement in the headset got the
+ordering right when the metric did not; if a metric disagrees with the
+headset here, distrust the metric first.
+
 ### Temporal hole filling
 
 ```bash

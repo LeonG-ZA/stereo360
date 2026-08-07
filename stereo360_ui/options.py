@@ -205,6 +205,13 @@ def output_size(width: int, height: int, output_mode: str = "360",
     return width, height * 2
 
 
+#: Tiles per cube face for a photo, mirrored from `cli.PHOTO_DEPTH_TILES`.
+#: More than a video gets, because for a single frame the extra depth passes
+#: are nearly free -- 12 s against 14 s on a 59 MP still, where loading the
+#: model and encoding the JPEG dominate. A test pins this to the CLI's value.
+PHOTO_DEPTH_TILES = 3
+
+
 #: The largest 360 width whose stacked output a headset still decodes.
 #: 5760x5760 is 33.2 MP against the 35.6 MP ceiling, and played on a Quest 3
 #: where 7680x7680 showed nothing at all.
@@ -370,8 +377,11 @@ def build_argv(
     if abs(grad - _DEFAULTS["gradientLimit"]) > 1e-9:
         argv += ["--gradient-limit", f"{grad:g}"]
 
+    # Against the default for *this kind of job*: the CLI uses 3 for a photo
+    # and 1 for a video, so a fixed comparison here would emit the flag when
+    # it is not needed and, worse, omit it when it is.
     tiles = int(_num(opts.get("depthTiles"), 1))
-    if tiles != _DEFAULTS["depthTiles"]:
+    if tiles != (PHOTO_DEPTH_TILES if photo else _DEFAULTS["depthTiles"]):
         argv += ["--depth-tiles", str(tiles)]
 
     if opts.get("splitBaseline"):

@@ -172,12 +172,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "binocular fusion hides them. Costs a second warp per "
                         "frame and roughly doubles chunk memory - consider a "
                         "smaller --chunk-size with it.")
-    p.add_argument("--depth-tiles", type=int, default=1, metavar="N",
+    p.add_argument("--depth-tiles", type=int, default=None, metavar="N",
                    help="Split each cubemap face into NxN overlapping tiles "
                         "for depth inference (feather-blended). Higher = "
                         "finer depth on thin structures (curtains, railings) "
                         "since tiles need little/no downsampling; N squared "
-                        "times slower. 1 = whole faces (default: 1)")
+                        "times slower. 1 = whole faces. Not monotonic -- past "
+                        "a point tiles are too small to hold a long edge in "
+                        "context and it softens away. "
+                        "(default: 1 for video, 3 for a photo)")
     # Default deliberately None rather than projection.FACE_OVERLAP: importing
     # projection here would pull numpy and cv2 into every --help.
     p.add_argument("--output-mode", default="360", choices=["360", "vr180"],
@@ -391,7 +394,37 @@ def _refuse_video_only_flags(args) -> None:
         f"the input is an image, so these do not apply: {lines}")
 
 
+#: Tiles per cube face when nobody says otherwise.
+#:
+#: A photo gets more because for one frame the extra passes are close to
+#: free -- measured at 12 s against 14 s for a 59 MP still, where loading the
+#: model and encoding the JPEG swamp the N-squared depth cost entirely. The
+#: same setting on a 8000-frame video is hours.
+#:
+#: Three rather than four. Tiling trades detail per tile against the context
+#: each tile can see, so it stops helping and starts hurting: at 4x4 a long
+#: diagonal no longer fits inside any single tile and its edge blends away.
+#: Judged on a Quest 3 -- see findings.md.
+VIDEO_DEPTH_TILES = 1
+PHOTO_DEPTH_TILES = 3
+
+
+def resolve_depth_tiles(requested, is_image: bool) -> int:
+    """How many tiles to use, given what was asked for and what came in.
+
+    `None` means nobody asked. The flag defaults to None rather than to 1 so
+    that an explicit `--depth-tiles 1` on a photo is still honoured -- with a
+    default of 1 the two are indistinguishable afterwards, and someone asking
+    for whole faces would silently get three.
+    """
+    if requested is not None:
+        return int(requested)
+    return PHOTO_DEPTH_TILES if is_image else VIDEO_DEPTH_TILES
+
+
 def _run(args, reporter, cancel, backends, pipeline):
+    args.depth_tiles = resolve_depth_tiles(
+        args.depth_tiles, pipeline.ffmpeg_io.is_image_path(args.input))
     built = backends.build(
         passthrough=args.passthrough,
         depth_backend=args.depth_backend,

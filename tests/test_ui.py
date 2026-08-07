@@ -1060,6 +1060,35 @@ def test_the_save_dialog_leads_with_the_right_format(photo, expected):
     assert expected in options.save_filters(photo)[0]
 
 
+def test_the_ui_and_the_cli_agree_on_the_photo_tile_count():
+    """Mirrored rather than imported, like the rest. If they drift, the spin
+    box shows one number and the render uses another -- which this control
+    would have done the moment the CLI default changed."""
+    from stereo360 import cli
+
+    assert options.PHOTO_DEPTH_TILES == cli.PHOTO_DEPTH_TILES
+
+
+@pytest.mark.parametrize("path,tiles,expected", [
+    ("in.mp4", 1, None),        # video default -- omitted
+    ("in.mp4", 3, "3"),         # video, not the default -- emitted
+    ("pano.jpg", 3, None),      # photo default -- omitted
+    ("pano.jpg", 1, "1"),       # photo, asked for whole faces -- emitted
+    ("pano.jpg", 4, "4"),
+])
+def test_the_tiles_flag_is_emitted_against_the_right_default(path, tiles,
+                                                             expected):
+    """A fixed comparison would emit the flag when it is not needed and, far
+    worse, omit it when it is -- silently rendering a photo at 3 while the
+    box read 1."""
+    argv = options.build_argv({"input": path, "output": "out.jpg",
+                               "depthTiles": tiles})
+    if expected is None:
+        assert "--depth-tiles" not in argv
+    else:
+        assert argv[argv.index("--depth-tiles") + 1] == expected
+
+
 # ------------------------------------------------ where the size picker starts
 
 def test_a_big_360_video_starts_at_a_size_that_plays():

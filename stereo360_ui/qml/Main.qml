@@ -145,6 +145,18 @@ ApplicationWindow {
         suggestedOutputWidth = w
     }
 
+    // The CLI uses more tiles for a photo than for a video, so the spin box
+    // has to follow -- otherwise it reads 1 while the render does 3, which is
+    // the same "shows one thing, does another" failure the resolution box
+    // already had twice. Only revises a value this window chose.
+    property int suggestedDepthTiles: 1
+    function adoptPhotoDefaults() {
+        var want = app.isImage(inputPath) ? app.photoDepthTiles : 1
+        if (depthTiles === suggestedDepthTiles)
+            depthTiles = want
+        suggestedDepthTiles = want
+    }
+
     // Encoder availability depends on the output size, and the output mode is
     // half of what decides that: the same source is 7680x7680 in 360 and
     // 7680x3840 in VR180, which is exactly where the hardware limits bite.
@@ -203,6 +215,7 @@ ApplicationWindow {
             // Before the encoder probe, which is asked about a specific
             // output size and would otherwise be run twice.
             win.adoptDefaultResolution()
+            win.adoptPhotoDefaults()
             win.refreshEncoders()
             // Set the spatial-audio switch from what the file turned out to
             // be, rather than making someone notice a channel count and tick

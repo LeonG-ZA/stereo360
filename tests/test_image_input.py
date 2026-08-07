@@ -158,6 +158,80 @@ def test_an_image_will_not_write_a_video(tmp_path):
     assert "must be an image this tool can write" in proc.stderr
 
 
+# ------------------------------------------------------- tiles, by job kind
+
+@pytest.mark.parametrize("requested,is_image,expected,why", [
+    (None, True, 3, "a photo, nobody asked"),
+    (None, False, 1, "a video, nobody asked"),
+    (1, True, 1, "a photo, but 1 was asked for explicitly"),
+    (4, True, 4, "a photo, 4 asked for"),
+    (2, False, 2, "a video, 2 asked for"),
+])
+def test_the_tile_count_follows_the_kind_of_job(requested, is_image,
+                                                expected, why):
+    """More tiles for a photo, because for one frame they are close to free:
+    12 s against 14 s on a 59 MP still, where loading the model and encoding
+    the JPEG dominate. The same setting on 8000 frames is hours."""
+    from stereo360 import cli
+
+    assert cli.resolve_depth_tiles(requested, is_image) == expected, why
+
+
+def test_asking_for_one_tile_on_a_photo_is_honoured():
+    """The reason the flag defaults to None rather than to 1. With a default
+    of 1 there is no way to tell "the user typed 1" from "nobody said
+    anything", so someone asking for whole faces would silently get three."""
+    from stereo360 import cli
+
+    assert cli.build_parser().get_default("depth_tiles") is None
+    assert cli.resolve_depth_tiles(1, True) == 1
+
+
+def test_a_photo_actually_renders_with_the_photo_default(tmp_path):
+    """End to end rather than by inspection: the same photo with and without
+    an explicit --depth-tiles 1 must not produce the same pixels."""
+    src = equirect(tmp_path, w=1024, h=512)
+    a, b = tmp_path / "default.jpg", tmp_path / "one.jpg"
+    run(src, "-o", str(a), "--face-size", "128")
+    run(src, "-o", str(b), "--face-size", "128", "--depth-tiles", "1")
+    assert a.read_bytes() != b.read_bytes(), \
+        "the default is not tiling, or --depth-tiles 1 is being ignored"
+
+
+def test_a_preview_of_a_video_is_tagged_too(tmp_path):
+    """A stereo JPEG is a stereo JPEG, whatever asked for it.
+
+    The tag used to be written only on the photo path, so previewing a frame
+    of a *video* produced a file no headset would open -- identical pixels to
+    one that opened fine, and nothing to say why. Checking settings before a
+    long render is exactly when you want to look at the frame in a headset.
+    """
+    from stereo360 import gpano
+
+    src = str(tmp_path / "clip.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f",
+                    "lavfi", "-i", "testsrc2=size=256x128:d=1:r=4",
+                    "-frames:v", "2", "-y", src], check=True,
+                   capture_output=True)
+    out = tmp_path / "preview.jpg"
+    run(src, "-o", str(out), "--preview-frame", "0", "--face-size", "64")
+    assert gpano.read_projection(str(out)), "no GPano in a video preview"
+
+
+def test_a_png_preview_is_left_alone(tmp_path):
+    """XMP goes in a JPEG APP1 segment. A PNG could carry it in an iTXt
+    chunk, but that is not what players read, so writing one would be work
+    toward a file nobody can view -- and PNG is the normal preview format."""
+    src = str(tmp_path / "clip.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f",
+                    "lavfi", "-i", "testsrc2=size=256x128:d=1:r=4",
+                    "-frames:v", "2", "-y", src], check=True,
+                   capture_output=True)
+    out = tmp_path / "preview.png"
+    proc = run(src, "-o", str(out), "--preview-frame", "0", "--face-size", "64")
+    assert out.exists() and "Traceback" not in proc.stderr
+
+
 def test_a_video_will_not_write_a_picture_and_says_so_before_rendering(
         tmp_path):
     """The counterpart, and the expensive one. ffmpeg accepts the job, renders

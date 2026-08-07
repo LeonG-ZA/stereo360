@@ -134,6 +134,11 @@ class Controller(QObject):
         """A picture of the source frame, for the direction picker, or ''."""
         return self._thumbnail
 
+    @Property(int, constant=True)
+    def photoDepthTiles(self) -> int:
+        """Tiles per cube face the CLI will use for a photo."""
+        return options.PHOTO_DEPTH_TILES
+
     @Property("QVariantList", constant=True)
     def openFilters(self) -> list:
         """Name filters for the open dialog, covering video and photo both."""
