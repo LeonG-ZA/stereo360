@@ -301,8 +301,7 @@ ApplicationWindow {
                  + "not, leaving every source " + Math.abs(yaw).toFixed(0)
                  + "° out of place."
         return "Tick only if the source audio really is ambiX: 4, 9 or 16 "
-             + "channels. 360° and top-bottom are always written and need no "
-             + "setting."
+             + "channels."
     }
 
     readonly property string outputMegapixels:

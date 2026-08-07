@@ -7,9 +7,9 @@ loudly when it fails. Picking the PyTorch build does not. Measured on an RTX
 JIT-compiles the embedded PTX. Nothing looks wrong and nothing is using the
 tuned code for the card. That decision is worth pinning.
 
-Driven through the real script in `-DryRun`, so what is tested is the code
-that ships rather than a Python transcription of it. The script prints its
-choices as `DECISION key=value` on stdout for exactly this purpose.
+Driven through the real file in `-DryRun` -- the .bat itself, not a copy of
+its payload -- so what is tested is exactly what ships, unpacking included.
+It prints its choices as `DECISION key=value` on stdout for this purpose.
 """
 
 import platform
@@ -19,20 +19,29 @@ from pathlib import Path
 
 import pytest
 
-INSTALLER = Path(__file__).resolve().parent.parent / "installer" / "install.ps1"
+INSTALLER = (Path(__file__).resolve().parent.parent / "installer"
+             / "Install stereo360.bat")
+MARKER = "#@@ POWERSHELL PAYLOAD STARTS ON THE NEXT LINE @@"
 
 pytestmark = pytest.mark.skipif(
     platform.system() != "Windows" or shutil.which("powershell") is None,
     reason="the installer is Windows-only and needs powershell")
 
 
+def payload() -> str:
+    """The PowerShell out of the .bat, unpacked the way the .bat unpacks it."""
+    return INSTALLER.read_text(encoding="ascii").split(MARKER)[-1]
+
+
 def decisions(**params) -> dict:
     """Run the installer's decision phase and return what it chose."""
-    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-           "-File", str(INSTALLER), "-DryRun"]
+    cmd = [str(INSTALLER), "-DryRun"]
     for key, value in params.items():
         cmd += [f"-{key}", str(value)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    # stdin closed, because the .bat ends in `pause` -- a person needs the
+    # window to stay up long enough to read the result, and a test does not.
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                          stdin=subprocess.DEVNULL, shell=False)
     assert proc.returncode == 0, f"installer failed:\n{proc.stdout}\n{proc.stderr}"
     out = {}
     for line in proc.stdout.splitlines():
@@ -43,16 +52,53 @@ def decisions(**params) -> dict:
     return out
 
 
-def test_the_installer_exists_and_is_self_contained():
-    """Both halves ship together: the .bat is what a person can double-click,
-    and it refuses helpfully if separated from the script it calls."""
+def test_the_installer_is_one_file():
+    """One file, because two invited being separated -- someone downloads the
+    .bat and not the .ps1, or moves only the one they were told to click."""
     assert INSTALLER.exists()
-    bat = INSTALLER.parent / "Install stereo360.bat"
-    assert bat.exists()
-    text = bat.read_text(encoding="utf-8", errors="replace")
+    assert sorted(p.name for p in INSTALLER.parent.iterdir()) == \
+        ["Install stereo360.bat"]
+
+
+def test_the_payload_is_readable_rather_than_encoded():
+    """Deliberate. This is an unsigned installer that will trip SmartScreen,
+    so someone wary enough to open it in Notepad should be able to read what
+    it will do. Base64 would be smaller and would forfeit that."""
+    text = INSTALLER.read_text(encoding="ascii")
+    assert MARKER in text
     assert "-ExecutionPolicy Bypass" in text, \
-        "a downloaded .ps1 will not run under the default policy"
-    assert "install.ps1 is missing" in text, "should say so rather than flash"
+        "a downloaded script will not run under the default policy"
+    assert "param(" in payload() and "$InstallDir" in payload()
+
+
+def test_the_whole_file_is_ascii():
+    """The payload is unpacked by reading the .bat as text. Pure ASCII means
+    that cannot go wrong however the encoding is guessed -- and the header
+    promises as much, so it needs enforcing rather than hoping."""
+    raw = INSTALLER.read_bytes()
+    bad = [i for i, b in enumerate(raw) if b > 127]
+    assert not bad, f"non-ASCII byte at offset {bad[0]}"
+    assert not raw.startswith(b"\xef\xbb\xbf"), "a BOM would confuse cmd.exe"
+
+
+def test_the_unpacked_payload_is_valid_powershell(tmp_path):
+    """Unpacking is a string split, so a stray copy of the marker or a
+    mangled line would produce something that only fails when a user runs it.
+    Parse it here instead.
+
+    Through a file rather than an argument: the payload is well past the
+    command-line length limit, which this test discovered by failing with
+    "The filename or extension is too long" the moment the uninstaller was
+    added to it.
+    """
+    script = tmp_path / "payload.ps1"
+    script.write_text(payload(), encoding="ascii")
+    check = ("$e=$null; [void][System.Management.Automation.Language.Parser]"
+             f"::ParseFile('{script}', [ref]$null, [ref]$e); "
+             "if ($e) { $e[0].ToString(); exit 1 } else { 'ok' }")
+    proc = subprocess.run(["powershell", "-NoProfile", "-Command", check],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, f"payload does not parse:\n{proc.stdout}"
 
 
 # ------------------------------------------------------------ card by card
@@ -115,6 +161,100 @@ def test_the_app_comes_from_a_release_when_there_is_one():
     """And from the default branch when there is not, so the installer works
     before the first release is cut rather than failing on a 404."""
     assert decisions(ComputeCap="none")["app_source"]
+
+
+# ------------------------------------------------------------- uninstalling
+#
+# Read against the uninstaller's source rather than by running it: running it
+# needs a real 5.7 GB install to point at, and these are the properties that
+# matter most, because getting them wrong deletes something that cannot be
+# put back. The behaviour itself was exercised against a real install --
+# user files survived, settings and the model cache were kept, the shortcut
+# and the registry entry went.
+
+def uninstaller_source() -> str:
+    """The uninstaller, as the installer will write it out."""
+    text = payload()
+    start = text.index("Set-Content -Path (Join-Path $InstallDir 'uninstall.ps1')")
+    return text[start:text.index("'@", start)]
+
+
+def test_the_uninstaller_proves_the_folder_is_ours_before_deleting():
+    """The guard that matters. Everything after it deletes recursively, so
+    the target has to be positively identified -- not merely 'not obviously
+    dangerous'. All three of these exist only in an install we made."""
+    src = uninstaller_source()
+    for proof in ("python\\python.exe", "app\\stereo360\\__init__.py",
+                  "install-manifest.json"):
+        assert proof in src, f"{proof} is not checked for"
+    assert "Refusing" in src
+
+
+@pytest.mark.parametrize("guard", [
+    "GetPathRoot",                       # a drive root
+    "$env:USERPROFILE",                  # the home folder
+    "$env:windir",                       # Windows itself
+    "MyDocuments",                       # Documents
+    "Programs",                          # the parent of the install folder
+])
+def test_the_uninstaller_refuses_dangerous_targets(guard):
+    """Verified against the real thing too: pointed at C:\\, the profile,
+    Documents, LOCALAPPDATA, its parent and Windows, it refused all six."""
+    assert guard in uninstaller_source()
+
+
+def test_the_uninstaller_keeps_files_it_did_not_create():
+    """The install folder is removed non-recursively, so it goes only if
+    removing the recorded contents left it empty. Anything of the user's in
+    there keeps the folder alive instead of being swept up with it."""
+    src = uninstaller_source()
+    assert "createdDirs" in src and "createdFiles" in src, \
+        "it should remove a recorded list, not the folder wholesale"
+    assert "it still holds files that were not ours" in src
+
+
+def test_the_uninstaller_leaves_shared_data_alone_by_default():
+    """The model cache is shared with every other tool that uses Hugging
+    Face -- gigabytes that were never ours to delete."""
+    src = uninstaller_source()
+    assert "RemoveModelCache" in src and "RemoveSettings" in src
+    assert "shared with" in src
+
+
+def test_the_uninstall_wrapper_survives_deleting_itself():
+    """`exit`, not `exit /b`, and everything on one line.
+
+    The wrapper sits in the folder it is about to remove. cmd.exe reads a
+    batch file incrementally from disk, so after the uninstaller has run it
+    goes back for the next line and finds the file gone: "The system cannot
+    find the path specified", exit 1, after a completely successful
+    uninstall. Settings > Apps reads that code and reports a failure.
+
+    Measured on a self-deleting batch: `exit /b` gives exit 1 and the error,
+    plain `exit` gives exit 0 and silence.
+    """
+    src = payload()
+    start = src.index("Set-Content -Path (Join-Path $InstallDir 'Uninstall stereo360.bat')")
+    wrapper = src[src.index('@"', start): src.index('"@', start)]
+    run_line = [ln for ln in wrapper.splitlines()
+                if "uninstall.ps1" in ln and "powershell" in ln]
+    assert len(run_line) == 1, "the call should be on exactly one line"
+    line = run_line[0]
+    assert "exit /b" not in line, \
+        "exit /b sends cmd back to a file that no longer exists"
+    assert line.rstrip().endswith("exit !RC!"), line
+    assert "enabledelayedexpansion" in wrapper, \
+        "%ERRORLEVEL% on one line is substituted before there is one"
+
+
+def test_the_installer_registers_with_add_remove_programs():
+    """So nobody has to know where it went. Per-user, under HKCU, which
+    needs no elevation."""
+    text = payload()
+    assert "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" in text
+    for value in ("DisplayName", "UninstallString", "QuietUninstallString",
+                  "InstallLocation", "EstimatedSize"):
+        assert value in text, f"{value} is not registered"
 
 
 def test_a_dry_run_touches_nothing(tmp_path):

@@ -101,11 +101,14 @@ instead needs **Python 3.10+** and **FFmpeg and ffprobe on `PATH`**.
 
 ## Installing on Windows: the one-click way
 
-Download **`Install stereo360.bat`** and **`install.ps1`** from the
-[latest release](https://github.com/LeonG-ZA/stereo360/releases/latest), keep
-them together, and double-click the `.bat`. It does not matter which folder
-they are in — your Downloads folder is fine, and is what the installer
-expects.
+Download **`Install stereo360.bat`** from the
+[latest release](https://github.com/LeonG-ZA/stereo360/releases/latest) and
+double-click it. That is the whole thing — one file, and it does not matter
+which folder it is in. Your Downloads folder is fine, and is what it expects.
+
+It is a batch file with the installer written in PowerShell below a marker
+line, in plain readable text rather than encoded. If an unsigned installer
+makes you uneasy, open it in Notepad first and read exactly what it will do.
 
 It installs everything: a private copy of Python, the right PyTorch for your
 GPU, PySide6 for the interface, ffmpeg, and the depth model. Nothing is added
@@ -118,14 +121,46 @@ downloading PyTorch.
 *"Windows protected your PC"* — click **More info**, then **Run anyway**. If
 you would rather not, the manual install below does the same thing by hand.
 
-It installs to `%LOCALAPPDATA%\Programs\stereo360`. To uninstall, delete that folder.
+### Uninstalling
+
+It appears in **Settings → Apps** like any other program, so you never need to
+know where it went. There is also an `Uninstall stereo360` in the install
+folder if you prefer.
+
+It removes only what it installed. The installer writes a manifest of exactly
+what it created, and the uninstaller works from that list:
+
+- **Files you put in the install folder are kept.** The folder itself is
+  removed only if that leaves it empty; otherwise it stays, and you are told
+  what was kept.
+- **Your settings are kept**, unless you pass `-RemoveSettings`.
+- **The downloaded depth models are kept**, unless you pass
+  `-RemoveModelCache`. They live in the shared Hugging Face cache that other
+  AI tools use too, so removing them silently could take gigabytes that were
+  never ours.
+- The Start Menu shortcut is removed only if it still points at this install.
+
+It installs to `%LOCALAPPDATA%\Programs\stereo360`.
+
+### If Windows refuses to run ffmpeg
+
+Unlikely now that a widely-used release build is bundled rather than a
+nightly (see below), but possible on a very new release that has not yet
+built up reputation. You would see *"An Application Control policy has
+blocked this file"*, and the installer says so plainly if it happens.
+
+Two ways round it: install a build yourself with
+`winget install Gyan.FFmpeg` and delete
+`%LOCALAPPDATA%\Programs\stereo360\ffmpeg` so the one on your `PATH` is used,
+or turn Smart App Control off in *Windows Security → App & browser control* —
+bearing in mind that switching it back on afterwards needs a Windows reset.
 
 ### Picking the accelerator
 
 Left alone it detects your card and chooses. To override:
 
 ```bash
-powershell -ExecutionPolicy Bypass -File install.ps1 -Accelerator directml
+"Install stereo360.bat" -Accelerator directml
 ```
 
 | `-Accelerator` | For | Size |
@@ -145,12 +180,25 @@ and falls back rather than leaving you to find out mid-render.
 
 ### About the bundled ffmpeg
 
-A GPL build with libx264 and libx265, and deliberately without libfdk_aac:
-ffmpeg built with that encoder requires `--enable-nonfree`, and its licence
-does not permit redistributing the result. stereo360 uses libfdk_aac when it
-finds it and warns when it does not, so if you want it, put your own
-`ffmpeg.exe` in `%LOCALAPPDATA%\Programs\stereo360\ffmpeg`. At the bitrates used for
-ambisonic audio the difference is small.
+One of Gyan's numbered release builds — GPL, with libx264, libx265 and
+libopus, and deliberately without libfdk_aac. That last part is not an
+oversight: ffmpeg built with libfdk_aac requires `--enable-nonfree`, and its
+licence does not permit redistributing the result. stereo360 uses libfdk_aac
+when it finds it and says so when it does not, so if you want it, put your own
+`ffmpeg.exe` in `%LOCALAPPDATA%\Programs\stereo360\ffmpeg`. At the bitrates
+used for ambisonic audio the difference is small.
+
+A *release* rather than a nightly build, because of Smart App Control. It is
+on by default in Windows 11 and blocks unsigned programs it holds no
+reputation data for. Every ffmpeg build is unsigned, so reputation is all
+there is — and a nightly has a brand new hash every day, so it never earns
+any. A freshly downloaded nightly was blocked here with *"An Application
+Control policy has blocked this file"*, where a numbered release ran fine.
+
+Trust attaches to the file rather than to how it arrived: the same bytes
+copied out of a winget package folder into a temp directory still ran. So
+installing through winget buys nothing here, and would put ffmpeg on your
+`PATH` and outside the install folder, which this deliberately avoids.
 
 ## Installing manually
 
