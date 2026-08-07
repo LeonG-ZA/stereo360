@@ -450,6 +450,8 @@ Write-Detail "install folder: $InstallDir"
 
 Write-Step 'Choosing the accelerator'
 $acc = Resolve-Accelerator
+# One step more for DirectML, which has to build its own depth model.
+if ($acc.kind -eq 'directml') { $script:StepTotal = 16 }
 if ($acc.cap) { Write-Detail "NVIDIA GPU, compute capability $($acc.cap)" }
 else { Write-Detail 'no NVIDIA GPU detected' }
 Write-Decision 'accelerator' $acc.kind
@@ -538,7 +540,17 @@ switch ($acc.kind) {
         Invoke-Pip $py @('install', '--no-warn-script-location', '--index-url', $acc.index, 'torch', 'torchvision') 'PyTorch'
     }
     'directml' {
-        Invoke-Pip $py @('install', '--no-warn-script-location', 'torch', 'torchvision', 'onnxruntime-directml') 'ONNX Runtime (DirectML)'
+        # onnx and onnxscript are for the *exporter*, not for running: the
+        # DirectML path needs a model of its own, built a few steps below.
+        #
+        # Deliberately not `-r requirements-onnx.txt`, which asks for plain
+        # onnxruntime. That and onnxruntime-directml both install a module
+        # called onnxruntime, and whichever lands second wins -- a CPU-only
+        # runtime silently replacing the GPU one is exactly the failure this
+        # whole path exists to avoid.
+        Invoke-Pip $py @('install', '--no-warn-script-location', 'torch',
+                         'torchvision', 'onnxruntime-directml', 'onnx',
+                         'onnxscript') 'ONNX Runtime (DirectML)'
     }
     'cpu' {
         Invoke-Pip $py @('install', '--no-warn-script-location', 'torch', 'torchvision', 'onnxruntime') 'PyTorch (CPU)'
@@ -651,6 +663,44 @@ $lnk.WorkingDirectory = $InstallDir
 $lnk.Description = 'Convert 360 video to stereoscopic 3D for VR'
 $lnk.Save()
 Write-Good 'Start Menu shortcut created'
+
+# ---- the DirectML model --------------------------------------------------
+if ($acc.kind -eq 'directml') {
+    Write-Step 'Building the GPU depth model'
+
+    # Without this, choosing DirectML accelerates nothing.
+    #
+    # torch on Windows from PyPI is CPU-only, so the torch backend runs on the
+    # processor. The ONNX backend is the one that reaches an AMD or Intel GPU
+    # -- but it needs an exported model, and the repository ships none
+    # (models/ is git-ignored). So the runtime was installed and nothing could
+    # use it: the machine reported "DirectML" and quietly ran depth on the CPU,
+    # ten times slower, which is worse than not offering the option.
+    #
+    # --static-batch is required rather than preferred: DirectML rejects the
+    # graph's Reshape once the batch axis is dynamic, even at batch 1.
+    #
+    # Ten seconds and about 100 MB, measured. The weights land in a companion
+    # .onnx.data file beside the graph, which is why this exports straight
+    # into place rather than building elsewhere and copying one file.
+    $exporter = Join-Path $dest 'scripts\export_onnx.py'
+    $modelOut = Join-Path $dest 'models\depth_anything_v2_small.onnx'
+    if (-not (Test-Path $exporter)) {
+        Write-Warn 'the exporter is missing from this build; skipping'
+    } else {
+        Invoke-Native { & $py $exporter --static-batch --out $modelOut }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $modelOut)) {
+            Write-Warn 'could not build the GPU model. Depth will run on the'
+            Write-Warn 'processor, which works but is roughly ten times'
+            Write-Warn 'slower. Everything else is installed and usable.'
+            $acc.kind = 'cpu (the GPU model could not be built)'
+        } else {
+            $mb = [int](((Get-ChildItem (Split-Path $modelOut) -Filter '*.onnx*' |
+                          Measure-Object Length -Sum).Sum) / 1MB)
+            Write-Good "depth model built for DirectML ($mb MB)"
+        }
+    }
+}
 
 # ---- uninstaller ---------------------------------------------------------
 Write-Step 'Writing the uninstaller'
@@ -954,9 +1004,22 @@ Write-Good 'it can now be removed from Settings > Apps like anything else'
 Write-Step 'Testing the installation'
 Push-Location (Join-Path $InstallDir 'app')
 try {
-    Invoke-Native { & $py -m stereo360 --probe-backends - } | Out-Null
+    $probe = Invoke-Native { & $py -m stereo360 --probe-backends - } | Out-String
     if ($LASTEXITCODE -ne 0) { throw 'backend probe failed' }
     Write-Good 'the pipeline starts and can see its backends'
+
+    # For DirectML this is the point of the whole exercise, so check it rather
+    # than assume it: the ONNX backend is the only one that reaches an AMD or
+    # Intel GPU, and it counts as available only once the model exists.
+    if ($acc.kind -eq 'directml') {
+        if ($probe -match '"name":\s*"onnx",\s*"available":\s*true') {
+            Write-Good 'the ONNX backend is available, so depth runs on the GPU'
+        } else {
+            Write-Warn 'the ONNX backend is still unavailable, so depth will'
+            Write-Warn 'run on the processor. The line above from --probe-'
+            Write-Warn 'backends says why.'
+        }
+    }
 
     # The interface is what most people will actually open, and it depends on
     # PySide6 and a working QML runtime -- neither of which the pipeline

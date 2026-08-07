@@ -167,8 +167,16 @@ Left alone it detects your card and chooses. To override:
 |---|---|---|
 | `auto` (default) | NVIDIA if present, otherwise DirectML | — |
 | `cuda` | NVIDIA | ~2.5 GB |
-| `directml` | **AMD, Intel, or any Direct3D 12 GPU** | ~200 MB |
+| `directml` | **AMD, Intel, or any Direct3D 12 GPU** | ~400 MB |
 | `cpu` | no usable GPU; roughly 10× slower | ~200 MB |
+
+**DirectML builds a depth model during installation**, and takes about ten
+seconds longer for it. PyTorch on Windows is CPU-only unless it came from
+NVIDIA's index, so on an AMD or Intel GPU the ONNX runtime is the only thing
+that reaches the hardware — and it needs a model of its own, which is not
+shipped. Without that step the installer would report "DirectML" and quietly
+run depth on the processor. The installer checks the backend really is
+available afterwards, and says so plainly if it is not.
 
 The CUDA build is chosen from your card's compute capability and then
 **verified by running an actual kernel** — not by asking
