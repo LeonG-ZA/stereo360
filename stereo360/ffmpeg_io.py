@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Iterator, List, NamedTuple, Optional, Tuple
 
@@ -241,6 +242,22 @@ def is_jpeg_path(path: str) -> bool:
     return os.path.splitext(str(path))[1].lower() in (".jpg", ".jpeg")
 
 
+#: Extra Popen keywords for every ffmpeg and ffprobe call on Windows.
+#:
+#: ffmpeg and ffprobe are console programs. When the process launching them
+#: has no console of its own, Windows gives each one a brand new console
+#: window -- so running the desktop interface from its shortcut, which starts
+#: it with pythonw and therefore without a console, made a black window flash
+#: up on every probe, every thumbnail and every render. From a terminal there
+#: is a console to inherit and nothing appears, which is why this never showed
+#: up in development.
+#:
+#: CREATE_NO_WINDOW (0x08000000) says to run without one. Output still comes
+#: back through the pipes exactly as before.
+NO_CONSOLE_WINDOW = ({"creationflags": 0x08000000}
+                     if sys.platform == "win32" else {})
+
+
 def _require(tool: str) -> str:
     path = shutil.which(tool)
     if path is None:
@@ -254,7 +271,8 @@ def probe(path: str) -> VideoInfo:
         ffprobe, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            **NO_CONSOLE_WINDOW)
     if result.returncode != 0 or not result.stdout.strip():
         # A CalledProcessError here prints the whole ffprobe command line and
         # says nothing about the file, which is the wrong end of the problem.
@@ -277,7 +295,7 @@ def probe(path: str) -> VideoInfo:
     side = subprocess.run(
         [ffprobe, "-v", "quiet", "-print_format", "json", "-select_streams",
          "v:0", "-show_entries", "stream_side_data", path],
-        capture_output=True, text=True)
+        capture_output=True, text=True, **NO_CONSOLE_WINDOW)
     if side.returncode == 0:
         try:
             streams = json.loads(side.stdout).get("streams") or [{}]
@@ -343,7 +361,8 @@ def stream_durations(path: str) -> Tuple[Optional[float], Optional[float]]:
     ffprobe = _require("ffprobe")
     out = subprocess.run(
         [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams",
-         path], capture_output=True, text=True, check=True).stdout
+         path], capture_output=True, text=True, check=True,
+        **NO_CONSOLE_WINDOW).stdout
     video = audio = None
     for stream in json.loads(out).get("streams", []):
         try:
@@ -380,7 +399,7 @@ def write_thumbnail(path: str, out_path: str, frame_index: int = 0,
             cmd += ["-ss", f"{seek:.3f}"]
         cmd += ["-i", path, "-frames:v", "1",
                 "-vf", f"scale={even}:-2:flags=area", "-q:v", "4", out_path]
-        subprocess.run(cmd, capture_output=True)
+        subprocess.run(cmd, capture_output=True, **NO_CONSOLE_WINDOW)
         return os.path.isfile(out_path) and os.path.getsize(out_path) > 0
 
     if grab(seconds):
@@ -421,7 +440,7 @@ def trim_audio_to_video(path: str, fps: float) -> bool:
     proc = subprocess.run(
         [ffmpeg, "-y", "-v", "error", "-i", path, "-t", f"{keep:.6f}",
          "-map", "0", "-c", "copy", "-movflags", "-faststart", tmp],
-        capture_output=True, text=True)
+        capture_output=True, text=True, **NO_CONSOLE_WINDOW)
     if proc.returncode != 0:
         try:
             os.remove(tmp)
@@ -457,7 +476,8 @@ def decode_frames(path: str, max_frames: Optional[int] = None,
     # problem: a single enormous read is. Chunking at 1 MB, which is roughly
     # how `cat` reads, gives 84 ms and puts decoding back at ffmpeg's own
     # floor. Larger chunks are worse again (8 MB measured 115 ms).
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0,
+                            **NO_CONSOLE_WINDOW)
     assert proc.stdout is not None
     stream = getattr(proc.stdout, "raw", proc.stdout)
     chunk = 1 << 20
@@ -725,7 +745,8 @@ class VideoEncoder:
             "-movflags", "-faststart",
             out_path,
         ]
-        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                     **NO_CONSOLE_WINDOW)
         self._closed = False
 
     def write(self, frame: np.ndarray) -> None:

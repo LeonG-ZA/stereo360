@@ -54,6 +54,8 @@ import subprocess
 import tempfile
 from typing import List, NamedTuple, Optional
 
+from .ffmpeg_io import NO_CONSOLE_WINDOW
+
 #: Above third order the channel count outruns anything a consumer file
 #: carries, and SA3D would have to describe it too. Not a maths limit.
 MAX_ORDER = 3
@@ -319,7 +321,7 @@ def _can_encode(encoder: Encoder, channels: int) -> bool:
                  # A real angle: an identity mix could be optimised away.
                  "-filter:a", audio_filter(order, 30.0),
                  *encoder.args, out],
-                capture_output=True)
+                capture_output=True, **NO_CONSOLE_WINDOW)
             _probe_cache[key] = (result.returncode == 0
                                  and os.path.isfile(out)
                                  and os.path.getsize(out) > 0)

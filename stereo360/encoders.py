@@ -24,6 +24,8 @@ import shutil
 import subprocess
 from typing import List, NamedTuple, Optional, Tuple
 
+from .ffmpeg_io import NO_CONSOLE_WINDOW
+
 #: name, is_hardware, vendor/summary
 #:
 #: This is also the order the dropdown shows, so it runs best quality first:
@@ -79,7 +81,7 @@ def _compiled_in() -> set:
     try:
         out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
                              capture_output=True, text=True,
-                             timeout=30).stdout
+                             timeout=30, **NO_CONSOLE_WINDOW).stdout
     except (subprocess.SubprocessError, OSError):
         return set()
     names = set()
@@ -163,7 +165,7 @@ def _try_encode(name: str, width: int, height: int, timeout: float) -> \
     cmd += ["-c:v", name, "-f", "null", "-"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, **NO_CONSOLE_WINDOW)
     except subprocess.TimeoutExpired:
         return False, "timed out"
     except OSError as exc:
