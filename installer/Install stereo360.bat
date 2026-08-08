@@ -255,10 +255,51 @@ function Get-Download {
 }
 
 function Expand-Zip {
+    <#
+        Extract over whatever is already there.
+
+        `ZipFile::ExtractToDirectory` throws on the first file that exists --
+        "The file '...\python.exe' already exists" -- so the two-argument form
+        this used made running the installer twice impossible. The second run
+        died at the first step that writes anything, with a raw .NET exception
+        naming python.exe, which tells nobody what to do about it.
+
+        Entry by entry rather than clearing the destination first, and that is
+        the point rather than an implementation detail: `python\` holds
+        site-packages, which is not in the zip and is where 2.5 GB of PyTorch
+        lives. Wiping it to unpack a 10 MB interpreter would make every
+        upgrade a full reinstall.
+    #>
     param([string] $Path, [string] $Destination)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if (-not (Test-Path $Destination)) { New-Item -ItemType Directory -Path $Destination -Force | Out-Null }
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($Path, $Destination)
+    if (-not (Test-Path $Destination)) {
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    }
+    $root = (Resolve-Path $Destination).Path
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        foreach ($entry in $zip.Entries) {
+            $target = Join-Path $root $entry.FullName
+            # A zip can name ..\ entries. Refuse anything that resolves
+            # outside the destination rather than trust the archive.
+            $full = [System.IO.Path]::GetFullPath($target)
+            if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "archive entry escapes the destination: $($entry.FullName)"
+            }
+            if (-not $entry.Name) {                     # a directory entry
+                New-Item -ItemType Directory -Path $full -Force | Out-Null
+                continue
+            }
+            $parent = Split-Path $full -Parent
+            if (-not (Test-Path $parent)) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
+                $entry, $full, $true)
+        }
+    } finally {
+        $zip.Dispose()
+    }
 }
 
 # ------------------------------------------------------------ gpu detection
@@ -483,6 +524,51 @@ except Exception as exc:
     return @{ ok = $ok; detail = $result; provider = $provider }
 }
 
+function Get-ExistingInstall {
+    <#
+        What is already installed here, or $null.
+
+        Read from the manifest the last run wrote, falling back to the
+        Add/Remove Programs entry -- between them one survives a manifest
+        deleted by hand. The version is only used to tell the user what is
+        being replaced: this installer always installs the latest release,
+        and refusing to "downgrade" would be second-guessing someone who has
+        deliberately run an older installer.
+    #>
+    param([string] $Dir, [string] $Key)
+    $manifest = Join-Path $Dir 'install-manifest.json'
+    $version = $null
+    if (Test-Path $Key) {
+        $version = (Get-ItemProperty -Path $Key -ErrorAction SilentlyContinue).DisplayVersion
+    }
+    # The registry holds the release tag this installer downloaded, which is
+    # the right answer and is why nothing needs the 0.1.0 -> 1.0.0 mapping
+    # here: the only build whose package says 0.1.0 is the one this recorded
+    # as v1.0.0. Newer installs also record it in the manifest below, read
+    # back in preference so a cleared registry key is not fatal.
+    if (-not (Test-Path $manifest)) {
+        # A folder with an interpreter in it but no manifest is a half-written
+        # install -- an earlier run that failed, or one interrupted. Worth
+        # reporting, because it is why the upgrade may take the slow path.
+        if (Test-Path (Join-Path $Dir 'python\python.exe')) {
+            return @{ version = $version; installed = $null; partial = $true }
+        }
+        return $null
+    }
+    try {
+        $m = Get-Content $manifest -Raw | ConvertFrom-Json
+    } catch {
+        return @{ version = $version; installed = $null; partial = $true }
+    }
+    if ($m.appVersion) { $version = $m.appVersion }
+    # Installs before v1.0.1 have no appVersion and fall back to the registry,
+    # where the value is the git tag -- 'v1.0.0'. Strip it so one message does
+    # not read 'v1.0.0' on an old install and '1.0.1' on a new one.
+    if ($version) { $version = $version -replace '^v', '' }
+    return @{ version = $version; installed = $m.installed
+              accelerator = $m.accelerator; partial = $false }
+}
+
 function Get-AppRelease {
     <#
         The latest published release, or the default branch if there is not
@@ -519,6 +605,27 @@ if ($free -lt $MinFreeGb) {
 }
 Write-Detail "install folder: $InstallDir"
 
+# An upgrade is the same run as a fresh install, deliberately: one path stays
+# one path, and the alternative -- a separate updater -- is a second thing to
+# get wrong that only runs on machines nobody is testing. What changes is what
+# gets said, and that Python and ffmpeg are kept if they are already good.
+$existing = Get-ExistingInstall -Dir $InstallDir -Key $ArpKey
+if ($existing) {
+    if ($existing.partial) {
+        Write-Warn 'found a half-finished install here; replacing it'
+    } elseif ($existing.version) {
+        Write-Detail "upgrading an existing install ($($existing.version))"
+    } else {
+        Write-Detail 'upgrading an existing install'
+    }
+    Write-Detail 'your settings and downloaded models are kept'
+}
+Write-Decision 'existing_install' $(
+    if (-not $existing) { 'none' }
+    elseif ($existing.partial) { 'partial' }
+    elseif ($existing.version) { $existing.version }
+    else { 'unknown version' })
+
 Write-Step 'Choosing the accelerator'
 $acc = Resolve-Accelerator
 # One step more for DirectML, which has to build its own depth model.
@@ -551,17 +658,41 @@ $py = Join-Path $InstallDir 'python\python.exe'
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $tmp = Join-Path $InstallDir 'tmp'
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-$zip = Join-Path $tmp 'python.zip'
-Get-Download -Url $PythonUrl -Destination $zip -Label 'Python'
-Expand-Zip -Path $zip -Destination (Join-Path $InstallDir 'python')
-Remove-Item $zip
-# The embeddable build ships with site-packages disabled, so pip installs
-# would land somewhere nothing imports from. One commented line in the ._pth
-# is the whole difference.
-$pth = Get-ChildItem (Join-Path $InstallDir 'python') -Filter '*._pth' | Select-Object -First 1
-(Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' |
-    Set-Content $pth.FullName -Encoding ascii
-Write-Good 'Python ready'
+# Keep an interpreter that is already the right version. Not to save the 10 MB
+# download but because everything pip has installed lives under it: replacing
+# it is what would turn an upgrade into a 2.5 GB reinstall of PyTorch. Checked
+# by asking it, not by trusting the folder -- a half-unpacked python.exe is
+# exactly the state a failed run leaves behind.
+$havePython = $false
+if (Test-Path $py) {
+    $ver = (Invoke-Native { & $py -c "import sys; print('%d.%d.%d' % sys.version_info[:3])" } |
+            Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and $ver -eq $PythonVersion) {
+        $havePython = $true
+        Write-Good "Python $ver already installed here; keeping it and its packages"
+    } elseif ($LASTEXITCODE -eq 0) {
+        Write-Detail "replacing Python $ver with $PythonVersion"
+    }
+}
+if (-not $havePython) {
+    $zip = Join-Path $tmp 'python.zip'
+    Get-Download -Url $PythonUrl -Destination $zip -Label 'Python'
+    Expand-Zip -Path $zip -Destination (Join-Path $InstallDir 'python')
+    Remove-Item $zip
+    # The embeddable build ships with site-packages disabled, so pip installs
+    # would land somewhere nothing imports from. One commented line in the
+    # ._pth is the whole difference.
+    $pth = Get-ChildItem (Join-Path $InstallDir 'python') -Filter '*._pth' |
+        Select-Object -First 1
+    (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' |
+        Set-Content $pth.FullName -Encoding ascii
+    Write-Good 'Python ready'
+}
+# Resolved outside the branch above, because the step that adds `..\app` to it
+# runs either way -- a kept interpreter still needs the new app on its path.
+$pth = Get-ChildItem (Join-Path $InstallDir 'python') -Filter '*._pth' |
+    Select-Object -First 1
+if (-not $pth) { throw 'the embedded Python has no ._pth file' }
 
 Write-Step 'Bootstrapping pip'
 $getpip = Join-Path $tmp 'get-pip.py'
@@ -700,6 +831,23 @@ Write-Good 'PySide6'
 
 # ---- ffmpeg -------------------------------------------------------------
 Write-Step 'Installing ffmpeg'
+$ffDest = Join-Path $InstallDir 'ffmpeg'
+# Keep a working one. ffmpeg is ~150 MB and changes far more slowly than this
+# app does, so re-fetching it on every upgrade is the largest avoidable cost
+# after PyTorch. "Working" means it runs, not that the file is present: a
+# truncated download from an interrupted run leaves a plausible-looking exe.
+$haveFfmpeg = $false
+if (Test-Path (Join-Path $ffDest 'ffmpeg.exe')) {
+    $out = (Invoke-Native { & (Join-Path $ffDest 'ffmpeg.exe') -hide_banner -version } |
+            Out-String)
+    if ($LASTEXITCODE -eq 0 -and $out -match 'ffmpeg version (\S+)') {
+        $haveFfmpeg = $true
+        Write-Good "ffmpeg $($Matches[1]) already installed here; keeping it"
+    } else {
+        Write-Detail 'the installed ffmpeg does not run; replacing it'
+    }
+}
+if (-not $haveFfmpeg) {
 $ffzip = Join-Path $tmp 'ffmpeg.zip'
 # Resolve the newest numbered release rather than pinning a version that
 # would quietly rot. Falls back to a known-good one if the API is unreachable.
@@ -720,28 +868,39 @@ Get-Download -Url $ffUrl -Destination $ffzip -Label 'ffmpeg'
 $ffdir = Join-Path $tmp 'ffmpeg'
 Expand-Zip -Path $ffzip -Destination $ffdir
 $bin = Get-ChildItem $ffdir -Recurse -Filter 'ffmpeg.exe' | Select-Object -First 1
-$ffDest = Join-Path $InstallDir 'ffmpeg'
 New-Item -ItemType Directory -Path $ffDest -Force | Out-Null
 Copy-Item (Join-Path $bin.DirectoryName '*.exe') $ffDest -Force
 Remove-Item $ffzip; Remove-Item $ffdir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Good 'ffmpeg and ffprobe (GPL build, no libfdk_aac -- see the README)'
+}
 
 # ---- model --------------------------------------------------------------
 Write-Step 'Fetching the depth model'
 $env:PATH = "$ffDest;$env:PATH"
+# The *video* default, and only that one. It was still fetching Depth Anything
+# V2 Base here after the defaults moved, so every install paid 400 MB for a
+# model nothing would load. V3 small is 105 MB and is what a video render
+# reaches for.
+#
+# Depth Pro, the stills default, is deliberately not pre-fetched: 3.6 GB is too
+# much to put on someone who may only ever convert video, and the tool
+# announces the download before it starts. Skipping it is the reason a first
+# still conversion is slow, which is a trade rather than an oversight.
 $warm = Join-Path $tmp 'warm.py'
+# No sys.path juggling: `..\app` went into the interpreter's ._pth a few steps
+# up, so `import stereo360` works from any directory. Asking the app which
+# variant is the default, rather than naming one here, is what stops this
+# caching the wrong model again.
 Set-Content -Path $warm -Encoding utf8 -Value @'
-from transformers import AutoModelForDepthEstimation, AutoImageProcessor
-name = "depth-anything/Depth-Anything-V2-Base-hf"
-AutoImageProcessor.from_pretrained(name)
-AutoModelForDepthEstimation.from_pretrained(name)
-print("cached", name)
+from stereo360.depth.depth_anything_v3 import DEFAULT_VARIANT, download
+print("cached", download(DEFAULT_VARIANT))
 '@
 Invoke-Native { & $py $warm }
 if ($LASTEXITCODE -ne 0) {
     Write-Warn 'could not pre-fetch the model; it will download on first use'
 } else {
-    Write-Good 'Depth Anything V2 Base cached'
+    Write-Good 'Depth Anything V3 small cached (the video default)'
+    Write-Detail 'Depth Pro, for stills, downloads on first use -- about 3.6 GB'
 }
 Remove-Item $warm -ErrorAction SilentlyContinue
 
@@ -814,8 +973,18 @@ Write-Step 'Writing the uninstaller'
 # Recorded, not inferred. The uninstaller removes what this file says it
 # created and nothing else, so a file dropped in the folder later, or a Start
 # Menu entry belonging to something else, is never in scope.
+# Asked of the app rather than taken from $release.name, which is the GitHub
+# tag and can be 'main branch (no published release yet)'. From v1.0.1 the two
+# agree by rule; where they do not, what is actually installed is the honest
+# answer, and it is what a later run compares against.
+$appVersion = (Invoke-Native {
+    & $py -c "import stereo360; print(stereo360.released_as())"
+} | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $appVersion) { $appVersion = $release.name }
+
 $manifest = [ordered]@{
     app          = 'stereo360'
+    appVersion   = $appVersion
     installed    = (Get-Date).ToString('s')
     installDir   = $InstallDir
     accelerator  = $acc.kind
@@ -1088,7 +1257,10 @@ $uninstaller = Join-Path $InstallDir 'Uninstall stereo360.bat'
 New-Item -Path $ArpKey -Force | Out-Null
 $props = [ordered]@{
     DisplayName          = 'stereo360'
-    DisplayVersion       = "$($release.name)"
+    # What is installed, not what was downloaded. Settings > Apps shows this,
+    # and it should agree with `stereo360 --version` rather than with a tag
+    # that may read 'main branch (no published release yet)'.
+    DisplayVersion       = "$appVersion"
     Publisher            = 'stereo360'
     InstallLocation      = $InstallDir
     UninstallString      = "`"$uninstaller`""

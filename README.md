@@ -121,6 +121,27 @@ downloading PyTorch.
 *"Windows protected your PC"* — click **More info**, then **Run anyway**. If
 you would rather not, the manual install below does the same thing by hand.
 
+### Upgrading
+
+Download the installer from the latest release and run it again. There is no
+separate updater and nothing to uninstall first — it recognises the existing
+install, says which version it is replacing, and keeps what it can.
+
+That last part is why an upgrade is quick rather than another 5.6 GB. Python
+and ffmpeg are kept if they are already the right version and actually run, so
+everything pip installed under them — PyTorch included — stays where it is.
+What gets replaced is the app itself, which is a few megabytes. **Your
+settings and downloaded models are untouched.**
+
+`stereo360 --version` says what you have, and Settings > Apps shows the same
+number. One caveat for the first release: **v1.0.0 reports itself as `0.1.0`**,
+because the version constant was not kept in step with the tag until v1.0.1.
+If you see `0.1.0`, you have v1.0.0.
+
+There is no update check. The app will not tell you a new version exists, so
+[watch the releases page](https://github.com/LeonG-ZA/stereo360/releases) if
+you want to know.
+
 ### Uninstalling
 
 It appears in **Settings → Apps** like any other program, so you never need to

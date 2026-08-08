@@ -13,6 +13,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Convert monoscopic 360 equirectangular video to "
                     "stereoscopic top-bottom 360 video.",
     )
+    # The one import at parser-build time, and a cheap one: stereo360/__init__
+    # is already imported by anything that reached this function. Worth having
+    # because a version nothing can read is a version nothing keeps correct --
+    # this constant said 0.1.0 through the whole of v1.0.0.
+    from . import __version__, released_as
+
+    p.add_argument("--version", action="version",
+                   version=f"stereo360 {released_as(__version__)}")
     # Optional so the probes that describe the *machine* rather than a file --
     # --probe-backends and --probe-encoders -- can run without one. Required
     # for everything else, checked in main(). argparse cannot express that.
