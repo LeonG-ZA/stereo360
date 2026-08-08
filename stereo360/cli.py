@@ -483,6 +483,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             face_overlap=face_overlap,
             output_mode=args.output_mode,
             yaw=args.yaw,
+            output_width=args.output_width,
             reporter=reporter,
         )
 

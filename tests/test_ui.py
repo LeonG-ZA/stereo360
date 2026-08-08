@@ -1409,3 +1409,111 @@ def test_a_video_conversion_does_not_hijack_the_panel(qapp, tmp_path):
                   "faceSize": 32, "maxFrames": 2})
     assert _pump(qapp, lambda: bool(done), timeout=600)
     assert ctrl.previewSource == "", "a video render is not a picture"
+
+
+# --------------------------------------- showing a finished photo in the panel
+
+
+def test_a_full_size_photo_is_too_big_for_qt_to_decode(tmp_path):
+    """Why the preview panel caps its decode, demonstrated rather than
+    asserted from memory.
+
+    A finished 360 photo is the full-size deliverable -- 11904x11904 from an
+    Insta360 X5 -- and QImageReader refuses anything whose decoded form
+    exceeds its allocation limit. 11904 squared at 4 bytes is 567 MB against a
+    256 MB default, so the load fails, the panel stays empty, and the run that
+    produced a perfectly good file looks like it produced nothing.
+
+    Reproduced at 1/256th the size by moving the limit rather than by building
+    a 567 MB image, so this costs milliseconds and does not depend on the
+    machine having the memory to fail honestly.
+
+    JPEG deliberately, and not only because it is what a photo job writes:
+    libjpeg can decode straight to a reduced size, so the scaled read never
+    allocates the full frame. PNG cannot, and a scaled read of one still
+    allocates it all and still fails -- which is why the panel also reports a
+    failed decode rather than relying on the cap always working.
+    """
+    import cv2
+    import numpy as np
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QImageReader
+
+    src = tmp_path / "big.jpg"
+    cv2.imwrite(str(src), np.zeros((2048, 2048, 3), np.uint8))
+
+    original = QImageReader.allocationLimit()
+    try:
+        QImageReader.setAllocationLimit(1)          # MB; 2048^2 x4 = 16 MB
+        assert QImageReader(str(src)).read().isNull(), \
+            "expected Qt to refuse the unscaled decode"
+
+        capped = QImageReader(str(src))
+        capped.setScaledSize(QSize(256, 256))
+        assert not capped.read().isNull(), \
+            "a scaled decode is what sourceSize asks Qt for, and it must work"
+    finally:
+        QImageReader.setAllocationLimit(original)
+
+
+def test_the_preview_panel_caps_its_decode():
+    """The fix for the above, pinned. Without sourceSize the Image element
+    asks for the full decode and silently fails; this is not visible in any
+    screenshot test, because the symptom *is* an empty panel."""
+    qml = (Path(__file__).resolve().parent.parent
+           / "stereo360_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+    block = qml[qml.index("id: previewImage"):]
+    block = block[:block.index("\n                    }")]
+    assert "sourceSize" in block, "previewImage must cap its decode size"
+    assert "Image.Error" in block, "a failed decode must not be silent"
+
+
+def test_the_controller_explains_a_preview_that_cannot_be_shown(qapp):
+    """An empty panel reads as "no output", and the next move is to run the
+    whole conversion again. The file is fine; say so."""
+    ctrl = Controller()
+    seen = []
+    ctrl.logged.connect(lambda level, text: seen.append((level, text)))
+    ctrl.reportPreviewFailure("file:///c:/x/out_360_TB.jpg?t=123.4")
+
+    assert seen and seen[0][0] == "warning"
+    assert "out_360_TB.jpg" in seen[0][1]
+    assert "?t=" not in seen[0][1], "the cache-buster is noise to a reader"
+    assert "written and fine" in seen[0][1]
+
+
+# ------------------------------------------- what the window says while waiting
+
+
+def test_model_preparation_reaches_the_status_line(qapp):
+    """The 3.6 GB stills model downloads before frame one exists, and the
+    progress bar is driven by frames. Without this the window says
+    "Starting..." with an empty detail for the whole download, which is
+    indistinguishable from a hang."""
+    ctrl = Controller()
+    ctrl._busy = True
+    ctrl._set_status("Starting…")
+
+    ctrl._runner.staged.emit("Loading Depth Pro 'apple/DepthPro-hf' on device "
+                             "'auto' (downloads ~3.6 GB on first use)...")
+
+    assert ctrl.status == "Starting…", "the heading was already right"
+    assert "3.6 GB" in ctrl.detail
+
+
+def test_only_the_backend_events_become_status(qapp):
+    """Keyed off the structured `backend` field rather than the wording, so
+    ordinary info lines stay in the log where they belong."""
+    from stereo360_ui.runner import Runner
+
+    runner = Runner()
+    staged, logged = [], []
+    runner.staged.connect(staged.append)
+    runner.logged.connect(lambda level, text: logged.append(text))
+
+    runner._dispatch({"type": "info", "message": "backend line",
+                      "backend": "depth-pro"})
+    runner._dispatch({"type": "info", "message": "ordinary line"})
+
+    assert staged == ["backend line"]
+    assert logged == ["backend line", "ordinary line"]

@@ -1306,6 +1306,24 @@ ApplicationWindow {
                         fillMode: Image.PreserveAspectFit
                         asynchronous: true
                         cache: false
+
+                        // Decode small. A finished photo is the full-size
+                        // deliverable, and Qt refuses to decode one: an
+                        // 11904x11904 stereo JPEG needs 567 MB as ARGB32 and
+                        // QImageReader's allocation limit is 256 MB, so the
+                        // load fails and the panel silently stays empty --
+                        // after a conversion that worked and wrote the file.
+                        // sourceSize is a maximum, not a size, so the small
+                        // preview and thumbnail are unaffected: Qt never
+                        // scales a non-scalable image *up* to reach it.
+                        sourceSize.width: 2048
+
+                        // A failed decode used to be invisible. It cannot be
+                        // now -- an empty panel after a successful render is
+                        // the most confusing thing this window can do.
+                        onStatusChanged: if (status === Image.Error)
+                            app.reportPreviewFailure(source)
+
                         visible: previewPanel.hasPreview
                                  || previewPanel.showingSource
                     }

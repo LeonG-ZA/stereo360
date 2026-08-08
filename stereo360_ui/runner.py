@@ -34,6 +34,14 @@ class Runner(QObject):
     progressed = Signal(int, int, float, float, float)
     #: level ('info' | 'warning' | 'error'), text
     logged = Signal(str, str)
+    #: What the run is doing before any frame exists, as a sentence to show.
+    #:
+    #: Everything up to the first frame used to be one silent gap labelled
+    #: "Starting...", and the gap grew teeth when the default stills model
+    #: became a 3.6 GB download: a first run looks identical to a hang for as
+    #: long as that takes. These events already say exactly what is happening
+    #: -- they just only reached the log, which is collapsed by default.
+    staged = Signal(str)
     #: ok, cancelled, output path
     finished = Signal(bool, bool, str)
 
@@ -129,7 +137,15 @@ class Runner(QObject):
                 float(event.get("fps") or 0.0),
                 float(eta) if eta is not None else -1.0)
         elif kind in ("info", "warning", "error"):
-            self.logged.emit(kind, str(event.get("message", "")))
+            message = str(event.get("message", ""))
+            self.logged.emit(kind, message)
+            # `backend` is only ever attached by stereo360.backends, so it
+            # marks the model-preparation phase precisely -- choosing a
+            # runtime, downloading weights, loading them. Keyed off the field
+            # rather than off the wording, which is the whole reason the
+            # reporter carries structured fields next to the prose.
+            if event.get("backend"):
+                self.staged.emit(message)
         elif kind == "start":
             self._output = str(event.get("output") or "")
             total = event.get("total")

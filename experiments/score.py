@@ -20,10 +20,20 @@ does not move these numbers it has not done anything, whatever it looks like.
               rms departure, in percent.
 """
 
+import os
+
 import cv2
 import numpy as np
 
-INDOOR = "C:/Users/Leon/Documents/CubeTest/indoor.jpg"
+#: The photo every coordinate below was measured against, resolved from this
+#: file's own location so a checkout scores the same wherever it sits.
+#: STEREO360_INDOOR overrides it, but note that the landmarks are pixel
+#: coordinates in *this* image -- point it at another photo and the numbers
+#: are meaningless rather than wrong, which is worse.
+INDOOR = os.environ.get(
+    "STEREO360_INDOOR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "indoor.jpg"))
 
 # Located by hand against the source, and fixed so scores stay comparable.
 CHAIR_ROW = 4300

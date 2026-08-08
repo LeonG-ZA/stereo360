@@ -49,7 +49,7 @@ Options:
 | `--probe-json` | off | Print what we know about the input as JSON and exit (for a GUI) |
 | `--output-mode` | 360 | `360` = a full sphere per eye, stacked top over bottom. `vr180` = the middle 180 degrees, eyes side by side. Input must be a full 360 video either way |
 | `--yaw DEG` | 0 | Which way the VR180 field points, in degrees of longitude, positive to the right. Free and lossless: it selects a range of columns rather than rotating anything. Only valid with `--output-mode vr180` |
-| `--output-width W` | source width | Deliver a smaller frame than the source implies: 360 becomes WxW, vr180 Wx(W/2). Depth and warping still run at full resolution, so the result is supersampled rather than rendered small, and it costs the same time. Exists because 8K 360 output is 7680x7680, which no HEVC or H.264 level decodes |
+| `--output-width W` | source width | Deliver a smaller frame than the source implies: 360 becomes WxW, vr180 Wx(W/2). Depth and warping still run at full resolution, so the result is supersampled rather than rendered small, and it costs the same time. Exists because 8K 360 output is 7680x7680, which no HEVC or H.264 level decodes. Applies to stills too, where the ceiling is not the decoder but everything downstream of it — an 11904x11904 stereo JPEG is 40 MB and more than many viewers will open |
 | `--ambisonic-codec` | auto | How to write the soundfield back when `--yaw` rotates it: `libfdk_aac`, `aac`, `pcm_s24le`, `libopus`. auto takes the first your ffmpeg has, in that order |
 | `--spatial-audio` | off | Describe the audio as ambiX ambisonics (ACN/SN3D) by writing an `SA3D` box. The source audio must really be ambiX: 4, 9 or 16 channels. Spherical + stereoscopic are always written and need no flag |
 | `--split-baseline` | off | Warp both eyes by half the baseline in opposite directions. Same 3D, far less disocclusion per eye, and holes become monocular |
@@ -740,8 +740,9 @@ No amount of pipeline work touched the artifacts below. The dead ends are
 written up at length because they were expensive, and because each one looked
 obviously right beforehand.
 
-The scoring harness lives in `experiments/`. Each score compares the depth map
-against something the world guarantees rather than against anyone's judgement.
+The scoring harness lives in `experiments/` -- see [Depth scoring
+harness](#depth-scoring-harness). Each score compares the depth map against
+something the world guarantees rather than against anyone's judgement.
 
 #### The problem
 
@@ -1179,6 +1180,33 @@ With no `reporter` it prints nothing at all.
 ```bash
 python -m pytest tests/ -v
 ```
+
+### Depth scoring harness
+
+`experiments/` holds the scoring code behind every depth number quoted above.
+It is not part of the tool and nothing imports it.
+
+`score.py` scores a depth map against three artifacts measured on
+`indoor.jpg`, each checked against a law the world guarantees rather than
+anyone's judgement: a flat floor's inverse depth follows sin(latitude), a flat
+wall's follows cos(elevation), and the gaps between chair slats must read as
+the wall they show. Its landmarks are pixel coordinates in that one photo, so
+pointing `STEREO360_INDOOR` at a different image gives numbers that are
+meaningless rather than merely wrong. `damp.py` holds the rejected damping
+experiments and `cli_defaults()`, which any script rendering through the
+library needs.
+
+Three guards exist because three reviews went out broken and were caught by
+eye rather than by score:
+
+- `depth_span`, because the other scores are ratios and could not see the
+  stereo collapsing to nothing.
+- `cli_defaults()`, because the library's defaults are not the CLI's: a render
+  with `gradient_limit` at its library default of 0.0 tears fine structure
+  into fragments.
+- Validate an edge measurement on the *left* eye first. It is the untouched
+  source, so a tracer reporting hundreds of pixels of bend there is measuring
+  itself. Two measurements here did exactly that.
 
 
 ### Eliminating disocclusion (rather than filling it)

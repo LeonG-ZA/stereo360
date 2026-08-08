@@ -682,3 +682,52 @@ def test_nothing_is_renamed_behind_your_back(tmp_path):
     run(src, "-o", str(dst))
     assert dst.exists()
     assert not (tmp_path / "garden_360_TB.jpg").exists()
+
+
+# ------------------------------------------------ --output-width on a still
+
+
+def _size(path) -> tuple:
+    import cv2
+
+    img = cv2.imread(str(path))
+    assert img is not None, f"unreadable: {path}"
+    return img.shape[1], img.shape[0]
+
+
+def test_output_width_resizes_a_photo(tmp_path):
+    """It used to be accepted and then ignored, which is the worst of the
+    three options. The interface offers a Resolution dropdown on a photo job,
+    so choosing 256 and getting 512 back was a live control that did nothing
+    -- the exact failure `_refuse_video_only_flags` exists to prevent for the
+    flags that genuinely do not apply."""
+    src = equirect(tmp_path, w=512, h=256)
+    full, small = tmp_path / "full.jpg", tmp_path / "small.jpg"
+    run(src, "-o", str(full), "--face-size", "64", "--passthrough")
+    run(src, "-o", str(small), "--face-size", "64", "--passthrough",
+        "--output-width", "256")
+
+    # 360 top-bottom: each eye is WxW/2, stacked is WxW.
+    assert _size(full) == (512, 512)
+    assert _size(small) == (256, 256)
+
+
+def test_output_width_larger_than_the_source_is_refused(tmp_path):
+    """Same rule as a video, and the same reason: upscaling invents detail.
+    Silently clamping would be the ignoring bug wearing a different hat."""
+    src = equirect(tmp_path, w=512, h=256)
+    proc = run(src, "-o", str(tmp_path / "out.jpg"), "--face-size", "64",
+               "--passthrough", "--output-width", "4096", expect=1)
+    assert "larger than the 512-wide source" in proc.stderr
+
+
+def test_output_width_at_the_source_width_changes_nothing(tmp_path):
+    """The UI omits the flag when it matches the source, but the CLI must not
+    depend on that -- and a resize to the size it already is would still cost
+    a resample."""
+    src = equirect(tmp_path, w=512, h=256)
+    a, b = tmp_path / "a.jpg", tmp_path / "b.jpg"
+    run(src, "-o", str(a), "--face-size", "64", "--passthrough")
+    run(src, "-o", str(b), "--face-size", "64", "--passthrough",
+        "--output-width", "512")
+    assert a.read_bytes() == b.read_bytes()
