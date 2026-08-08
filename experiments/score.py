@@ -25,15 +25,38 @@ import os
 import cv2
 import numpy as np
 
-#: The photo every coordinate below was measured against, resolved from this
-#: file's own location so a checkout scores the same wherever it sits.
-#: STEREO360_INDOOR overrides it, but note that the landmarks are pixel
-#: coordinates in *this* image -- point it at another photo and the numbers
-#: are meaningless rather than wrong, which is worse.
+#: The photo every coordinate below was measured against, expected beside the
+#: repository rather than in it: it is 15 MB of somebody's living room, which
+#: is not something to publish, and a checkout has no use for it unless you
+#: are re-running these scores. STEREO360_INDOOR points somewhere else.
+#:
+#: Substituting another photo does not work, and fails quietly if you try.
+#: Every landmark below is a pixel coordinate in *this* 11904x5952 frame, so a
+#: different image scores whatever happens to sit at those coordinates --
+#: meaningless numbers rather than wrong ones, which is harder to notice.
 INDOOR = os.environ.get(
     "STEREO360_INDOOR",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                  "indoor.jpg"))
+
+
+def source():
+    """The reference photo, or an explanation of where to put it.
+
+    `cv2.imread` returns None for a missing file, so without this the first
+    symptom is a TypeError several frames deep in a scoring function, which
+    says nothing about the actual problem.
+    """
+    rgb = cv2.imread(INDOOR)
+    if rgb is None:
+        raise FileNotFoundError(
+            f"The reference photo is not at {INDOOR}.\n"
+            f"It is deliberately not in the repository -- it is a 360 photo "
+            f"of a private house. Put your copy there, or set "
+            f"STEREO360_INDOOR to it.\n"
+            f"Only that exact frame is meaningful: the landmarks below are "
+            f"pixel coordinates in it.")
+    return rgb
 
 # Located by hand against the source, and fixed so scores stay comparable.
 CHAIR_ROW = 4300
@@ -105,7 +128,7 @@ def depth_span(disp):
 
 def score(disp, rgb=None):
     if rgb is None:
-        rgb = cv2.imread(INDOOR)
+        rgb = source()
     return {"chair_gap": chair_gap(disp, rgb),
             "wall_wobble": wall_wobble(disp),
             "floor_rms": floor_rms(disp),

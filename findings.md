@@ -1190,11 +1190,21 @@ It is not part of the tool and nothing imports it.
 `indoor.jpg`, each checked against a law the world guarantees rather than
 anyone's judgement: a flat floor's inverse depth follows sin(latitude), a flat
 wall's follows cos(elevation), and the gaps between chair slats must read as
-the wall they show. Its landmarks are pixel coordinates in that one photo, so
-pointing `STEREO360_INDOOR` at a different image gives numbers that are
-meaningless rather than merely wrong. `damp.py` holds the rejected damping
-experiments and `cli_defaults()`, which any script rendering through the
-library needs.
+the wall they show. `damp.py` holds the rejected damping experiments and
+`cli_defaults()`, which any script rendering through the library needs.
+
+**`indoor.jpg` is not in the repository** and these scores cannot be
+reproduced without it. It is a 360 photo of a private house, which is not
+something to publish, and a 15 MB file is not something to put in every
+clone. The harness expects it beside the checkout, or wherever
+`STEREO360_INDOOR` points, and says so if it is missing.
+
+Substituting a different photo does not work. Every landmark is a pixel
+coordinate in that one 11904x5952 frame, so another image scores whatever
+happens to sit at those coordinates — meaningless numbers rather than wrong
+ones, which is the harder failure to notice. The numbers quoted throughout
+this document are therefore a record rather than something a reader can
+re-run; what transfers is the method, which is the three laws above.
 
 Three guards exist because three reviews went out broken and were caught by
 eye rather than by score:
