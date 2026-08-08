@@ -20,6 +20,7 @@ third_party/*
 *.insv
 *.wav
 *.m4a
+*.jpg
 
 # --- Python ---------------------------------------------------------------
 __pycache__/
@@ -45,3 +46,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- Reference media ------------------------------------------------------
+# The scoring harness in experiments/ measures against a 360 photo of a
+# private house, and its stereo render. Keep them beside the checkout, not in
+# it: see "Depth scoring harness" in findings.md, and STEREO360_INDOOR.
+indoor.jpg
+indoor_360_TB.jpg

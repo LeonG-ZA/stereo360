@@ -17,6 +17,7 @@ pytest.importorskip("PySide6", reason="UI extra not installed")
 
 from PySide6.QtCore import QCoreApplication  # noqa: E402
 
+from stereo360 import backends  # noqa: E402
 from stereo360_ui import options  # noqa: E402
 from stereo360_ui.controller import Controller  # noqa: E402
 from stereo360_ui.runner import Runner  # noqa: E402
@@ -323,9 +324,9 @@ def test_controller_probe_of_a_missing_file_stays_empty(qapp, tmp_path: Path):
 
 
 def test_base_model_is_the_default_and_emits_nothing():
-    assert "--depth-model" not in options.build_argv(dict(BASE))
-    assert "--depth-model" not in options.build_argv(
-        dict(BASE, depthModel="base"))
+    v2 = dict(BASE, depthBackend="depth-anything")
+    assert "--depth-model" not in options.build_argv(v2)
+    assert "--depth-model" not in options.build_argv(dict(v2, depthModel="base"))
 
 
 def test_choosing_small_actually_gets_small():
@@ -335,9 +336,38 @@ def test_choosing_small_actually_gets_small():
     Base silently -- the dropdown saying one thing and the run doing another,
     which is the exact bug class already fixed once for the temporal backend.
     """
-    argv = options.build_argv(dict(BASE, depthModel="small"))
+    argv = options.build_argv(dict(BASE, depthBackend="depth-anything",
+                                   depthModel="small"))
     assert (argv[argv.index("--depth-model") + 1]
             == "depth-anything/Depth-Anything-V2-Small-hf")
+
+
+def test_the_recommended_backend_names_no_model_at_all():
+    """The whole point of the empty sentinel: the CLI picks both the backend
+    and its model from the kind of job, so naming either here would pin one
+    half of a pair and let them drift."""
+    argv = options.build_argv(dict(BASE, depthModel="large"))
+    assert "--depth-backend" not in argv
+    assert "--depth-model" not in argv
+
+
+def test_depth_pro_takes_no_model():
+    """It ships one checkpoint. Passing the shared Base/Large selection
+    through would name a model that does not exist."""
+    argv = options.build_argv(dict(BASE, depthBackend="depth-pro",
+                                   depthModel="large"))
+    assert argv[argv.index("--depth-backend") + 1] == "depth-pro"
+    assert "--depth-model" not in argv
+
+
+def test_v3_defaults_to_small_not_base():
+    """V2 measured best at Base and V3 at Small, so a single shared default
+    is wrong for one of them. Small is what V3 omits the flag for; Base is a
+    413 MB download and has to be asked for."""
+    v3 = dict(BASE, depthBackend="depth-anything-v3")
+    assert "--depth-model" not in options.build_argv(dict(v3, depthModel="small"))
+    argv = options.build_argv(dict(v3, depthModel="base"))
+    assert argv[argv.index("--depth-model") + 1] == "base"
 
 
 def test_the_ui_and_the_cli_agree_on_which_model_is_default():
@@ -347,6 +377,18 @@ def test_the_ui_and_the_cli_agree_on_which_model_is_default():
 
     assert (options.DEPTH_MODELS[options.DEFAULT_DEPTH_MODEL]["depth-anything"]
             == DEFAULT_MODEL)
+
+
+def test_the_ui_and_the_cli_agree_on_every_backends_default_model():
+    """Same guard as the V2 one above, once per backend that has a default.
+    `build_argv` omits the flag for these, so a drift means the UI silently
+    runs a model nobody chose."""
+    from stereo360.depth import depth_anything, depth_anything_v3
+
+    assert options.DEFAULT_MODEL_FOR["depth-anything-v3"] \
+        == depth_anything_v3.DEFAULT_VARIANT
+    assert (options.DEPTH_MODELS[options.DEFAULT_MODEL_FOR["depth-anything"]]
+            ["depth-anything"] == depth_anything.DEFAULT_MODEL)
 
 
 def test_every_model_choice_maps_explicitly():
@@ -424,7 +466,8 @@ def test_model_rows_follow_the_backend(backend, model_row, onnx_row):
 
 def test_large_model_maps_to_its_hub_id():
     """Base is the default and so emits nothing; Large has to be asked for."""
-    argv = options.build_argv(dict(BASE, depthModel="large"))
+    argv = options.build_argv(dict(BASE, depthBackend="depth-anything",
+                                   depthModel="large"))
     assert (argv[argv.index("--depth-model") + 1]
             == "depth-anything/Depth-Anything-V2-Large-hf")
 
@@ -556,8 +599,7 @@ def test_controller_probes_available_backends(qapp):
 
     assert _pump(qapp, lambda: bool(seen), timeout=180), "probe never returned"
     entries = {e["name"]: e for e in seen[-1]}
-    assert set(entries) == {"auto", "depth-anything",
-                            "video-depth-anything", "onnx"}
+    assert set(entries) == set(backends.BACKENDS)
     assert all(isinstance(e["available"], bool) and e["detail"]
                for e in entries.values())
 
@@ -1072,21 +1114,31 @@ def test_the_ui_and_the_cli_agree_on_the_photo_tile_count():
 @pytest.mark.parametrize("path,tiles,expected", [
     ("in.mp4", 1, None),        # video default -- omitted
     ("in.mp4", 3, "3"),         # video, not the default -- emitted
-    ("pano.jpg", 3, None),      # photo default -- omitted
-    ("pano.jpg", 1, "1"),       # photo, asked for whole faces -- emitted
+    ("pano.jpg", 1, None),      # photo default -- omitted
+    ("pano.jpg", 3, "3"),       # photo, tiling asked for -- emitted
     ("pano.jpg", 4, "4"),
 ])
 def test_the_tiles_flag_is_emitted_against_the_right_default(path, tiles,
                                                              expected):
-    """A fixed comparison would emit the flag when it is not needed and, far
-    worse, omit it when it is -- silently rendering a photo at 3 while the
-    box read 1."""
     argv = options.build_argv({"input": path, "output": "out.jpg",
                                "depthTiles": tiles})
     if expected is None:
         assert "--depth-tiles" not in argv
     else:
         assert argv[argv.index("--depth-tiles") + 1] == expected
+
+
+def test_the_photo_default_is_compared_against_and_not_assumed(monkeypatch):
+    """The two job kinds want the same tile count today, which makes the case
+    above unable to tell a real comparison from a hardcoded 1. So move the
+    photo default and check the flag follows: it has to be *read*, not
+    assumed. It was 3 until the depth models changed, and could move again."""
+    monkeypatch.setattr(options, "PHOTO_DEPTH_TILES", 3)
+    photo = {"input": "pano.jpg", "output": "out.jpg"}
+
+    assert "--depth-tiles" not in options.build_argv(dict(photo, depthTiles=3))
+    argv = options.build_argv(dict(photo, depthTiles=1))
+    assert argv[argv.index("--depth-tiles") + 1] == "1"
 
 
 # ------------------------------------------------ where the size picker starts
@@ -1290,9 +1342,22 @@ def test_photo_mode_hides_what_cannot_apply(tmp_path):
 
 def test_photo_mode_keeps_what_does_apply(tmp_path):
     props, rows = _dump(f"inputPath={_still(tmp_path)}")
-    for label in ("Format", "Strength", "Gradient limit", "Model",
+    for label in ("Format", "Strength", "Gradient limit", "Backend",
                   "Depth tiles", "Device"):
         assert rows[label] is True, f"{label} should still be shown"
+
+
+def test_the_model_row_appears_only_where_there_is_a_model_to_choose(tmp_path):
+    """Recommended and Depth Pro have no variant worth offering -- one picks
+    its own, the other ships a single checkpoint. A dropdown that changes
+    nothing is worse than no dropdown, because it implies it changes
+    something."""
+    still = _still(tmp_path)
+    for backend, shown in (("", False), ("depth-pro", False),
+                           ("depth-anything-v3", True),
+                           ("depth-anything", True)):
+        _, rows = _dump(f"inputPath={still}", f"depthBackend={backend}")
+        assert rows["Model"] is shown, f"{backend!r} -> Model {rows['Model']}"
 
 
 def test_a_video_still_shows_the_video_controls(tmp_path):
@@ -1344,3 +1409,111 @@ def test_a_video_conversion_does_not_hijack_the_panel(qapp, tmp_path):
                   "faceSize": 32, "maxFrames": 2})
     assert _pump(qapp, lambda: bool(done), timeout=600)
     assert ctrl.previewSource == "", "a video render is not a picture"
+
+
+# --------------------------------------- showing a finished photo in the panel
+
+
+def test_a_full_size_photo_is_too_big_for_qt_to_decode(tmp_path):
+    """Why the preview panel caps its decode, demonstrated rather than
+    asserted from memory.
+
+    A finished 360 photo is the full-size deliverable -- 11904x11904 from an
+    Insta360 X5 -- and QImageReader refuses anything whose decoded form
+    exceeds its allocation limit. 11904 squared at 4 bytes is 567 MB against a
+    256 MB default, so the load fails, the panel stays empty, and the run that
+    produced a perfectly good file looks like it produced nothing.
+
+    Reproduced at 1/256th the size by moving the limit rather than by building
+    a 567 MB image, so this costs milliseconds and does not depend on the
+    machine having the memory to fail honestly.
+
+    JPEG deliberately, and not only because it is what a photo job writes:
+    libjpeg can decode straight to a reduced size, so the scaled read never
+    allocates the full frame. PNG cannot, and a scaled read of one still
+    allocates it all and still fails -- which is why the panel also reports a
+    failed decode rather than relying on the cap always working.
+    """
+    import cv2
+    import numpy as np
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QImageReader
+
+    src = tmp_path / "big.jpg"
+    cv2.imwrite(str(src), np.zeros((2048, 2048, 3), np.uint8))
+
+    original = QImageReader.allocationLimit()
+    try:
+        QImageReader.setAllocationLimit(1)          # MB; 2048^2 x4 = 16 MB
+        assert QImageReader(str(src)).read().isNull(), \
+            "expected Qt to refuse the unscaled decode"
+
+        capped = QImageReader(str(src))
+        capped.setScaledSize(QSize(256, 256))
+        assert not capped.read().isNull(), \
+            "a scaled decode is what sourceSize asks Qt for, and it must work"
+    finally:
+        QImageReader.setAllocationLimit(original)
+
+
+def test_the_preview_panel_caps_its_decode():
+    """The fix for the above, pinned. Without sourceSize the Image element
+    asks for the full decode and silently fails; this is not visible in any
+    screenshot test, because the symptom *is* an empty panel."""
+    qml = (Path(__file__).resolve().parent.parent
+           / "stereo360_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+    block = qml[qml.index("id: previewImage"):]
+    block = block[:block.index("\n                    }")]
+    assert "sourceSize" in block, "previewImage must cap its decode size"
+    assert "Image.Error" in block, "a failed decode must not be silent"
+
+
+def test_the_controller_explains_a_preview_that_cannot_be_shown(qapp):
+    """An empty panel reads as "no output", and the next move is to run the
+    whole conversion again. The file is fine; say so."""
+    ctrl = Controller()
+    seen = []
+    ctrl.logged.connect(lambda level, text: seen.append((level, text)))
+    ctrl.reportPreviewFailure("file:///c:/x/out_360_TB.jpg?t=123.4")
+
+    assert seen and seen[0][0] == "warning"
+    assert "out_360_TB.jpg" in seen[0][1]
+    assert "?t=" not in seen[0][1], "the cache-buster is noise to a reader"
+    assert "written and fine" in seen[0][1]
+
+
+# ------------------------------------------- what the window says while waiting
+
+
+def test_model_preparation_reaches_the_status_line(qapp):
+    """The 3.6 GB stills model downloads before frame one exists, and the
+    progress bar is driven by frames. Without this the window says
+    "Starting..." with an empty detail for the whole download, which is
+    indistinguishable from a hang."""
+    ctrl = Controller()
+    ctrl._busy = True
+    ctrl._set_status("Starting…")
+
+    ctrl._runner.staged.emit("Loading Depth Pro 'apple/DepthPro-hf' on device "
+                             "'auto' (downloads ~3.6 GB on first use)...")
+
+    assert ctrl.status == "Starting…", "the heading was already right"
+    assert "3.6 GB" in ctrl.detail
+
+
+def test_only_the_backend_events_become_status(qapp):
+    """Keyed off the structured `backend` field rather than the wording, so
+    ordinary info lines stay in the log where they belong."""
+    from stereo360_ui.runner import Runner
+
+    runner = Runner()
+    staged, logged = [], []
+    runner.staged.connect(staged.append)
+    runner.logged.connect(lambda level, text: logged.append(text))
+
+    runner._dispatch({"type": "info", "message": "backend line",
+                      "backend": "depth-pro"})
+    runner._dispatch({"type": "info", "message": "ordinary line"})
+
+    assert staged == ["backend line"]
+    assert logged == ["backend line", "ordinary line"]

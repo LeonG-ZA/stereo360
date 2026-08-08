@@ -214,7 +214,25 @@ installing through winget buys nothing here, and would put ffmpeg on your
 git clone https://github.com/LeonG-ZA/stereo360.git
 cd stereo360
 pip install -r requirements.txt
+pip install onnxruntime
 ```
+
+The second line is not optional the way it once was: the default depth model
+for **video** is an ONNX graph, so without a runtime the tool falls back to the
+older torch model and says so.
+
+**On Windows, use `onnxruntime-directml` whatever GPU you have**, including
+NVIDIA. It goes through Direct3D 12 and does not care about the vendor.
+`onnxruntime-gpu` looks like the right answer on an NVIDIA card and is not:
+the published wheel carries no `sm_120` kernels, so on any RTX 50 series card
+its CUDA provider fails with *no kernel image is available for execution on
+the device*. DirectML measured 1.91 s → 0.15 s for a whole frame on an RTX
+5070 Ti, with bit-identical output. Elsewhere: `onnxruntime-silicon` on Apple,
+plain `onnxruntime` for CPU.
+
+Install exactly one — they all provide a module called `onnxruntime` and
+whichever lands second wins, which is also why it is not in
+`requirements.txt`: a fixed choice there would overwrite yours.
 
 Then add the right accelerator for your machine. **This step matters more than
 any other setting** — the wrong one silently runs everything on the CPU.
@@ -353,9 +371,20 @@ The models this tool drives are not included and carry their own terms:
 
 | Component | Where it comes from | Licence |
 |---|---|---|
+| Depth Anything V3 (Small / Base / Large) — the video default | downloaded from the HuggingFace Hub on first use | Apache-2.0 |
+| Depth Pro — the still-image default | downloaded from the HuggingFace Hub on first use | `apple-amlr` — **not** an open-source licence |
 | Depth Anything V2 (Small / Base / Large) | downloaded from the HuggingFace Hub on first use | Apache-2.0 |
 | Video Depth Anything | cloned into `third_party/` by you — see [`third_party/README.md`](third_party/README.md) | see that repository |
 | FFmpeg | must be on `PATH` | LGPL/GPL, depending on the build |
+
+Depth Pro is the exception worth reading before you rely on it. Apple releases
+it under the Apple Machine Learning Research Model License, which is not one of
+the permissive licences everything else here uses, and its terms are what
+decide whether your particular use is allowed. It is the default for still
+images because it measured best on thin structures, not because it is the most
+freely licensed thing available — `--depth-backend depth-anything-v3` gets you
+the Apache-2.0 model on stills too, at the cost of the metallic-trim artifact
+described in findings.md.
 
 Nothing in this repository redistributes them. `models/` and `third_party/`
 hold generated and cloned content and are deliberately not committed — a fresh

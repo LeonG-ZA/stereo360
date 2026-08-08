@@ -1355,6 +1355,21 @@ def convert_image(input_path: str, output_path: str, **kw) -> PreviewResult:
             f"{os.path.basename(output_path)!r} is not one of "
             f"{', '.join(_PREVIEW_SUFFIXES)}. JPEG is the one format headsets "
             f"read reliably.")
+    # `--output-width` and the preview's `width` cap are the same operation on
+    # the same stacked frame, so a photo spells it the way a video does and
+    # this maps it across. It used to be neither read nor refused, which meant
+    # the interface's Resolution dropdown was live on a photo job and simply
+    # did nothing -- you chose 5760 and got 11904 back with nothing said.
+    #
+    # Validated through `scaled_eye_size` rather than left to the preview's
+    # own cap, because the two mean different things: `--preview-width` is a
+    # ceiling and quietly does nothing when the source is smaller, while
+    # `--output-width` is a request and has to say so when it cannot be met.
+    output_width = kw.pop("output_width", None)
+    if output_width:
+        info = ffmpeg_io.probe(input_path)
+        kw["width"] = scaled_eye_size(info.width, info.height,
+                                      int(output_width))[0]
     kw.setdefault("width", 0)                       # 0 = do not downscale
     reporter = kw.get("reporter") or Reporter()
     kw["reporter"] = reporter

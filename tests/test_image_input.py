@@ -161,7 +161,7 @@ def test_an_image_will_not_write_a_video(tmp_path):
 # ------------------------------------------------------- tiles, by job kind
 
 @pytest.mark.parametrize("requested,is_image,expected,why", [
-    (None, True, 3, "a photo, nobody asked"),
+    (None, True, 1, "a photo, nobody asked"),
     (None, False, 1, "a video, nobody asked"),
     (1, True, 1, "a photo, but 1 was asked for explicitly"),
     (4, True, 4, "a photo, 4 asked for"),
@@ -169,9 +169,10 @@ def test_an_image_will_not_write_a_video(tmp_path):
 ])
 def test_the_tile_count_follows_the_kind_of_job(requested, is_image,
                                                 expected, why):
-    """More tiles for a photo, because for one frame they are close to free:
-    12 s against 14 s on a 59 MP still, where loading the model and encoding
-    the JPEG dominate. The same setting on 8000 frames is hours."""
+    """A photo used to get three, which was right for V2 and measurably wrong
+    for both models that replaced it -- Depth Pro's wall wobble more than
+    triples under tiling. The resolver stays because an explicit count still
+    has to be distinguishable from silence."""
     from stereo360 import cli
 
     assert cli.resolve_depth_tiles(requested, is_image) == expected, why
@@ -188,14 +189,20 @@ def test_asking_for_one_tile_on_a_photo_is_honoured():
 
 
 def test_a_photo_actually_renders_with_the_photo_default(tmp_path):
-    """End to end rather than by inspection: the same photo with and without
-    an explicit --depth-tiles 1 must not produce the same pixels."""
+    """End to end rather than by inspection, and in both directions: the
+    default must *be* one tile, and tiling must still work when asked for.
+    Checking only that a photo renders would pass with the tiling code
+    deleted outright."""
     src = equirect(tmp_path, w=1024, h=512)
-    a, b = tmp_path / "default.jpg", tmp_path / "one.jpg"
-    run(src, "-o", str(a), "--face-size", "128")
-    run(src, "-o", str(b), "--face-size", "128", "--depth-tiles", "1")
-    assert a.read_bytes() != b.read_bytes(), \
-        "the default is not tiling, or --depth-tiles 1 is being ignored"
+    default = tmp_path / "default.jpg"
+    one, three = tmp_path / "one.jpg", tmp_path / "three.jpg"
+    run(src, "-o", str(default), "--face-size", "128")
+    run(src, "-o", str(one), "--face-size", "128", "--depth-tiles", "1")
+    run(src, "-o", str(three), "--face-size", "128", "--depth-tiles", "3")
+    assert default.read_bytes() == one.read_bytes(), \
+        "the photo default is no longer one tile"
+    assert default.read_bytes() != three.read_bytes(), \
+        "--depth-tiles is being ignored"
 
 
 def test_a_preview_of_a_video_is_tagged_too(tmp_path):
@@ -675,3 +682,52 @@ def test_nothing_is_renamed_behind_your_back(tmp_path):
     run(src, "-o", str(dst))
     assert dst.exists()
     assert not (tmp_path / "garden_360_TB.jpg").exists()
+
+
+# ------------------------------------------------ --output-width on a still
+
+
+def _size(path) -> tuple:
+    import cv2
+
+    img = cv2.imread(str(path))
+    assert img is not None, f"unreadable: {path}"
+    return img.shape[1], img.shape[0]
+
+
+def test_output_width_resizes_a_photo(tmp_path):
+    """It used to be accepted and then ignored, which is the worst of the
+    three options. The interface offers a Resolution dropdown on a photo job,
+    so choosing 256 and getting 512 back was a live control that did nothing
+    -- the exact failure `_refuse_video_only_flags` exists to prevent for the
+    flags that genuinely do not apply."""
+    src = equirect(tmp_path, w=512, h=256)
+    full, small = tmp_path / "full.jpg", tmp_path / "small.jpg"
+    run(src, "-o", str(full), "--face-size", "64", "--passthrough")
+    run(src, "-o", str(small), "--face-size", "64", "--passthrough",
+        "--output-width", "256")
+
+    # 360 top-bottom: each eye is WxW/2, stacked is WxW.
+    assert _size(full) == (512, 512)
+    assert _size(small) == (256, 256)
+
+
+def test_output_width_larger_than_the_source_is_refused(tmp_path):
+    """Same rule as a video, and the same reason: upscaling invents detail.
+    Silently clamping would be the ignoring bug wearing a different hat."""
+    src = equirect(tmp_path, w=512, h=256)
+    proc = run(src, "-o", str(tmp_path / "out.jpg"), "--face-size", "64",
+               "--passthrough", "--output-width", "4096", expect=1)
+    assert "larger than the 512-wide source" in proc.stderr
+
+
+def test_output_width_at_the_source_width_changes_nothing(tmp_path):
+    """The UI omits the flag when it matches the source, but the CLI must not
+    depend on that -- and a resize to the size it already is would still cost
+    a resample."""
+    src = equirect(tmp_path, w=512, h=256)
+    a, b = tmp_path / "a.jpg", tmp_path / "b.jpg"
+    run(src, "-o", str(a), "--face-size", "64", "--passthrough")
+    run(src, "-o", str(b), "--face-size", "64", "--passthrough",
+        "--output-width", "512")
+    assert a.read_bytes() == b.read_bytes()

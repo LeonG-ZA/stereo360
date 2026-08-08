@@ -21,7 +21,15 @@ from .events import Reporter
 DEFAULT_ONNX_MODEL = "models/depth_anything_v2_small.onnx"
 
 #: Backend names accepted by `build`, in the order the CLI lists them.
-BACKENDS = ("auto", "depth-anything", "video-depth-anything", "onnx")
+BACKENDS = ("auto", "depth-anything-v3", "depth-pro", "depth-anything",
+            "video-depth-anything", "onnx")
+
+#: What a run gets when nobody asked for a backend, by kind of input. The two
+#: differ because the right trade differs: video wants a model small and fast
+#: enough to run thousands of times, stills want the best single frame anyone
+#: can get. Measured in "Choosing a depth model" in findings.md.
+VIDEO_BACKEND = "depth-anything-v3"
+PHOTO_BACKEND = "depth-pro"
 
 
 class Availability(NamedTuple):
@@ -82,6 +90,21 @@ def probe_backends(onnx_model: str = DEFAULT_ONNX_MODEL) -> List[Availability]:
                         "Picks the fastest runtime available here")]
 
     torch_ok = _installed("torch") and _installed("transformers")
+
+    if _installed("onnxruntime") and _installed("huggingface_hub"):
+        v3 = (True, "Multi-view depth; the video default. Downloads 105 MB "
+                    "on first use")
+    else:
+        v3 = (False, "Needs onnxruntime and huggingface_hub "
+                     "(requirements-onnx.txt)")
+    out.append(Availability("depth-anything-v3", *v3))
+
+    out.append(Availability(
+        "depth-pro", torch_ok,
+        "Sharpest thin structures; the stills default. Downloads 3.6 GB on "
+        "first use" if torch_ok
+        else "Needs torch and transformers (requirements.txt)"))
+
     out.append(Availability(
         "depth-anything", torch_ok,
         "Per-frame depth via torch" if torch_ok
@@ -110,6 +133,33 @@ def probe_backends(onnx_model: str = DEFAULT_ONNX_MODEL) -> List[Availability]:
         onnx = (True, "ONNX Runtime; also the path for a custom fast model")
     out.append(Availability("onnx", *onnx))
     return out
+
+
+def resolve_depth_backend(requested: Optional[str], is_image: bool,
+                          reporter: Optional[Reporter] = None) -> str:
+    """Which backend to use, given what was asked for and what came in.
+
+    `None` means nobody asked -- the flag defaults to None rather than to a
+    name so that an explicit `--depth-backend depth-anything-v3` on a photo is
+    still honoured. Same sentinel as `resolve_depth_tiles`, and for the same
+    reason: with a real default the two cases are indistinguishable afterwards.
+
+    Falls back to "auto" when the preferred model cannot run here, because
+    these two defaults carry dependencies the others do not -- onnxruntime for
+    one, 3.6 GB of weights for the other -- and a machine without them should
+    still convert something rather than stop.
+    """
+    if requested:
+        return requested
+    want = PHOTO_BACKEND if is_image else VIDEO_BACKEND
+    for a in probe_backends():
+        if a.name == want and not a.available:
+            (reporter or Reporter()).warning(
+                f"Default depth backend '{want}' unavailable here "
+                f"({a.detail}); falling back to auto",
+                backend=want, detail=a.detail)
+            return "auto"
+    return want
 
 
 class Built(NamedTuple):
@@ -167,14 +217,38 @@ def build(
         elif device == "auto":
             device = rt.device
 
-    if name == "video-depth-anything":
+    if name == "depth-anything-v3":
+        from .depth.depth_anything_v3 import (DOWNLOAD_MB,
+                                              DepthAnythingV3Backend,
+                                              resolve_variant)
+
+        variant = resolve_variant(depth_model)
+        reporter.info(f"Loading Depth Anything V3 '{variant}' (downloads "
+                      f"~{DOWNLOAD_MB[variant]} MB on first use)...",
+                      backend=name, model=variant)
+        backend: DepthBackend = DepthAnythingV3Backend(
+            variant=variant, provider=ort_provider)
+        resolved_device = backend.provider
+        reporter.info(f"Depth Anything V3 on provider '{backend.provider}'",
+                      backend=name, model=variant, device=backend.provider)
+    elif name == "depth-pro":
+        from .depth.depth_pro import DEFAULT_MODEL as DEPTH_PRO_MODEL
+        from .depth.depth_pro import DOWNLOAD_MB, DepthProBackend
+
+        model_id = depth_model or DEPTH_PRO_MODEL
+        reporter.info(f"Loading Depth Pro '{model_id}' on device '{device}' "
+                      f"(downloads ~{DOWNLOAD_MB / 1000:.1f} GB on first "
+                      f"use)...", backend=name, model=model_id, device=device)
+        backend = DepthProBackend(model_id=model_id, device=device)
+        resolved_device = backend.device
+    elif name == "video-depth-anything":
         from .depth.video_depth_anything import VideoDepthAnythingBackend
 
         variant = depth_model or "small"
         reporter.info(f"Loading Video Depth Anything '{variant}' on device "
                       f"'{device}'...", backend=name, model=variant,
                       device=device)
-        backend: DepthBackend = VideoDepthAnythingBackend(
+        backend = VideoDepthAnythingBackend(
             variant=variant, device=device, fp16=fp16,
             input_size=vda_input_size)
         resolved_device = device

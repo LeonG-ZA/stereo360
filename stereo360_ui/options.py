@@ -145,14 +145,27 @@ QUALITY_PRESETS: Dict[str, Dict[str, Any]] = {
 #: default. Leaving that one blank to "fall through" is what silently turns a
 #: Small selection into whatever the default happens to be the day it moves.
 DEPTH_MODELS: Dict[str, Dict[str, str]] = {
-    "small": {"depth-anything": "depth-anything/Depth-Anything-V2-Small-hf"},
-    "base": {"depth-anything": "depth-anything/Depth-Anything-V2-Base-hf"},
+    "small": {"depth-anything": "depth-anything/Depth-Anything-V2-Small-hf",
+              "depth-anything-v3": "small"},
+    "base": {"depth-anything": "depth-anything/Depth-Anything-V2-Base-hf",
+             "depth-anything-v3": "base"},
     "large": {"depth-anything": "depth-anything/Depth-Anything-V2-Large-hf",
-              "video-depth-anything": "large"},
+              "video-depth-anything": "large",
+              "depth-anything-v3": "large"},
 }
 
 #: What `--depth-model` is omitted for, because it is already the CLI default.
 DEFAULT_DEPTH_MODEL = "base"
+
+#: Per backend, since they no longer agree: V2 measured best at Base, while V3
+#: measured best at Small -- Large was actually worse there. Keyed by backend
+#: so a shared "base" selection does not quietly become the wrong default when
+#: the backend changes underneath it.
+DEFAULT_MODEL_FOR: Dict[str, str] = {
+    "depth-anything": DEFAULT_DEPTH_MODEL,
+    "video-depth-anything": "small",
+    "depth-anything-v3": "small",
+}
 
 #: Models the temporal backend does not ship. It only has small and large, so
 #: asking it for Base would fail at load time rather than in the UI.
@@ -206,10 +219,10 @@ def output_size(width: int, height: int, output_mode: str = "360",
 
 
 #: Tiles per cube face for a photo, mirrored from `cli.PHOTO_DEPTH_TILES`.
-#: More than a video gets, because for a single frame the extra depth passes
-#: are nearly free -- 12 s against 14 s on a 59 MP still, where loading the
-#: model and encoding the JPEG dominate. A test pins this to the CLI's value.
-PHOTO_DEPTH_TILES = 3
+#: One, same as a video: tiling helped V2 and measurably hurts both models
+#: that replaced it as defaults. The reasoning is with the CLI constant, and
+#: a test pins this to its value.
+PHOTO_DEPTH_TILES = 1
 
 
 #: The largest 360 width whose stacked output a headset still decodes.
@@ -277,7 +290,7 @@ _DEFAULTS = {
     "fgErode": 2,
     "smooth": 0,
     "inpaint": "simple",
-    "depthBackend": "auto",
+    "depthBackend": "",
     "device": "auto",
     "chunkSize": 8,
     "chunkOverlap": 2,
@@ -387,19 +400,23 @@ def build_argv(
     if opts.get("splitBaseline"):
         argv += ["--split-baseline"]
 
-    backend = opts.get("depthBackend", "auto")
-    if backend != _DEFAULTS["depthBackend"]:
-        argv += ["--depth-backend", str(backend)]
+    # Empty means the CLI's own per-job default -- V3 for video, Depth Pro for
+    # a still. Passing nothing is what selects it, so the UI never has to know
+    # which one that is.
+    backend = str(opts.get("depthBackend") or "")
+    if backend:
+        argv += ["--depth-backend", backend]
 
     # Which "model" means depends on the backend: a Hub id or variant name for
     # the torch backends, a path to an exported graph for ONNX. The CLI keeps
     # those as two separate flags, so the UI works out which one applies rather
-    # than making the user know.
+    # than making the user know. Depth Pro ships one checkpoint and the
+    # recommended entry picks its own, so neither takes a model.
     if backend == "onnx":
         onnx = str(opts.get("onnxModel") or "").strip()
         if onnx and onnx != DEFAULT_ONNX_MODEL:
             argv += ["--onnx-model", onnx]
-    else:
+    elif backend not in ("", "depth-pro"):
         model = str(opts.get("depthModel", DEFAULT_DEPTH_MODEL))
         if backend == "video-depth-anything":
             # It ships small and large only; anything else would fail at load,
@@ -407,13 +424,14 @@ def build_argv(
             key = "video-depth-anything"
             if model not in _VDA_MODELS:
                 model = "small"
+        elif backend == "depth-anything-v3":
+            key = "depth-anything-v3"
         else:
             key = "depth-anything"
         mapped = DEPTH_MODELS.get(model, {}).get(key)
         # Emitted unless it is already what the CLI would pick, so the command
         # line stays short without depending on the two agreeing.
-        if mapped and not (key == "depth-anything"
-                           and model == DEFAULT_DEPTH_MODEL):
+        if mapped and model != DEFAULT_MODEL_FOR.get(key):
             argv += ["--depth-model", mapped]
 
     device = opts.get("device", "auto")

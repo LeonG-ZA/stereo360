@@ -26,7 +26,7 @@ Options:
 | `--max-frames N` | all | Process only first N frames (testing) |
 | `--no-cubemap` | off | Skip cubemap round-trip |
 | `--passthrough` | off | M1 mode: right eye = left eye (no depth model) |
-| `--depth-backend` | **auto** | `auto` probes the machine and uses the fastest runtime available, printing which. Or force `depth-anything` (per-frame torch), `video-depth-anything` (temporal, flicker-free), `onnx` (ONNX Runtime: DirectML/CUDA/CoreML, no PyTorch) |
+| `--depth-backend` | **depends on the input** | `depth-anything-v3` for a video, `depth-pro` for a still image — see [Choosing a depth model](#choosing-a-depth-model). Or force `auto` (probe the machine and use the fastest runtime available, printing which), `depth-anything` (per-frame V2 via torch), `video-depth-anything` (temporal, flicker-free), `onnx` (ONNX Runtime: DirectML/CUDA/CoreML, no PyTorch) |
 | `--onnx-model PATH` | models/depth_anything_v2_small.onnx | Exported ONNX depth model (`python scripts/export_onnx.py`) |
 | `--ort-provider` | auto | onnxruntime provider override, e.g. `DmlExecutionProvider` |
 | `--fp16` | off | Half-precision inference for the video backend (GPU) |
@@ -35,7 +35,7 @@ Options:
 | `--no-temporal-fill` | (fill is **on**) | Disable filling holes from other frames in the chunk. On by default: real pixels another frame saw beat anything invented. Needs `--chunk-size` > 1 |
 | `--depth-tiles N` | 1 | Split each cubemap face into N×N overlapping tiles for depth (feather-blended). Higher = finer depth on thin structures; N² times slower |
 | `--face-overlap F` | 0.15 | How far each depth face reaches past its nominal 90° (0.15 = 98° per face), so neighbours share a band rather than only an edge. 0 restores exact faces, which creases the ground at a seam — see [Cube seams in the depth map](#cube-seams-in-the-depth-map) |
-| `--depth-model ID` | **Depth-Anything-V2-Base** | HuggingFace model id, or `small`/`large` for the video backend (which ships those two only and defaults to small). Base measured lowest depth noise and 40% less frame-to-frame flicker than Small for +5% render time — see [Which depth model?](#which-depth-model) |
+| `--depth-model ID` | **per backend** | `small` for `depth-anything-v3` (`base`/`large` also accepted, and both measured worse — see [Choosing a depth model](#choosing-a-depth-model)); ignored by `depth-pro`, which ships one checkpoint. For `depth-anything`, a HuggingFace model id, default Depth-Anything-V2-Base: lowest depth noise and 40% less frame-to-frame flicker than Small for +5% render time — see [Which depth model?](#which-depth-model). The temporal backend ships `small`/`large` only and defaults to small |
 | `--chunk-size N` | 8 | Temporal chunk length for the video backend (1 = off) |
 | `--chunk-overlap N` | 2 | Overlap frames ramp-blended at chunk boundaries |
 | `--smooth N` | 0 (off) | Edge-aware depth smoothing radius (guided filter). Off by default: it measured 66% of total runtime and `--gradient-limit` already handles depth cliffs |
@@ -49,7 +49,7 @@ Options:
 | `--probe-json` | off | Print what we know about the input as JSON and exit (for a GUI) |
 | `--output-mode` | 360 | `360` = a full sphere per eye, stacked top over bottom. `vr180` = the middle 180 degrees, eyes side by side. Input must be a full 360 video either way |
 | `--yaw DEG` | 0 | Which way the VR180 field points, in degrees of longitude, positive to the right. Free and lossless: it selects a range of columns rather than rotating anything. Only valid with `--output-mode vr180` |
-| `--output-width W` | source width | Deliver a smaller frame than the source implies: 360 becomes WxW, vr180 Wx(W/2). Depth and warping still run at full resolution, so the result is supersampled rather than rendered small, and it costs the same time. Exists because 8K 360 output is 7680x7680, which no HEVC or H.264 level decodes |
+| `--output-width W` | source width | Deliver a smaller frame than the source implies: 360 becomes WxW, vr180 Wx(W/2). Depth and warping still run at full resolution, so the result is supersampled rather than rendered small, and it costs the same time. Exists because 8K 360 output is 7680x7680, which no HEVC or H.264 level decodes. Applies to stills too, where the ceiling is not the decoder but everything downstream of it — an 11904x11904 stereo JPEG is 40 MB and more than many viewers will open |
 | `--ambisonic-codec` | auto | How to write the soundfield back when `--yaw` rotates it: `libfdk_aac`, `aac`, `pcm_s24le`, `libopus`. auto takes the first your ffmpeg has, in that order |
 | `--spatial-audio` | off | Describe the audio as ambiX ambisonics (ACN/SN3D) by writing an `SA3D` box. The source audio must really be ambiX: 4, 9 or 16 channels. Spherical + stereoscopic are always written and need no flag |
 | `--split-baseline` | off | Warp both eyes by half the baseline in opposite directions. Same 3D, far less disocclusion per eye, and holes become monocular |
@@ -419,6 +419,31 @@ So the optimum moves with the scale of the structures in the shot, and the
 costs quality as well as time. A shot with fine detail and no long diagonals
 may well prefer 4.
 
+#### It also moves with the model, and now the default is 1
+
+Everything above was measured against Depth Anything V2, and stills defaulted
+to 3 on the strength of it. Both models that replaced V2 as defaults are hurt
+by tiling instead — same photo, same everything else:
+
+| | chair gap (→ 1.0) | wall wobble (→ 0%) | floor rms (→ 0%) | time |
+|---|---|---|---|---|
+| Depth Pro, no tiling | 1.49 | **53.1** | 30.1 | **11 s** |
+| Depth Pro, tiles 3 | 1.56 | 176.4 | **26.2** | 46 s |
+| V3 small, no tiling | **1.42** | **20.1** | **27.6** | **3 s** |
+| V3 small, tiles 3 | 1.57 | 23.4 | 34.2 | 13 s |
+
+Same mechanism as 4×4 being worse than 3×3 — a tile cannot see outside
+itself — but it bites much harder here, because what these two are good at is
+global. V3 fuses six views into one solution, and Depth Pro predicts *metric*
+depth, so tiles that disagree about absolute scale have nothing to reconcile
+them; 176% wall wobble is that disagreement, three times worse than the bowed
+wall the tiling was meant to help. Nor is there detail left to buy: resolving
+thin structure inside a whole face is precisely what Depth Pro does better
+than tiled V2 managed.
+
+`--depth-tiles 3` is still the right call with `--depth-backend
+depth-anything`, which is where it was measured.
+
 Cost is far gentler than N² suggests, because this box is encode-bound at 8K
 and much of the extra depth work hides behind the encoder:
 
@@ -669,6 +694,11 @@ achieves (0.243px).
 
 ### Which depth model?
 
+This section picks the best *V2* variant, and Base wins it. V2 is no longer
+the default either way — see [Choosing a depth model](#choosing-a-depth-model)
+below, which compares across model families. This still decides what
+`--depth-backend depth-anything` should be given.
+
 Measured on frames 45-47 of 8K footage, depth stage only, on an RTX 5070 Ti.
 There is no ground-truth depth, so this reports what *can* be measured: noise
 where the image is flat (depth should be flat there too), sharpness at real
@@ -703,6 +733,271 @@ model best — ONNX 266 wins that column while losing real detail. An earlier
 attempt at a one-number "edge alignment" score ranked Small above Base, the
 reverse of what the depth maps plainly show, because it rewarded Small's noise.
 The columns only mean something together.
+
+### Post-processing cannot fix the depth model
+
+No amount of pipeline work touched the artifacts below. The dead ends are
+written up at length because they were expensive, and because each one looked
+obviously right beforehand.
+
+The scoring harness lives in `experiments/` -- see [Depth scoring
+harness](#depth-scoring-harness). Each score compares the depth map against
+something the world guarantees rather than against anyone's judgement.
+
+#### The problem
+
+Five artifacts reported against `indoor.jpg`, all one fault: **the depth map
+is smooth where the world is sharp, and lumpy where the world is flat.**
+
+| observed | what the depth map does |
+|---|---|
+| kitchen wall trim vanishes in the right eye | thin feature overtaken by the near surface sweeping across it |
+| pillar trim far too wide | the same feature stretched instead, opposite ramp direction |
+| wall by the entrance door is not straight | disparity wanders 62% peak to peak down a flat wall |
+| chair is uncomfortable to look at | see-through gaps between the slats filled in at 2.5x too near |
+| mop on the vacuum reads wrong | pad and shell merged into one smooth dome |
+
+#### What does not work
+
+Measured against the chair-gap ratio, all giving the same 1.8x:
+
+- more tiles (`--depth-tiles`)
+- model input resolution at 518, 1036, 1456 and 1820
+- guided filtering (`--smooth` 8 and 24)
+- the Large depth model
+
+It is not a resolution problem. The model does not fail to *see* the gaps; it
+decides the chair back is solid. That is a learned prior, and no amount of
+pixels changes a semantic judgement.
+
+`--strength` cannot help either, and this is provable rather than measured:
+all three scores are ratios, so they are invariant under any uniform scaling
+of disparity. Turning the stereo down makes the errors less visible without
+making them smaller.
+
+#### What does
+
+Two depth estimates disagree where the model is guessing. Damping disparity
+*toward far* where they disagree -- one-sided, because these errors are
+one-sided: the gaps, the floor ridge and the wall's lower half all read too
+near.
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) |
+|---|---|---|---|
+| baseline | 1.76 | 103.2 | 40.7 |
+| any `--strength` | 1.76 | 103.2 | 40.7 |
+| damped, both sources, 0.6 | **1.29** | **49.6** | **35.5** |
+
+Two sources of disagreement, and they catch different things: a second pass
+with different tiling is better for the wall and floor, a second pass on the
+mirrored image is better for the chair gaps. Mirroring is the cleaner signal
+-- same settings, so disagreement is the model being unsure rather than a
+change of configuration.
+
+Damping past about 0.8 makes the wall worse again, and at 1.0 the chair gaps
+overshoot to 0.94: too far rather than too near.
+
+#### Open
+
+- Not yet judged in a headset. The scores are all scale-invariant ratios with
+  a physical law behind them, which is more than could be said for several
+  measurements in this investigation -- but the headset decides.
+- Costs a second depth pass.
+- One scene. Needs the tram footage and an outdoor still before it means
+  anything general.
+
+#### Result: the damping idea does not work
+
+Two formulations, both rejected.
+
+**Scale depth by confidence.** Improves the three ratios but takes 38% of the
+depth range with it, and the loss lands in the near field -- confidence is
+anti-correlated with depth at -0.59, so near surfaces are damped hardest,
+which is the opposite of where anyone wants to lose separation. It also turns
+every straight line to sawtooth in the right eye, and there is a reason it
+must: d(d*f) = f.dd + d.df, so multiplying by a spatially varying factor
+*injects* gradient wherever confidence varies. Confidence varies at object
+boundaries. It manufactures depth discontinuities at exactly the edges it is
+supposed to be protecting.
+
+**Limit the depth gradient where confidence is low.** No effect at all, at
+any floor or iteration count. The reason is worth keeping: these artifacts
+are not high-frequency depth noise. The chair's gaps are wrong across their
+whole extent and the wall is wrong over hundreds of pixels -- regional depth
+that is confidently incorrect. No local operator reaches that, which is also
+why guided filtering and smoothing did nothing.
+
+#### What did help, slightly
+
+Not damping at all, just using a better depth map. A pass on the mirrored
+image scores better than the normal pass on every artifact while keeping the
+depth range:
+
+| | chair gap | wall wobble | floor rms | depth span |
+|---|---|---|---|---|
+| normal pass | 1.76 | 103.2% | 40.7% | 9.26 |
+| mirrored pass | 1.71 | 74.0% | 39.7% | 9.13 |
+| per-pixel min of three passes | 1.71 | 58.7% | 43.4% | 8.40 |
+
+Ordinary test-time augmentation, in other words. It costs a second depth pass
+and gives maybe a quarter off the wall wobble for nothing. One image, so it
+could be luck; it would need the tram and an outdoor still before it meant
+anything.
+
+#### For anyone picking this up
+
+Three guards exist here because three reviews went out broken and were caught
+by eye rather than by score:
+
+- `depth_span`, because the other scores are ratios and could not see the
+  stereo collapsing to nothing.
+- `cli_defaults()`, because the library's defaults are not the CLI's and a
+  render with `gradient_limit` at its library default of 0.0 tears fine
+  structure into fragments.
+- Validate an edge measurement on the *left* eye first. It is the untouched
+  source, so a tracer reporting hundreds of pixels of bend there is measuring
+  itself. Two of the measurements in this investigation did exactly that.
+
+#### Depth Anything V3 is a different proposition
+
+V2 Large scored identically to V2 Base on the chair gaps, so the family
+looked like a dead end. V3 is not the same kind of model.
+
+Its ONNX signature gives it away:
+
+    input : pixel_values  [batch, num_images, 3, H, W]
+    output: predicted_depth, confidence, extrinsics, intrinsics
+
+Multi-view, and it emits its own confidence. Both matter here. A cubemap is
+six views sharing a centre, so the faces can go in together and come back as
+one consistent geometry instead of six independent guesses that then have to
+be reconciled -- which is where the 45-degree seam ridge comes from. And the
+confidence map is the thing this experiment spent a day failing to synthesise
+from disagreement between passes.
+
+Scored on indoor.jpg, all six faces in a single 1.8 s pass on CPU:
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) |
+|---|---|---|---|
+| V2 Base, current default | 1.76 | 103.2 | 40.7 |
+| V3 small | **1.42** | **20.2** | **28.1** |
+
+The wall is five times flatter and the floor is the best any configuration
+has produced.
+
+Caveats: `depth_span` is not comparable across models, because V3 returns
+metric depth and V2 returns relative inverse depth on an arbitrary scale --
+so these numbers say nothing about whether the stereo feels right. The 1/d
+conversion used here is a guess. And it has not been rendered or looked at in
+a headset, which is the check that caught every mistake in this file.
+
+The official `depth-anything/DA3*` repos are not transformers-loadable (no
+`model_type`), but `onnx-community/depth-anything-v3-{small,base,large}` are
+ready ONNX exports, and this project already has an ONNX backend -- so trying
+it properly is a smaller job than it looks. Note the input is 5-D with a
+num_images axis, which the current OnnxDepthBackend does not expect.
+
+#### Depth Pro and V3 are complementary, and this scorecard only sees one of them
+
+Scored on indoor.jpg, six faces, everything else identical:
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) | cost |
+|---|---|---|---|---|
+| V2 Base, current default | 1.76 | 103.2 | 40.7 | ~8 s GPU |
+| V3 small | **1.42** | **20.2** | **28.1** | 1.8 s CPU, 105 MB |
+| Depth Pro | 1.49 | 53.1 | 30.1 | 2 s GPU, 3.6 GB |
+
+By those numbers V3 wins outright. Judged in a headset the ranking was Depth
+Pro, then V3, then V2 -- and the reason is a gap in the scorecard, not noise.
+
+All three metrics measure large-scale geometry: see-through gaps, a vertical
+plane, a floor. None measures thin structure. Thin structure is exactly what
+Depth Pro is designed for, and exactly the artifact that started this whole
+investigation -- the metallic trim at the kitchen wall edge, which vanishes
+from the right eye. Depth Pro keeps it. V2 and V3 both replace it with a hard
+boundary.
+
+An attempt at a thin-structure metric failed and is not kept: measuring the
+brightness peak's prominence conflates "the trim is there" with "the trim is
+gone and the bare kitchen-to-stone edge is sharper", so it ranked the models
+backwards. The crop comparison is unambiguous and was believed instead.
+
+So: V3 for geometry, Depth Pro for edges, and the perceptual weight seems to
+sit with edges. Both loose ends — whether a larger V3 closes the gap, and
+whether feeding V3 more than the 518 px used here to match V2 helps — were
+then measured, and neither did. That is the next section.
+
+### Choosing a depth model
+
+The conclusion of the above: the ceiling is the model. Measured on the same
+photo, six cube faces, everything else identical.
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) | thin trim | cost |
+|---|---|---|---|---|---|
+| V2 Base (was the default) | 1.76 | 103.2 | 40.7 | lost | ~8 s GPU |
+| V3 small @518 | 1.42 | **20.2** | 28.1 | lost | 1.8 s CPU, 105 MB |
+| V3 small @1036 | **1.28** | 24.2 | 31.3 | lost | slower |
+| V3 base @518 | 1.45 | 27.0 | **26.5** | lost | 413 MB |
+| V3 large @518 | 1.66 | 26.3 | 28.6 | - | 1383 MB |
+| Depth Pro | 1.49 | 53.1 | 30.1 | **kept** | 2 s GPU, 3.6 GB |
+
+Two things decide it.
+
+**Capacity does not help.** V3 large scores *worse* than V3 small on the chair
+gaps. Paying 1.4 GB for the large export buys nothing.
+
+**They are complementary, and the scorecard only sees one axis.** All three
+scores measure large-scale geometry, where V3's multi-view design wins by a
+distance. None measures thin structure, which is Depth Pro's stated design
+goal -- and Depth Pro is the only model that keeps the metallic trim at the
+kitchen wall edge, the artifact that started the whole investigation. Judged
+in a headset the order was Depth Pro, then V3, then V2, which is the opposite
+of what the numbers say and is why the numbers are not the last word.
+
+Hence the split: V3 small for video, where 105 MB and CPU-speed inference
+matter and no single frame is studied for long; Depth Pro for stills, where
+the download is paid once and the picture is looked at closely.
+
+### DirectML, even on an NVIDIA card
+
+The video default is an ONNX graph, so which ONNX Runtime wheel is installed
+decides whether it uses the GPU at all. On Windows the answer is
+`onnxruntime-directml` regardless of vendor, which is not the obvious one.
+
+Measured on an RTX 5070 Ti, Depth Anything V3 small, six cubemap faces in one
+call — the exact shape the pipeline sends:
+
+| | six faces, raw inference | through the pipeline |
+|---|---|---|
+| CPU provider | 1.91 s | 1.87 s |
+| **DirectML** | **0.15 s** (12.7×) | **0.36 s** (5.2×) |
+
+The pipeline column is smaller because resizing six 1920 px faces down to 518
+and the results back up is CPU work either way, and it now dominates. That is
+where the next speedup is, if one is wanted.
+
+**The output is identical, which had to be checked rather than assumed.** Max
+absolute difference against the CPU provider: 0.00000. After the warp's own
+1/99-percentile normalisation, 3e-5. All three geometry scores agree to two
+decimals. Every number elsewhere in this document was measured on the CPU
+provider, so a fast provider that quietly computed something else would have
+invalidated the lot.
+
+**`onnxruntime-gpu` is the trap.** It is the obvious wheel for an NVIDIA card,
+and the published build carries no `sm_120` kernels — on any RTX 50 series
+card its CUDA provider fails with *no kernel image is available for execution
+on the device*
+([onnxruntime#26245](https://github.com/microsoft/onnxruntime/issues/26245)).
+That is the same failure mode as a mismatched torch build, one layer along,
+and the reason the installer runs a graph through the GPU rather than
+trusting `get_available_providers()`. Writing that check found its own bug
+first: `onnx` emits the newest IR version it knows, onnxruntime rejects
+anything above its maximum, and the probe failed against a runtime that was
+working perfectly.
+
+Torch is unaffected — it has proper `sm_120` kernels, so Depth Pro gets CUDA
+on the same machine. The two defaults use two runtimes and each takes its own
+route to the GPU.
 
 ### Fast mode for slow machines
 
@@ -926,6 +1221,43 @@ With no `reporter` it prints nothing at all.
 ```bash
 python -m pytest tests/ -v
 ```
+
+### Depth scoring harness
+
+`experiments/` holds the scoring code behind every depth number quoted above.
+It is not part of the tool and nothing imports it.
+
+`score.py` scores a depth map against three artifacts measured on
+`indoor.jpg`, each checked against a law the world guarantees rather than
+anyone's judgement: a flat floor's inverse depth follows sin(latitude), a flat
+wall's follows cos(elevation), and the gaps between chair slats must read as
+the wall they show. `damp.py` holds the rejected damping experiments and
+`cli_defaults()`, which any script rendering through the library needs.
+
+**`indoor.jpg` is not in the repository** and these scores cannot be
+reproduced without it. It is a 360 photo of a private house, which is not
+something to publish, and a 15 MB file is not something to put in every
+clone. The harness expects it beside the checkout, or wherever
+`STEREO360_INDOOR` points, and says so if it is missing.
+
+Substituting a different photo does not work. Every landmark is a pixel
+coordinate in that one 11904x5952 frame, so another image scores whatever
+happens to sit at those coordinates — meaningless numbers rather than wrong
+ones, which is the harder failure to notice. The numbers quoted throughout
+this document are therefore a record rather than something a reader can
+re-run; what transfers is the method, which is the three laws above.
+
+Three guards exist because three reviews went out broken and were caught by
+eye rather than by score:
+
+- `depth_span`, because the other scores are ratios and could not see the
+  stereo collapsing to nothing.
+- `cli_defaults()`, because the library's defaults are not the CLI's: a render
+  with `gradient_limit` at its library default of 0.0 tears fine structure
+  into fragments.
+- Validate an edge measurement on the *left* eye first. It is the untouched
+  source, so a tracer reporting hundreds of pixels of bend there is measuring
+  itself. Two measurements here did exactly that.
 
 
 ### Eliminating disocclusion (rather than filling it)

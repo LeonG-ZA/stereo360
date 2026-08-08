@@ -412,6 +412,77 @@ except Exception as exc:
     return @{ ok = ($LASTEXITCODE -eq 0); detail = $result.Trim() }
 }
 
+function Test-OnnxProvider {
+    <#
+        The same question as Test-CudaReally, asked of the other runtime.
+
+        The default video model is an ONNX graph, so "is there a GPU provider"
+        is only half of it -- onnxruntime-gpu on a Blackwell card *offers*
+        CUDAExecutionProvider and then fails on the first kernel, because the
+        published wheel carries no sm_120 code. Listing providers would report
+        success. So build a session on the best one and run it.
+
+        A tiny hand-written graph rather than the real depth model: this runs
+        before any model has been downloaded, and 105 MB is not a thing to
+        fetch just to answer a yes/no question.
+    #>
+    param([string] $Python)
+    $probe = @'
+import sys
+try:
+    import numpy as np, onnxruntime as ort
+    from onnx import TensorProto, helper
+
+    order = ["DmlExecutionProvider", "CUDAExecutionProvider",
+             "CoreMLExecutionProvider"]
+    have = ort.get_available_providers()
+    gpu = next((p for p in order if p in have), None)
+    if gpu is None:
+        print("FAIL no GPU provider installed; have %s" % ",".join(have))
+        sys.exit(1)
+
+    # One convolution: enough to need a real kernel for the device, which is
+    # precisely what a mismatched build does not have.
+    node = helper.make_node("Conv", ["x", "w"], ["y"], kernel_shape=[3, 3],
+                            pads=[1, 1, 1, 1])
+    graph = helper.make_graph(
+        [node], "probe",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4, 32, 32])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 8, 32, 32])],
+        [helper.make_tensor("w", TensorProto.FLOAT, [8, 4, 3, 3],
+                            np.full(8 * 4 * 3 * 3, 0.05, np.float32))])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    # Pin the IR version. `onnx` defaults to the newest it knows, and
+    # onnxruntime rejects anything above its own maximum -- the first run of
+    # this probe died on "Unsupported model IR version: 13, max supported
+    # 11" against a DirectML runtime that was working perfectly. A probe that
+    # fails when the thing it tests is fine is worse than no probe.
+    model.ir_version = 10
+
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    sess = ort.InferenceSession(model.SerializeToString(), so, providers=[gpu])
+    used = sess.get_providers()[0]
+    if used != gpu:
+        print("FAIL asked for %s, got %s" % (gpu, used)); sys.exit(1)
+
+    out = sess.run(None, {"x": np.ones((1, 4, 32, 32), np.float32)})[0]
+    if not np.isfinite(out).all():
+        print("FAIL %s produced non-finite output" % gpu); sys.exit(1)
+    print("OK onnxruntime %s ran on %s" % (ort.__version__, used))
+except Exception as exc:
+    print("FAIL %s: %s" % (type(exc).__name__, exc)); sys.exit(1)
+'@
+    $file = Join-Path $env:TEMP 'stereo360_onnx_probe.py'
+    Set-Content -Path $file -Value $probe -Encoding utf8
+    $result = ((Invoke-Native { & $Python $file 2>&1 }) | Out-String).Trim()
+    Remove-Item $file -ErrorAction SilentlyContinue
+    $ok = ($LASTEXITCODE -eq 0)
+    $provider = 'none'
+    if ($ok -and $result -match 'ran on (\w+)') { $provider = $Matches[1] }
+    return @{ ok = $ok; detail = $result; provider = $provider }
+}
+
 function Get-AppRelease {
     <#
         The latest published release, or the default branch if there is not
@@ -538,6 +609,26 @@ Write-Step "Installing the accelerator ($($acc.kind))"
 switch ($acc.kind) {
     'cuda' {
         Invoke-Pip $py @('install', '--no-warn-script-location', '--index-url', $acc.index, 'torch', 'torchvision') 'PyTorch'
+        # DirectML on an NVIDIA card, which looks wrong and is not.
+        #
+        # The two defaults use different runtimes: Depth Pro is torch, and gets
+        # CUDA from the line above. Depth Anything V3 is an ONNX graph, and the
+        # obvious wheel for it here -- onnxruntime-gpu -- ships no sm_120
+        # kernels, so on any RTX 50 series card its CUDA provider dies with
+        # "no kernel image is available for execution on the device". Same
+        # failure Test-CudaReally exists to catch for torch, one layer along.
+        #
+        # DirectML goes through Direct3D 12 and does not care whose GPU it is.
+        # Measured on an RTX 5070 Ti, six cubemap faces in one call: 1.91 s on
+        # the CPU provider against 0.15 s on DirectML, and bit-identical output
+        # -- max absolute difference 0.00000 against the CPU result, which
+        # matters because every score in findings.md was measured on CPU.
+        #
+        # From PyPI rather than $acc.index, which carries no ORT wheels.
+        # `onnx` comes along for Test-OnnxProvider, which builds a throwaway
+        # graph to check the GPU can actually execute one.
+        Invoke-Pip $py @('install', '--no-warn-script-location',
+                         'onnxruntime-directml', 'onnx') 'ONNX Runtime (DirectML)'
     }
     'directml' {
         # onnx and onnxscript are for the *exporter*, not for running: the
@@ -580,7 +671,22 @@ if ($acc.kind -eq 'cuda') {
         }
     }
 } else {
-    Write-Detail 'nothing to verify for this accelerator'
+    Write-Detail 'no CUDA build to verify for this accelerator'
+}
+
+# Both GPU paths now install an ONNX runtime, and an installed provider is not
+# a working one -- that is the whole lesson of the CUDA check above, and the
+# reason onnxruntime-gpu is not used here. So run the graph.
+if ($acc.kind -ne 'cpu') {
+    $ort = Test-OnnxProvider $py
+    if ($ort.ok) { Write-Good $ort.detail }
+    else {
+        Write-Warn 'the GPU could not run an ONNX graph:'
+        Write-Warn $ort.detail
+        Write-Warn 'video depth will run on the processor. Everything works,'
+        Write-Warn 'it is just slower.'
+    }
+    Write-Decision 'onnx_provider' $ort.provider
 }
 Write-Decision 'accelerator_final' $acc.kind
 

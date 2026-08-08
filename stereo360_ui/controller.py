@@ -51,6 +51,7 @@ class Controller(QObject):
         self._runner = Runner(self)
         self._runner.progressed.connect(self._on_progress)
         self._runner.logged.connect(self._on_log)
+        self._runner.staged.connect(self._on_stage)
         self._runner.finished.connect(self._on_finished)
 
         self._busy = False
@@ -457,8 +458,33 @@ class Controller(QObject):
         bits.append(f"{_fmt_duration(elapsed)} elapsed")
         self._set_status(head, " · ".join(bits))
 
+    @Slot(str)
+    def reportPreviewFailure(self, source: str) -> None:
+        """Say so when the panel cannot show a picture that does exist.
+
+        The file is written and correct; only the on-screen copy failed. That
+        distinction matters enough to spell out, because "no picture" reads as
+        "no output" and the natural next move is to run the whole thing again.
+        """
+        path = source.split("?", 1)[0]
+        self.logged.emit(
+            "warning",
+            f"Could not display {path} in the panel. The file itself is "
+            f"written and fine -- open it in a viewer or a headset.")
+
     def _on_log(self, level: str, text: str) -> None:
         self.logged.emit(level, text)
+
+    def _on_stage(self, text: str) -> None:
+        """Show what is happening before the first frame exists.
+
+        Only until then: the first progress event replaces this, so nothing
+        has to decide when preparation ended. The status line keeps whichever
+        of "Starting..." or "Rendering preview..." was already set, because
+        that is still true -- what was missing was the detail underneath.
+        """
+        if self._busy:
+            self._set_status(self._status, text)
 
     def _on_finished(self, ok: bool, cancelled: bool, output: str) -> None:
         self._set_busy(False)

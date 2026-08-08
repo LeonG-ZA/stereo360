@@ -154,3 +154,69 @@ def test_probe_backends_cli_emits_json():
     data = json.loads(proc.stdout)
     assert {e["name"] for e in data["backends"]} == set(
         __import__("stereo360.backends", fromlist=["x"]).BACKENDS)
+
+
+# ------------------------------------------- the per-job-kind default backend
+
+
+def test_the_default_backend_depends_on_the_kind_of_job():
+    """A video wants a model small and fast enough to run thousands of times;
+    a still wants the best single frame available. One default cannot be both,
+    which is why this is resolved from the input rather than from a constant."""
+    from stereo360 import backends
+
+    assert backends.resolve_depth_backend(None, is_image=False) \
+        == backends.VIDEO_BACKEND
+    assert backends.resolve_depth_backend(None, is_image=True) \
+        == backends.PHOTO_BACKEND
+
+
+def test_an_explicit_backend_survives_the_default():
+    """The None sentinel exists precisely so that asking for the video default
+    on a photo is distinguishable from not asking. With a real default the two
+    are the same string afterwards and the explicit choice is lost."""
+    from stereo360 import backends
+
+    for name in backends.BACKENDS:
+        assert backends.resolve_depth_backend(name, is_image=True) == name
+        assert backends.resolve_depth_backend(name, is_image=False) == name
+
+
+def test_an_unavailable_default_falls_back_rather_than_failing(monkeypatch):
+    """These two defaults carry dependencies the others do not -- onnxruntime
+    for one, 3.6 GB of weights for the other. A machine without them should
+    still convert something."""
+    from stereo360 import backends
+
+    def broken(*a, **kw):
+        return [backends.Availability(n, False, "nope")
+                for n in backends.BACKENDS]
+
+    monkeypatch.setattr(backends, "probe_backends", broken)
+    rec = []
+
+    class Rec(backends.Reporter):
+        def warning(self, msg, **kw):
+            rec.append(msg)
+
+    assert backends.resolve_depth_backend(None, True, Rec()) == "auto"
+    assert rec and "unavailable" in rec[0]
+
+
+def test_the_defaults_are_real_backends():
+    from stereo360 import backends
+
+    assert backends.VIDEO_BACKEND in backends.BACKENDS
+    assert backends.PHOTO_BACKEND in backends.BACKENDS
+
+
+def test_cli_choices_match_backends():
+    """The parser spells the list out so `--help` stays import-free. That is
+    only safe while something checks the copy against the original."""
+    from stereo360 import backends, cli
+
+    action = next(a for a in cli.build_parser()._actions
+                  if a.dest == "depth_backend")
+    assert list(action.choices) == list(backends.BACKENDS)
+    # None, not "auto": the sentinel is what makes the per-job default work.
+    assert action.default is None
