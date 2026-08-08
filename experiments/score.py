@@ -76,12 +76,30 @@ def floor_rms(disp):
     return float(np.sqrt(np.mean(err ** 2)))
 
 
+def depth_span(disp):
+    """1st-99th percentile spread of the depth map.
+
+    The one score here that is NOT a ratio, and it exists because the other
+    three are. Being scale-invariant made them immune to --strength, which
+    was the point -- but it also made them blind to the stereo collapsing
+    altogether. A map multiplied by 0.001 scores identically on all three.
+
+    That is not hypothetical: a damped render went out for review with the
+    depth backend accidentally omitted, so it was a passthrough with no
+    stereo at all, and the scorecard had nothing to say about it. Anything
+    that shrinks this is taking depth away, however good the ratios look.
+    """
+    lo, hi = np.percentile(disp[::16, ::16], [1, 99])
+    return float(hi - lo)
+
+
 def score(disp, rgb=None):
     if rgb is None:
         rgb = cv2.imread(INDOOR)
     return {"chair_gap": chair_gap(disp, rgb),
             "wall_wobble": wall_wobble(disp),
-            "floor_rms": floor_rms(disp)}
+            "floor_rms": floor_rms(disp),
+            "depth_span": depth_span(disp)}
 
 
 def report(name, s, base=None):
@@ -93,8 +111,11 @@ def report(name, s, base=None):
         arrow = "  " if abs(delta) < 1e-9 else (" v" if delta < 0 else " ^")
         return f"{v:{fmt}}{arrow}"
     print(f"  {name:<34}{d('chair_gap','>9.2f')}{d('wall_wobble','>12.1f')}"
-          f"{d('floor_rms','>11.1f')}")
+          f"{d('floor_rms','>11.1f')}{d('depth_span','>12.2f')}")
 
 
-HEADER = (f"  {'':34}{'chair gap':>9}{'wall wobble':>12}{'floor rms':>11}\n"
-          f"  {'':34}{'(-> 1.0)':>9}{'(-> 0%)':>12}{'(-> 0%)':>11}")
+HEADER = (f"  {'':34}{'chair gap':>9}{'wall wobble':>12}{'floor rms':>11}"
+          f"{'depth span':>12}
+"
+          f"  {'':34}{'(-> 1.0)':>9}{'(-> 0%)':>12}{'(-> 0%)':>11}"
+          f"{'(keep!)':>12}")
