@@ -386,3 +386,162 @@ def test_the_probe_passes_where_a_gpu_provider_is_installed():
     assert proc.returncode == 0, (
         f"a GPU provider is installed ({sorted(gpu)}) but the probe says:\n"
         f"{proc.stdout}{proc.stderr}")
+
+
+# ------------------------------------------------------------- upgrading
+
+
+def run_ps(script: str, tmp_path: Path) -> str:
+    """Run PowerShell from a file, and return its stdout.
+
+    From a file because these scripts carry Windows paths and PowerShell
+    quoting, and passing them through -Command means escaping the same
+    backslashes for Python, for the shell, and for PowerShell in turn. Two
+    tests were written that way first and both failed on their own quoting
+    rather than on anything they were testing.
+    """
+    f = tmp_path / "probe.ps1"
+    f.write_text(script, encoding="ascii")
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+         "-File", str(f)],
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout
+
+
+#: Lifts Expand-Zip out of the shipped .bat and defines it. The bug was in that
+#: function, so a reimplementation here would test the wrong code.
+_LOAD_EXPAND_ZIP = """
+$ErrorActionPreference = 'Stop'
+$text = Get-Content -Raw -LiteralPath $env:STEREO360_INSTALLER
+$start = $text.IndexOf('function Expand-Zip')
+$end = $text.IndexOf('function Get-ComputeCapability')
+Invoke-Expression $text.Substring($start, $end - $start)
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+"""
+
+
+def test_extracting_over_an_existing_install_works(tmp_path, monkeypatch):
+    """Running the installer twice used to be impossible.
+
+    `ZipFile::ExtractToDirectory` throws on the first file that already
+    exists, so a second run died at the first step that writes anything --
+    "Installing Python" -- with a raw .NET exception naming python.exe. There
+    was no upgrade path at all; the only route to a new version was uninstall
+    and reinstall, re-downloading 2.5 GB of PyTorch to replace some .py files.
+    """
+    monkeypatch.setenv("STEREO360_INSTALLER", str(INSTALLER))
+    t = tmp_path.as_posix()
+    out = run_ps(_LOAD_EXPAND_ZIP + f"""
+$src = '{t}/src'; $null = New-Item -ItemType Directory $src
+Set-Content "$src/python.exe" 'v1' -Encoding ascii
+$null = New-Item -ItemType Directory "$src/lib"
+Set-Content "$src/lib/core.pyd" 'x' -Encoding ascii
+$zip = '{t}/a.zip'
+[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $zip)
+
+$dest = '{t}/dest'
+Expand-Zip -Path $zip -Destination $dest
+# What pip put there, which the zip knows nothing about.
+$null = New-Item -ItemType Directory "$dest/site-packages"
+Set-Content "$dest/site-packages/torch.txt" 'big' -Encoding ascii
+
+Set-Content "$src/python.exe" 'v2' -Encoding ascii
+Remove-Item $zip
+[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $zip)
+Expand-Zip -Path $zip -Destination $dest
+
+Write-Output ('exe=' + (Get-Content "$dest/python.exe"))
+Write-Output ('kept=' + (Test-Path "$dest/site-packages/torch.txt"))
+Write-Output ('nested=' + (Test-Path "$dest/lib/core.pyd"))
+""", tmp_path)
+    assert "exe=v2" in out, "the second extract did not overwrite"
+    assert "kept=True" in out, \
+        "site-packages was destroyed -- that is a 2.5 GB re-download"
+    assert "nested=True" in out
+
+
+def test_a_zip_cannot_escape_the_destination(tmp_path, monkeypatch):
+    """Extracting entry by entry means doing the path check ourselves, which
+    ExtractToDirectory did for us."""
+    monkeypatch.setenv("STEREO360_INSTALLER", str(INSTALLER))
+    t = tmp_path.as_posix()
+    out = run_ps(_LOAD_EXPAND_ZIP + f"""
+$zip = '{t}/evil.zip'
+$fs = [System.IO.File]::Open($zip, 'Create')
+$archive = New-Object System.IO.Compression.ZipArchive($fs, 'Create')
+$entry = $archive.CreateEntry('../escaped.txt')
+$w = New-Object System.IO.StreamWriter($entry.Open())
+$w.Write('nope'); $w.Dispose(); $archive.Dispose(); $fs.Dispose()
+
+try {{
+    Expand-Zip -Path $zip -Destination '{t}/out'
+    Write-Output 'ESCAPED'
+}} catch {{ Write-Output 'REFUSED' }}
+""", tmp_path)
+    assert "REFUSED" in out, out
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+
+def test_a_fresh_folder_is_reported_as_a_fresh_install(tmp_path):
+    got = decisions(InstallDir=str(tmp_path / "nothing-here"))
+    assert got["existing_install"] == "none"
+
+
+def test_an_existing_install_is_recognised(tmp_path):
+    """So the run can say what it is replacing instead of looking like a
+    first-time install that mysteriously skips most of its work."""
+    (tmp_path / "install-manifest.json").write_text(
+        '{"app":"stereo360","installed":"2026-01-01T00:00:00",'
+        '"accelerator":"cuda"}', encoding="utf-8")
+    got = decisions(InstallDir=str(tmp_path))
+    assert got["existing_install"] != "none"
+
+
+def test_a_half_written_install_is_recognised_as_partial(tmp_path):
+    """An interpreter with no manifest beside it is a run that died partway.
+    Worth naming, because it is the case where the upgrade cannot take any of
+    the shortcuts."""
+    (tmp_path / "python").mkdir()
+    (tmp_path / "python" / "python.exe").write_text("", encoding="ascii")
+    got = decisions(InstallDir=str(tmp_path))
+    assert got["existing_install"] == "partial"
+
+
+def test_an_upgrade_keeps_python_and_ffmpeg_when_they_are_good():
+    """The two largest downloads after PyTorch. Kept on the strength of what
+    they report when run, not on the file being present -- an interrupted
+    download leaves a plausible-looking exe behind."""
+    text = payload()
+    assert "already installed here; keeping it and its packages" in text
+    assert "already installed here; keeping it" in text
+    # Both gates ask the binary, rather than testing for the path alone.
+    assert "import sys; print('%d.%d.%d' % sys.version_info[:3])" in text
+    assert r"ffmpeg version (\S+)" in text
+
+
+def test_the_warm_up_caches_the_model_the_app_actually_defaults_to():
+    """It cached Depth Anything V2 Base for a while after the defaults moved
+    to V3 -- 400 MB per install for a model nothing would load, and the one
+    that would was left to download on first use.
+
+    Asserted as a coupling, not a name: the script imports DEFAULT_VARIANT
+    from the app rather than spelling a model out, so the two cannot drift
+    again."""
+    text = payload()
+    assert "Depth-Anything-V2" not in text, "still caching the old default"
+    assert "from stereo360.depth.depth_anything_v3 import DEFAULT_VARIANT" in text
+    assert "download(DEFAULT_VARIANT)" in text
+
+
+def test_depth_pro_is_not_pre_fetched_but_is_announced():
+    """3.6 GB is too much to put on someone who may only convert video. That
+    makes the first still conversion slow, so the install says so."""
+    text = payload()
+    assert "3.6 GB" in text
+    warm = text[text.index("Write-Step 'Fetching the depth model'"):]
+    warm = warm[:warm.index("Write-Step 'Creating shortcuts'")]
+    assert "DepthPro" not in warm, "pre-fetching 3.6 GB on every install"
