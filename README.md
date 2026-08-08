@@ -133,6 +133,11 @@ everything pip installed under them — PyTorch included — stays where it is.
 What gets replaced is the app itself, which is a few megabytes. **Your
 settings and downloaded models are untouched.**
 
+`stereo360 --version` says what you have, and Settings > Apps shows the same
+number. One caveat for the first release: **v1.0.0 reports itself as `0.1.0`**,
+because the version constant was not kept in step with the tag until v1.0.1.
+If you see `0.1.0`, you have v1.0.0.
+
 There is no update check. The app will not tell you a new version exists, so
 [watch the releases page](https://github.com/LeonG-ZA/stereo360/releases) if
 you want to know.

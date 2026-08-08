@@ -541,6 +541,11 @@ function Get-ExistingInstall {
     if (Test-Path $Key) {
         $version = (Get-ItemProperty -Path $Key -ErrorAction SilentlyContinue).DisplayVersion
     }
+    # The registry holds the release tag this installer downloaded, which is
+    # the right answer and is why nothing needs the 0.1.0 -> 1.0.0 mapping
+    # here: the only build whose package says 0.1.0 is the one this recorded
+    # as v1.0.0. Newer installs also record it in the manifest below, read
+    # back in preference so a cleared registry key is not fatal.
     if (-not (Test-Path $manifest)) {
         # A folder with an interpreter in it but no manifest is a half-written
         # install -- an earlier run that failed, or one interrupted. Worth
@@ -555,6 +560,11 @@ function Get-ExistingInstall {
     } catch {
         return @{ version = $version; installed = $null; partial = $true }
     }
+    if ($m.appVersion) { $version = $m.appVersion }
+    # Installs before v1.0.1 have no appVersion and fall back to the registry,
+    # where the value is the git tag -- 'v1.0.0'. Strip it so one message does
+    # not read 'v1.0.0' on an old install and '1.0.1' on a new one.
+    if ($version) { $version = $version -replace '^v', '' }
     return @{ version = $version; installed = $m.installed
               accelerator = $m.accelerator; partial = $false }
 }
@@ -963,8 +973,18 @@ Write-Step 'Writing the uninstaller'
 # Recorded, not inferred. The uninstaller removes what this file says it
 # created and nothing else, so a file dropped in the folder later, or a Start
 # Menu entry belonging to something else, is never in scope.
+# Asked of the app rather than taken from $release.name, which is the GitHub
+# tag and can be 'main branch (no published release yet)'. From v1.0.1 the two
+# agree by rule; where they do not, what is actually installed is the honest
+# answer, and it is what a later run compares against.
+$appVersion = (Invoke-Native {
+    & $py -c "import stereo360; print(stereo360.released_as())"
+} | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $appVersion) { $appVersion = $release.name }
+
 $manifest = [ordered]@{
     app          = 'stereo360'
+    appVersion   = $appVersion
     installed    = (Get-Date).ToString('s')
     installDir   = $InstallDir
     accelerator  = $acc.kind
@@ -1237,7 +1257,10 @@ $uninstaller = Join-Path $InstallDir 'Uninstall stereo360.bat'
 New-Item -Path $ArpKey -Force | Out-Null
 $props = [ordered]@{
     DisplayName          = 'stereo360'
-    DisplayVersion       = "$($release.name)"
+    # What is installed, not what was downloaded. Settings > Apps shows this,
+    # and it should agree with `stereo360 --version` rather than with a tag
+    # that may read 'main branch (no published release yet)'.
+    DisplayVersion       = "$appVersion"
     Publisher            = 'stereo360'
     InstallLocation      = $InstallDir
     UninstallString      = "`"$uninstaller`""

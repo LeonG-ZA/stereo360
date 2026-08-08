@@ -545,3 +545,22 @@ def test_depth_pro_is_not_pre_fetched_but_is_announced():
     warm = text[text.index("Write-Step 'Fetching the depth model'"):]
     warm = warm[:warm.index("Write-Step 'Creating shortcuts'")]
     assert "DepthPro" not in warm, "pre-fetching 3.6 GB on every install"
+
+
+def test_the_manifest_records_what_is_installed_not_what_was_downloaded():
+    """`$release.name` is the GitHub tag, and it can read "main branch (no
+    published release yet)". The app's own version is the honest answer, and
+    it is what a later run compares against to say what it is replacing."""
+    text = payload()
+    assert "import stereo360; print(stereo360.released_as())" in text, \
+        "the version must be asked of the app"
+    assert "appVersion   = $appVersion" in text, "not recorded in the manifest"
+    assert 'DisplayVersion       = "$appVersion"' in text, \
+        "Settings > Apps should agree with `stereo360 --version`"
+
+
+def test_an_existing_install_is_read_from_the_manifest_first():
+    """The registry key can be cleared by hand; the manifest sits beside the
+    install it describes."""
+    text = payload()
+    assert "if ($m.appVersion) { $version = $m.appVersion }" in text

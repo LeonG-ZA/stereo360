@@ -56,6 +56,7 @@ Options:
 | `--preview-frame N` | off | Render source frame N as one image and stop — see below |
 | `--preview-width W` | 2048 | Cap the preview's width; 0 keeps full resolution |
 | `--progress-json` | off | NDJSON events on stdout instead of text, for a parent process — see below |
+| `--version` | — | Print the version and exit. Matches the git tag from v1.0.1 on; v1.0.0 reports `0.1.0`, because the constant was not maintained until then |
 
 ### Quality guide for VR output
 
