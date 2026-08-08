@@ -117,3 +117,42 @@ by eye rather than by score:
 - Validate an edge measurement on the *left* eye first. It is the untouched
   source, so a tracer reporting hundreds of pixels of bend there is measuring
   itself. Two of the measurements in this investigation did exactly that.
+
+## Depth Anything V3 is a different proposition
+
+V2 Large scored identically to V2 Base on the chair gaps, so the family
+looked like a dead end. V3 is not the same kind of model.
+
+Its ONNX signature gives it away:
+
+    input : pixel_values  [batch, num_images, 3, H, W]
+    output: predicted_depth, confidence, extrinsics, intrinsics
+
+Multi-view, and it emits its own confidence. Both matter here. A cubemap is
+six views sharing a centre, so the faces can go in together and come back as
+one consistent geometry instead of six independent guesses that then have to
+be reconciled -- which is where the 45-degree seam ridge comes from. And the
+confidence map is the thing this experiment spent a day failing to synthesise
+from disagreement between passes.
+
+Scored on indoor.jpg, all six faces in a single 1.8 s pass on CPU:
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) |
+|---|---|---|---|
+| V2 Base, current default | 1.76 | 103.2 | 40.7 |
+| V3 small | **1.42** | **20.2** | **28.1** |
+
+The wall is five times flatter and the floor is the best any configuration
+has produced.
+
+Caveats: `depth_span` is not comparable across models, because V3 returns
+metric depth and V2 returns relative inverse depth on an arbitrary scale --
+so these numbers say nothing about whether the stereo feels right. The 1/d
+conversion used here is a guess. And it has not been rendered or looked at in
+a headset, which is the check that caught every mistake in this file.
+
+The official `depth-anything/DA3*` repos are not transformers-loadable (no
+`model_type`), but `onnx-community/depth-anything-v3-{small,base,large}` are
+ready ONNX exports, and this project already has an ONNX backend -- so trying
+it properly is a smaller job than it looks. Note the input is 5-D with a
+num_images axis, which the current OnnxDepthBackend does not expect.
