@@ -59,7 +59,11 @@ ApplicationWindow {
     property bool faceSizeAuto: true
     property int faceSize: 1920
     property int depthTiles: 1
-    property string depthBackend: "auto"
+    // Empty means "let the CLI choose for this kind of job" -- V3 for video,
+    // Depth Pro for a still. Same sentinel as the encoder's "from preset":
+    // the flag is simply not passed, so the two stay in step by construction
+    // rather than by the UI knowing what the defaults are.
+    property string depthBackend: ""
     property string depthModel: "base"
     property string onnxModel: ""
     property string device: "auto"
@@ -360,6 +364,10 @@ ApplicationWindow {
         return e === null || e.available     // unknown until probed: allow
     }
     function backendDetail(name) {
+        if (name === "")
+            return photoMode
+                ? "Depth Pro: the sharpest thin structures measured. Downloads 3.6 GB on first use."
+                : "Depth Anything V3: the flattest walls and floors measured, and fast enough on a CPU. Downloads 105 MB on first use."
         var e = backendEntry(name)
         return e === null ? "" : e.detail
     }
@@ -373,10 +381,23 @@ ApplicationWindow {
           + " frames"
         : ""
 
-    readonly property var backendKeys: ["auto", "depth-anything",
-                                        "video-depth-anything", "onnx"]
+    // The recommended entry first and unlabelled by model name, because which
+    // model it means depends on the job. The rest keep their CLI names: the
+    // dropdown is also how someone works out what to pass on the command line.
+    readonly property var backendChoices: [
+        {key: "", text: "Best for this job (recommended)"},
+        {key: "depth-anything-v3", text: "depth-anything-v3"},
+        {key: "depth-pro", text: "depth-pro"},
+        {key: "auto", text: "auto — fastest runtime here"},
+        {key: "depth-anything", text: "depth-anything"},
+        {key: "video-depth-anything", text: "video-depth-anything"},
+        {key: "onnx", text: "onnx"},
+    ]
     function backendIndex(key) {
-        return Math.max(0, backendKeys.indexOf(key))
+        for (var i = 0; i < backendChoices.length; ++i)
+            if (backendChoices[i].key === key)
+                return i
+        return 0
     }
 
     // Built from the probe: "from preset" first, then whatever this machine
@@ -413,6 +434,10 @@ ApplicationWindow {
     readonly property var modelChoices: depthBackend === "video-depth-anything"
         ? [{key: "small", label: "Small — fastest"},
            {key: "large", label: "Large — largest, slowest"}]
+        : depthBackend === "depth-anything-v3"
+        ? [{key: "small", label: "Small — the default, and the best measured"},
+           {key: "base",  label: "Base — flatter floors, four times the size"},
+           {key: "large", label: "Large — worse on chair gaps; here for completeness"}]
         : [{key: "small", label: "Small — fastest"},
            {key: "base",  label: "Base — best quality per second"},
            {key: "large", label: "Large — largest, slowest"}]
@@ -431,6 +456,11 @@ ApplicationWindow {
     // directions are checked explicitly instead, which is order-independent.
     function _clampModel() {
         if (depthBackend === "video-depth-anything" && depthModel === "base")
+            depthModel = "small"
+        // V3's best variant is Small, not Base. Without this, selecting the V3
+        // backend while the shared Base selection is in force would silently
+        // fetch 413 MB and render the variant that measured worse.
+        if (depthBackend === "depth-anything-v3" && depthModel === "base")
             depthModel = "small"
     }
     onDepthBackendChanged: _clampModel()
@@ -979,12 +1009,14 @@ ApplicationWindow {
                                 ComboBox {
                                     id: backendBox
                                     Layout.fillWidth: true
-                                    model: ["auto", "depth-anything",
-                                            "video-depth-anything", "onnx"]
-                                    currentIndex: 0
+                                    textRole: "text"
+                                    valueRole: "key"
+                                    model: win.backendChoices
+                                    currentIndex: win.backendIndex(
+                                        win.depthBackend)
                                     onActivated: {
-                                        if (win.backendUsable(currentText))
-                                            win.depthBackend = currentText
+                                        if (win.backendUsable(currentValue))
+                                            win.depthBackend = currentValue
                                         else
                                             currentIndex = win.backendIndex(
                                                 win.depthBackend)
@@ -996,20 +1028,23 @@ ApplicationWindow {
                                     // be chosen just moves the failure later.
                                     delegate: ItemDelegate {
                                         width: backendBox.width
-                                        enabled: win.backendUsable(modelData)
+                                        enabled: win.backendUsable(modelData.key)
                                         highlighted:
                                             backendBox.highlightedIndex === index
                                         contentItem: ColumnLayout {
                                             spacing: 0
                                             Text {
-                                                text: modelData
+                                                text: modelData.text
                                                 color: enabled ? Theme.text
                                                                : Theme.textFaint
                                                 font.pixelSize: Theme.fontM
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
                                             }
                                             Text {
                                                 visible: !enabled
-                                                text: win.backendDetail(modelData)
+                                                text: win.backendDetail(
+                                                    modelData.key)
                                                 color: Theme.warn
                                                 font.pixelSize: Theme.fontS
                                                 elide: Text.ElideRight
@@ -1027,8 +1062,20 @@ ApplicationWindow {
                             // is the only configuration that reads it.
                             Row2 {
                                 label: "Model"
+                                // Hidden for the backends that have no variant
+                                // worth choosing: ONNX takes a graph path
+                                // instead, Depth Pro ships one checkpoint, and
+                                // the recommended entry picks its own.
                                 visible: win.depthBackend !== "onnx"
-                                hint: win.depthModel === "base"
+                                         && win.depthBackend !== "depth-pro"
+                                         && win.depthBackend !== ""
+                                hint: win.depthBackend === "depth-anything-v3"
+                                      ? (win.depthModel === "small"
+                                         ? "The default, and capacity does not help here: Large measured worse on the chair gaps for 13× the download. 105 MB."
+                                         : win.depthModel === "base"
+                                           ? "Marginally flatter floors than Small, four times the download, and no better anywhere else. 413 MB."
+                                           : "Measured worse than Small on the chair gaps. Offered for completeness. 1.4 GB.")
+                                      : win.depthModel === "base"
                                       ? "The default. Measured best on 8K footage: lowest depth noise and 40% less flicker than Small. Downloads ~400 MB on first use."
                                       : win.depthModel === "large"
                                         ? "Twice Base's extra cost and measured no better on 8K footage. Downloads ~1.3 GB on first use."

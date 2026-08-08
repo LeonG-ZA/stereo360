@@ -538,6 +538,14 @@ Write-Step "Installing the accelerator ($($acc.kind))"
 switch ($acc.kind) {
     'cuda' {
         Invoke-Pip $py @('install', '--no-warn-script-location', '--index-url', $acc.index, 'torch', 'torchvision') 'PyTorch'
+        # onnxruntime-gpu, not plain onnxruntime: the video default is an ONNX
+        # model, so a CUDA machine with no ONNX runtime at all would fall back
+        # to the old torch model and never see it. The -gpu wheel is a superset
+        # -- it carries the CPU provider too, so if the CUDA provider fails to
+        # load the backend still runs rather than the install being wasted.
+        # Installed from PyPI rather than $acc.index, which has no ORT wheels.
+        Invoke-Pip $py @('install', '--no-warn-script-location',
+                         'onnxruntime-gpu') 'ONNX Runtime (CUDA)'
     }
     'directml' {
         # onnx and onnxscript are for the *exporter*, not for running: the

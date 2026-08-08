@@ -17,6 +17,7 @@ pytest.importorskip("PySide6", reason="UI extra not installed")
 
 from PySide6.QtCore import QCoreApplication  # noqa: E402
 
+from stereo360 import backends  # noqa: E402
 from stereo360_ui import options  # noqa: E402
 from stereo360_ui.controller import Controller  # noqa: E402
 from stereo360_ui.runner import Runner  # noqa: E402
@@ -323,9 +324,9 @@ def test_controller_probe_of_a_missing_file_stays_empty(qapp, tmp_path: Path):
 
 
 def test_base_model_is_the_default_and_emits_nothing():
-    assert "--depth-model" not in options.build_argv(dict(BASE))
-    assert "--depth-model" not in options.build_argv(
-        dict(BASE, depthModel="base"))
+    v2 = dict(BASE, depthBackend="depth-anything")
+    assert "--depth-model" not in options.build_argv(v2)
+    assert "--depth-model" not in options.build_argv(dict(v2, depthModel="base"))
 
 
 def test_choosing_small_actually_gets_small():
@@ -335,9 +336,38 @@ def test_choosing_small_actually_gets_small():
     Base silently -- the dropdown saying one thing and the run doing another,
     which is the exact bug class already fixed once for the temporal backend.
     """
-    argv = options.build_argv(dict(BASE, depthModel="small"))
+    argv = options.build_argv(dict(BASE, depthBackend="depth-anything",
+                                   depthModel="small"))
     assert (argv[argv.index("--depth-model") + 1]
             == "depth-anything/Depth-Anything-V2-Small-hf")
+
+
+def test_the_recommended_backend_names_no_model_at_all():
+    """The whole point of the empty sentinel: the CLI picks both the backend
+    and its model from the kind of job, so naming either here would pin one
+    half of a pair and let them drift."""
+    argv = options.build_argv(dict(BASE, depthModel="large"))
+    assert "--depth-backend" not in argv
+    assert "--depth-model" not in argv
+
+
+def test_depth_pro_takes_no_model():
+    """It ships one checkpoint. Passing the shared Base/Large selection
+    through would name a model that does not exist."""
+    argv = options.build_argv(dict(BASE, depthBackend="depth-pro",
+                                   depthModel="large"))
+    assert argv[argv.index("--depth-backend") + 1] == "depth-pro"
+    assert "--depth-model" not in argv
+
+
+def test_v3_defaults_to_small_not_base():
+    """V2 measured best at Base and V3 at Small, so a single shared default
+    is wrong for one of them. Small is what V3 omits the flag for; Base is a
+    413 MB download and has to be asked for."""
+    v3 = dict(BASE, depthBackend="depth-anything-v3")
+    assert "--depth-model" not in options.build_argv(dict(v3, depthModel="small"))
+    argv = options.build_argv(dict(v3, depthModel="base"))
+    assert argv[argv.index("--depth-model") + 1] == "base"
 
 
 def test_the_ui_and_the_cli_agree_on_which_model_is_default():
@@ -347,6 +377,18 @@ def test_the_ui_and_the_cli_agree_on_which_model_is_default():
 
     assert (options.DEPTH_MODELS[options.DEFAULT_DEPTH_MODEL]["depth-anything"]
             == DEFAULT_MODEL)
+
+
+def test_the_ui_and_the_cli_agree_on_every_backends_default_model():
+    """Same guard as the V2 one above, once per backend that has a default.
+    `build_argv` omits the flag for these, so a drift means the UI silently
+    runs a model nobody chose."""
+    from stereo360.depth import depth_anything, depth_anything_v3
+
+    assert options.DEFAULT_MODEL_FOR["depth-anything-v3"] \
+        == depth_anything_v3.DEFAULT_VARIANT
+    assert (options.DEPTH_MODELS[options.DEFAULT_MODEL_FOR["depth-anything"]]
+            ["depth-anything"] == depth_anything.DEFAULT_MODEL)
 
 
 def test_every_model_choice_maps_explicitly():
@@ -424,7 +466,8 @@ def test_model_rows_follow_the_backend(backend, model_row, onnx_row):
 
 def test_large_model_maps_to_its_hub_id():
     """Base is the default and so emits nothing; Large has to be asked for."""
-    argv = options.build_argv(dict(BASE, depthModel="large"))
+    argv = options.build_argv(dict(BASE, depthBackend="depth-anything",
+                                   depthModel="large"))
     assert (argv[argv.index("--depth-model") + 1]
             == "depth-anything/Depth-Anything-V2-Large-hf")
 
@@ -556,8 +599,7 @@ def test_controller_probes_available_backends(qapp):
 
     assert _pump(qapp, lambda: bool(seen), timeout=180), "probe never returned"
     entries = {e["name"]: e for e in seen[-1]}
-    assert set(entries) == {"auto", "depth-anything",
-                            "video-depth-anything", "onnx"}
+    assert set(entries) == set(backends.BACKENDS)
     assert all(isinstance(e["available"], bool) and e["detail"]
                for e in entries.values())
 
@@ -1072,21 +1114,31 @@ def test_the_ui_and_the_cli_agree_on_the_photo_tile_count():
 @pytest.mark.parametrize("path,tiles,expected", [
     ("in.mp4", 1, None),        # video default -- omitted
     ("in.mp4", 3, "3"),         # video, not the default -- emitted
-    ("pano.jpg", 3, None),      # photo default -- omitted
-    ("pano.jpg", 1, "1"),       # photo, asked for whole faces -- emitted
+    ("pano.jpg", 1, None),      # photo default -- omitted
+    ("pano.jpg", 3, "3"),       # photo, tiling asked for -- emitted
     ("pano.jpg", 4, "4"),
 ])
 def test_the_tiles_flag_is_emitted_against_the_right_default(path, tiles,
                                                              expected):
-    """A fixed comparison would emit the flag when it is not needed and, far
-    worse, omit it when it is -- silently rendering a photo at 3 while the
-    box read 1."""
     argv = options.build_argv({"input": path, "output": "out.jpg",
                                "depthTiles": tiles})
     if expected is None:
         assert "--depth-tiles" not in argv
     else:
         assert argv[argv.index("--depth-tiles") + 1] == expected
+
+
+def test_the_photo_default_is_compared_against_and_not_assumed(monkeypatch):
+    """The two job kinds want the same tile count today, which makes the case
+    above unable to tell a real comparison from a hardcoded 1. So move the
+    photo default and check the flag follows: it has to be *read*, not
+    assumed. It was 3 until the depth models changed, and could move again."""
+    monkeypatch.setattr(options, "PHOTO_DEPTH_TILES", 3)
+    photo = {"input": "pano.jpg", "output": "out.jpg"}
+
+    assert "--depth-tiles" not in options.build_argv(dict(photo, depthTiles=3))
+    argv = options.build_argv(dict(photo, depthTiles=1))
+    assert argv[argv.index("--depth-tiles") + 1] == "1"
 
 
 # ------------------------------------------------ where the size picker starts
@@ -1290,9 +1342,22 @@ def test_photo_mode_hides_what_cannot_apply(tmp_path):
 
 def test_photo_mode_keeps_what_does_apply(tmp_path):
     props, rows = _dump(f"inputPath={_still(tmp_path)}")
-    for label in ("Format", "Strength", "Gradient limit", "Model",
+    for label in ("Format", "Strength", "Gradient limit", "Backend",
                   "Depth tiles", "Device"):
         assert rows[label] is True, f"{label} should still be shown"
+
+
+def test_the_model_row_appears_only_where_there_is_a_model_to_choose(tmp_path):
+    """Recommended and Depth Pro have no variant worth offering -- one picks
+    its own, the other ships a single checkpoint. A dropdown that changes
+    nothing is worse than no dropdown, because it implies it changes
+    something."""
+    still = _still(tmp_path)
+    for backend, shown in (("", False), ("depth-pro", False),
+                           ("depth-anything-v3", True),
+                           ("depth-anything", True)):
+        _, rows = _dump(f"inputPath={still}", f"depthBackend={backend}")
+        assert rows["Model"] is shown, f"{backend!r} -> Model {rows['Model']}"
 
 
 def test_a_video_still_shows_the_video_controls(tmp_path):

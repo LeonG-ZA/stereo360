@@ -47,16 +47,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip the cubemap round-trip (pure decode/encode test)")
     p.add_argument("--passthrough", action="store_true",
                    help="M1 mode: right eye = left eye (no depth, no stereo)")
-    p.add_argument("--depth-backend", default="auto",
-                   choices=["auto", "depth-anything", "video-depth-anything",
-                            "onnx"],
-                   help="auto = probe the machine and use the fastest runtime "
-                        "actually available, reporting which (default); "
-                        "depth-anything = per-frame via torch (M2); "
-                        "video-depth-anything = temporal video depth model, "
-                        "flicker-free (M3); onnx = per-frame via ONNX Runtime "
-                        "(M4: DirectML for AMD/Intel, CUDA, CoreML; no PyTorch "
-                        "needed)")
+    p.add_argument("--depth-backend", default=None,
+                   # Spelled out rather than imported from backends, so
+                   # --help stays import-free. test_cli_choices_match_backends
+                   # keeps the two honest.
+                   choices=["auto", "depth-anything-v3", "depth-pro",
+                            "depth-anything", "video-depth-anything", "onnx"],
+                   help="Default depends on the input: depth-anything-v3 for "
+                        "video, depth-pro for a still image. "
+                        "depth-anything-v3 = multi-view depth via ONNX, "
+                        "flattest walls and floors of anything measured, runs "
+                        "on the CPU; depth-pro = Apple Depth Pro, the sharpest "
+                        "thin structures, 3.6 GB and GPU-hungry; auto = probe "
+                        "the machine and use the fastest runtime available, "
+                        "reporting which; depth-anything = per-frame V2 via "
+                        "torch (M2); video-depth-anything = temporal video "
+                        "depth model, flicker-free (M3); onnx = per-frame via "
+                        "ONNX Runtime (M4: DirectML for AMD/Intel, CUDA, "
+                        "CoreML; no PyTorch needed)")
     p.add_argument("--onnx-model", default="models/depth_anything_v2_small.onnx",
                    help="Path to the exported ONNX depth model (backend=onnx). "
                         "Export with: python scripts/export_onnx.py")
@@ -396,17 +404,28 @@ def _refuse_video_only_flags(args) -> None:
 
 #: Tiles per cube face when nobody says otherwise.
 #:
-#: A photo gets more because for one frame the extra passes are close to
-#: free -- measured at 12 s against 14 s for a 59 MP still, where loading the
-#: model and encoding the JPEG swamp the N-squared depth cost entirely. The
-#: same setting on a 8000-frame video is hours.
+#: One everywhere now, and the photo case is the interesting one: it used to
+#: be three. Tiling was worth its N-squared cost against V2, which could not
+#: resolve a thin structure inside a whole face and gained real detail from
+#: being shown a smaller crop -- judged on a Quest 3, and measured near-free
+#: for a single frame at 12 s against 14 s for a 59 MP still.
 #:
-#: Three rather than four. Tiling trades detail per tile against the context
-#: each tile can see, so it stops helping and starts hurting: at 4x4 a long
-#: diagonal no longer fits inside any single tile and its edge blends away.
-#: Judged on a Quest 3 -- see findings.md.
+#: Both current defaults are hurt by it instead, measured on the same photo:
+#:
+#:   Depth Pro         wall wobble 53% -> 176%, 11 s -> 46 s
+#:   Depth Anything V3 chair gap 1.42 -> 1.57, floor rms 28% -> 34%
+#:
+#: The mechanism is the same one that made 4x4 worse than 3x3 for V2 -- a tile
+#: cannot see the context outside itself -- but it bites harder here because
+#: what these two models are *good* at is global: V3 fuses six views, and
+#: Depth Pro predicts metric depth, so tiles that disagree about scale do not
+#: reconcile. Tiling no longer buys the detail either, since resolving thin
+#: structure is exactly what Depth Pro already does better than tiled V2 did.
+#:
+#: Still worth `--depth-tiles 3` with `--depth-backend depth-anything`, where
+#: it was measured to help. See "Choosing a depth model" in findings.md.
 VIDEO_DEPTH_TILES = 1
-PHOTO_DEPTH_TILES = 3
+PHOTO_DEPTH_TILES = 1
 
 
 def resolve_depth_tiles(requested, is_image: bool) -> int:
@@ -423,8 +442,10 @@ def resolve_depth_tiles(requested, is_image: bool) -> int:
 
 
 def _run(args, reporter, cancel, backends, pipeline):
-    args.depth_tiles = resolve_depth_tiles(
-        args.depth_tiles, pipeline.ffmpeg_io.is_image_path(args.input))
+    is_image = pipeline.ffmpeg_io.is_image_path(args.input)
+    args.depth_tiles = resolve_depth_tiles(args.depth_tiles, is_image)
+    args.depth_backend = backends.resolve_depth_backend(
+        args.depth_backend, is_image, reporter)
     built = backends.build(
         passthrough=args.passthrough,
         depth_backend=args.depth_backend,
