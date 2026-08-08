@@ -156,3 +156,33 @@ The official `depth-anything/DA3*` repos are not transformers-loadable (no
 ready ONNX exports, and this project already has an ONNX backend -- so trying
 it properly is a smaller job than it looks. Note the input is 5-D with a
 num_images axis, which the current OnnxDepthBackend does not expect.
+
+## Depth Pro and V3 are complementary, and this scorecard only sees one of them
+
+Scored on indoor.jpg, six faces, everything else identical:
+
+| | chair gap (-> 1.0) | wall wobble (-> 0%) | floor rms (-> 0%) | cost |
+|---|---|---|---|---|
+| V2 Base, current default | 1.76 | 103.2 | 40.7 | ~8 s GPU |
+| V3 small | **1.42** | **20.2** | **28.1** | 1.8 s CPU, 105 MB |
+| Depth Pro | 1.49 | 53.1 | 30.1 | 2 s GPU, 3.6 GB |
+
+By those numbers V3 wins outright. Judged in a headset the ranking was Depth
+Pro, then V3, then V2 -- and the reason is a gap in the scorecard, not noise.
+
+All three metrics measure large-scale geometry: see-through gaps, a vertical
+plane, a floor. None measures thin structure. Thin structure is exactly what
+Depth Pro is designed for, and exactly the artifact that started this whole
+investigation -- the metallic trim at the kitchen wall edge, which vanishes
+from the right eye. Depth Pro keeps it. V2 and V3 both replace it with a hard
+boundary.
+
+An attempt at a thin-structure metric failed and is not kept: measuring the
+brightness peak's prominence conflates "the trim is there" with "the trim is
+gone and the bare kitchen-to-stone edge is sharper", so it ranked the models
+backwards. The crop comparison is unambiguous and was believed instead.
+
+So: V3 for geometry, Depth Pro for edges, and the perceptual weight seems to
+sit with edges. Untested: V3 base and large, which might close the gap, and
+feeding V3 all six faces at native resolution rather than the 518 px used
+here to match V2.
