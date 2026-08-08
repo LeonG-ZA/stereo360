@@ -114,8 +114,8 @@ def report(name, s, base=None):
           f"{d('floor_rms','>11.1f')}{d('depth_span','>12.2f')}")
 
 
-HEADER = (f"  {'':34}{'chair gap':>9}{'wall wobble':>12}{'floor rms':>11}"
-          f"{'depth span':>12}
-"
-          f"  {'':34}{'(-> 1.0)':>9}{'(-> 0%)':>12}{'(-> 0%)':>11}"
-          f"{'(keep!)':>12}")
+_H1 = (f"  {'':34}{'chair gap':>9}{'wall wobble':>12}{'floor rms':>11}"
+       f"{'depth span':>12}")
+_H2 = (f"  {'':34}{'(-> 1.0)':>9}{'(-> 0%)':>12}{'(-> 0%)':>11}"
+       f"{'(keep!)':>12}")
+HEADER = _H1 + chr(10) + _H2

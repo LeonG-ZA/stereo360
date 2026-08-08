@@ -65,3 +65,55 @@ overshoot to 0.94: too far rather than too near.
 - Costs a second depth pass.
 - One scene. Needs the tram footage and an outdoor still before it means
   anything general.
+
+## Result: the damping idea does not work
+
+Two formulations, both rejected.
+
+**Scale depth by confidence.** Improves the three ratios but takes 38% of the
+depth range with it, and the loss lands in the near field -- confidence is
+anti-correlated with depth at -0.59, so near surfaces are damped hardest,
+which is the opposite of where anyone wants to lose separation. It also turns
+every straight line to sawtooth in the right eye, and there is a reason it
+must: d(d*f) = f.dd + d.df, so multiplying by a spatially varying factor
+*injects* gradient wherever confidence varies. Confidence varies at object
+boundaries. It manufactures depth discontinuities at exactly the edges it is
+supposed to be protecting.
+
+**Limit the depth gradient where confidence is low.** No effect at all, at
+any floor or iteration count. The reason is worth keeping: these artifacts
+are not high-frequency depth noise. The chair's gaps are wrong across their
+whole extent and the wall is wrong over hundreds of pixels -- regional depth
+that is confidently incorrect. No local operator reaches that, which is also
+why guided filtering and smoothing did nothing.
+
+## What did help, slightly
+
+Not damping at all, just using a better depth map. A pass on the mirrored
+image scores better than the normal pass on every artifact while keeping the
+depth range:
+
+| | chair gap | wall wobble | floor rms | depth span |
+|---|---|---|---|---|
+| normal pass | 1.76 | 103.2% | 40.7% | 9.26 |
+| mirrored pass | 1.71 | 74.0% | 39.7% | 9.13 |
+| per-pixel min of three passes | 1.71 | 58.7% | 43.4% | 8.40 |
+
+Ordinary test-time augmentation, in other words. It costs a second depth pass
+and gives maybe a quarter off the wall wobble for nothing. One image, so it
+could be luck; it would need the tram and an outdoor still before it meant
+anything.
+
+## For anyone picking this up
+
+Three guards exist here because three reviews went out broken and were caught
+by eye rather than by score:
+
+- `depth_span`, because the other scores are ratios and could not see the
+  stereo collapsing to nothing.
+- `cli_defaults()`, because the library's defaults are not the CLI's and a
+  render with `gradient_limit` at its library default of 0.0 tears fine
+  structure into fragments.
+- Validate an edge measurement on the *left* eye first. It is the untouched
+  source, so a tracer reporting hundreds of pixels of bend there is measuring
+  itself. Two of the measurements in this investigation did exactly that.

@@ -78,3 +78,33 @@ def cli_defaults():
     out["inpaint_mode"] = p.get_default("inpaint")
     out["face_overlap"] = p.get_default("face_overlap") or projection.FACE_OVERLAP
     return out
+
+
+def damp_gradient(disp, conf, floor=0.25, iters=12):
+    """Limit the depth *gradient* where confidence is low, in place of scaling.
+
+    Scaling the depth by a confidence factor was the first idea and it is
+    self-defeating: d(d*f) = f.dd + d.df, so it manufactures gradient wherever
+    the confidence map varies -- which is at object boundaries, exactly where
+    it is supposed to be helping. The renders came back with every straight
+    line turned to sawtooth.
+
+    This can only ever remove gradient. Each step clamps the local difference
+    to a ceiling that falls with confidence, so a surface the two passes agree
+    about keeps its full relief and a boundary they argue about is flattened
+    toward its surroundings. Absolute depth is left alone, so near objects do
+    not lose their separation from far ones.
+    """
+    import cv2
+    d = disp.astype(np.float32).copy()
+    # The ceiling has to be on the same footing as the quantity being
+    # clipped. Taking it from 8-pixel-step gradients while clipping 1-pixel
+    # deviations made it orders of magnitude too large, and the clip never
+    # bound once -- every score came back byte-identical to the baseline.
+    excess0 = d - cv2.blur(d, (3, 3))
+    scale = float(np.percentile(np.abs(excess0), 99))
+    ceiling = (scale * (floor + (1.0 - floor) * conf)).astype(np.float32)
+    for _ in range(iters):
+        blur = cv2.blur(d, (3, 3))
+        d = blur + np.clip(d - blur, -ceiling, ceiling)
+    return d
