@@ -55,3 +55,26 @@ def damp_toward_smooth(disp, conf, radius=25):
     k = radius * 2 + 1
     smooth = cv2.GaussianBlur(disp.astype(np.float32), (k, k), 0)
     return conf * disp + (1.0 - conf) * smooth
+
+
+def cli_defaults():
+    """The values the CLI actually passes, for anything rendering directly.
+
+    The library's own defaults are not the CLI's. `preview_frame` defaults
+    `gradient_limit` to 0.0 -- disabled -- while every real render gets 1.0.
+    With it off, the warp is allowed past the slope where it stops being
+    injective and fine structure tears into fragments; two renders went out
+    for review with chairs disintegrating before this was noticed.
+
+    Read from the parser rather than copied, so it cannot drift.
+    """
+    from stereo360 import cli, projection
+    p = cli.build_parser()
+    out = {}
+    for name in ("gradient_limit", "fg_erode", "strength", "face_size"):
+        v = p.get_default(name)
+        if v is not None:
+            out[name] = v
+    out["inpaint_mode"] = p.get_default("inpaint")
+    out["face_overlap"] = p.get_default("face_overlap") or projection.FACE_OVERLAP
+    return out
