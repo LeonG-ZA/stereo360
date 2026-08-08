@@ -219,12 +219,20 @@ pip install onnxruntime
 
 The second line is not optional the way it once was: the default depth model
 for **video** is an ONNX graph, so without a runtime the tool falls back to the
-older torch model and says so. Pick the build that matches your hardware —
-`onnxruntime-gpu` for CUDA, `onnxruntime-directml` for AMD/Intel GPUs on
-Windows, plain `onnxruntime` for CPU. Install exactly one: they all provide a
-module called `onnxruntime`, and whichever lands second wins. (It is not in
-`requirements.txt` for that reason — a fixed choice there would overwrite
-whichever build you had picked.)
+older torch model and says so.
+
+**On Windows, use `onnxruntime-directml` whatever GPU you have**, including
+NVIDIA. It goes through Direct3D 12 and does not care about the vendor.
+`onnxruntime-gpu` looks like the right answer on an NVIDIA card and is not:
+the published wheel carries no `sm_120` kernels, so on any RTX 50 series card
+its CUDA provider fails with *no kernel image is available for execution on
+the device*. DirectML measured 1.91 s → 0.15 s for a whole frame on an RTX
+5070 Ti, with bit-identical output. Elsewhere: `onnxruntime-silicon` on Apple,
+plain `onnxruntime` for CPU.
+
+Install exactly one — they all provide a module called `onnxruntime` and
+whichever lands second wins, which is also why it is not in
+`requirements.txt`: a fixed choice there would overwrite yours.
 
 Then add the right accelerator for your machine. **This step matters more than
 any other setting** — the wrong one silently runs everything on the CPU.

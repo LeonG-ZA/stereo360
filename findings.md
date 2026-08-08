@@ -958,6 +958,47 @@ Hence the split: V3 small for video, where 105 MB and CPU-speed inference
 matter and no single frame is studied for long; Depth Pro for stills, where
 the download is paid once and the picture is looked at closely.
 
+### DirectML, even on an NVIDIA card
+
+The video default is an ONNX graph, so which ONNX Runtime wheel is installed
+decides whether it uses the GPU at all. On Windows the answer is
+`onnxruntime-directml` regardless of vendor, which is not the obvious one.
+
+Measured on an RTX 5070 Ti, Depth Anything V3 small, six cubemap faces in one
+call — the exact shape the pipeline sends:
+
+| | six faces, raw inference | through the pipeline |
+|---|---|---|
+| CPU provider | 1.91 s | 1.87 s |
+| **DirectML** | **0.15 s** (12.7×) | **0.36 s** (5.2×) |
+
+The pipeline column is smaller because resizing six 1920 px faces down to 518
+and the results back up is CPU work either way, and it now dominates. That is
+where the next speedup is, if one is wanted.
+
+**The output is identical, which had to be checked rather than assumed.** Max
+absolute difference against the CPU provider: 0.00000. After the warp's own
+1/99-percentile normalisation, 3e-5. All three geometry scores agree to two
+decimals. Every number elsewhere in this document was measured on the CPU
+provider, so a fast provider that quietly computed something else would have
+invalidated the lot.
+
+**`onnxruntime-gpu` is the trap.** It is the obvious wheel for an NVIDIA card,
+and the published build carries no `sm_120` kernels — on any RTX 50 series
+card its CUDA provider fails with *no kernel image is available for execution
+on the device*
+([onnxruntime#26245](https://github.com/microsoft/onnxruntime/issues/26245)).
+That is the same failure mode as a mismatched torch build, one layer along,
+and the reason the installer runs a graph through the GPU rather than
+trusting `get_available_providers()`. Writing that check found its own bug
+first: `onnx` emits the newest IR version it knows, onnxruntime rejects
+anything above its maximum, and the probe failed against a runtime that was
+working perfectly.
+
+Torch is unaffected — it has proper `sm_120` kernels, so Depth Pro gets CUDA
+on the same machine. The two defaults use two runtimes and each takes its own
+route to the GPU.
+
 ### Fast mode for slow machines
 
 You do not need a different, weaker depth model — the same Depth Anything V2

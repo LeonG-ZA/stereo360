@@ -267,3 +267,122 @@ def test_a_dry_run_touches_nothing(tmp_path):
     target = tmp_path / "would-be-install"
     decisions(ComputeCap="12.0", InstallDir=str(target))
     assert not target.exists(), "dry run created the install folder"
+
+
+# ------------------------------------------------- which ONNX Runtime wheel
+
+
+def onnx_probe() -> str:
+    """The Test-OnnxProvider probe, lifted out of the .bat as it ships."""
+    text = payload()
+    body = text[text.index("function Test-OnnxProvider"):]
+    start = body.index("$probe = @'") + len("$probe = @'")
+    return body[start:body.index("'@")].strip()
+
+
+def _install_arm(kind: str) -> str:
+    """The pip commands one accelerator branch runs.
+
+    Scoped to the dependency switch, because the payload has an earlier switch
+    over the same three values that only prints a description. Slicing the
+    whole file on `'cuda' {` picks that one up instead, and in the wrong
+    order -- which is how the first version of this test managed to assert
+    against an empty string.
+    """
+    text = payload()
+    switch = text[text.index('Write-Step "Installing the accelerator'):]
+    switch = switch[:switch.index("Write-Step 'Checking the accelerator")]
+    start = switch.index(f"'{kind}' {{")
+    later = [switch.index(f"'{a}' {{") for a in ("cuda", "directml", "cpu")
+             if a != kind and switch.index(f"'{a}' {{") > start]
+    return switch[start:min(later)] if later else switch[start:]
+
+
+def test_no_path_installs_onnxruntime_gpu():
+    """It is the obvious wheel for an NVIDIA card and the wrong one. The
+    published build ships no sm_120 kernels, so on any RTX 50 series card the
+    CUDA provider fails with "no kernel image is available for execution on
+    the device" -- the same failure Test-CudaReally exists to catch for torch,
+    one layer along. DirectML runs on the same card at 12x the CPU speed.
+
+    Asserted against the code, not the whole payload: the comments name the
+    package on purpose, so that nobody reaches for it again.
+
+    Comments are stripped rather than the pip lines being singled out. The
+    first version of this test looked for a line containing both `Invoke-Pip`
+    and the package, which passes happily when the argument list wraps -- and
+    it does wrap, so the check was decorative. Verified by reintroducing the
+    regression and watching it stay green.
+    """
+    offenders = []
+    for kind in ("cuda", "directml", "cpu"):
+        code = "\n".join(line for line in _install_arm(kind).splitlines()
+                         if not line.lstrip().startswith("#"))
+        if "onnxruntime-gpu" in code:
+            offenders.append(f"{kind}: {code.strip()}")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_every_gpu_path_installs_directml():
+    """Including the CUDA one, which looks wrong. The two defaults use two
+    runtimes: Depth Pro takes CUDA through torch, Depth Anything V3 takes the
+    GPU through DirectML, and both end up accelerated on one machine."""
+    cuda = _install_arm("cuda")
+    assert "onnxruntime-directml" in cuda, \
+        "the CUDA path leaves the ONNX default on the CPU"
+    assert "--index-url" in cuda and "torch" in cuda, \
+        "the CUDA path must still install a CUDA torch for Depth Pro"
+    assert "onnxruntime-directml" in _install_arm("directml")
+    assert "onnxruntime-directml" not in _install_arm("cpu"), \
+        "a machine with no GPU has no use for it"
+
+
+def test_a_gpu_install_is_verified_by_running_a_graph():
+    """`get_available_providers()` lists what is installed, not what works --
+    that distinction is the entire reason onnxruntime-gpu is not used here."""
+    text = payload()
+    assert "function Test-OnnxProvider" in text
+    assert "Test-OnnxProvider $py" in text, "the probe is defined but not run"
+    assert "InferenceSession" in text and "sess.run" in text, \
+        "the probe must execute a graph, not just enumerate providers"
+
+
+def test_the_probe_pins_the_model_ir_version():
+    """`onnx` emits the newest IR version it knows and onnxruntime rejects
+    anything above its own maximum. Unpinned, the first run of this probe
+    failed with "Unsupported model IR version: 13" against a DirectML runtime
+    that was working perfectly -- a check that cries wolf gets switched off."""
+    assert "ir_version" in onnx_probe()
+
+
+def test_the_probe_answers_rather_than_crashes():
+    """Whatever this machine has, the probe must report OK or FAIL and not
+    fall over: the installer reads its exit code and prints its output."""
+    import sys
+
+    proc = subprocess.run([sys.executable, "-c", onnx_probe()],
+                          capture_output=True, text=True, timeout=300)
+    out = proc.stdout.strip()
+    assert out.startswith(("OK ", "FAIL ")), f"unusable output: {out!r}"
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert (proc.returncode == 0) == out.startswith("OK "), \
+        "the exit code disagrees with the message"
+
+
+def test_the_probe_passes_where_a_gpu_provider_is_installed():
+    """The half that catches a broken probe rather than a broken GPU. Skipped
+    on a CPU-only machine, which is the honest thing to do -- there FAIL is
+    the right answer and proves nothing about the probe."""
+    import sys
+
+    ort = pytest.importorskip("onnxruntime")
+    gpu = {"DmlExecutionProvider", "CUDAExecutionProvider",
+           "CoreMLExecutionProvider"} & set(ort.get_available_providers())
+    if not gpu:
+        pytest.skip("no GPU execution provider installed here")
+
+    proc = subprocess.run([sys.executable, "-c", onnx_probe()],
+                          capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, (
+        f"a GPU provider is installed ({sorted(gpu)}) but the probe says:\n"
+        f"{proc.stdout}{proc.stderr}")
