@@ -35,6 +35,7 @@ Options:
 | `--no-temporal-fill` | (fill is **on**) | Disable filling holes from other frames in the chunk. On by default: real pixels another frame saw beat anything invented. Needs `--chunk-size` > 1 |
 | `--depth-tiles N` | 1 | Split each cubemap face into N×N overlapping tiles for depth (feather-blended). Higher = finer depth on thin structures; N² times slower |
 | `--face-overlap F` | 0.15 | How far each depth face reaches past its nominal 90° (0.15 = 98° per face), so neighbours share a band rather than only an edge. 0 restores exact faces, which creases the ground at a seam — see [Cube seams in the depth map](#cube-seams-in-the-depth-map) |
+| `--face-angular-correction F` | 0 (off) | Pull each depth face's edges back onto their true rays, undoing the field of view V3 believes it has rather than the one it was given. 0.55–0.7 measured best, 1.0 overshoots. Costs ~20% of the depth range, so pair it with `--strength 1.2`. Measured on V3 only — see [The model's lens is narrower than the face it is given](#the-models-lens-is-narrower-than-the-face-it-is-given) |
 | `--depth-model ID` | **per backend** | `small` for `depth-anything-v3` (`base`/`large` also accepted, and both measured worse — see [Choosing a depth model](#choosing-a-depth-model)); ignored by `depth-pro`, which ships one checkpoint. For `depth-anything`, a HuggingFace model id, default Depth-Anything-V2-Base: lowest depth noise and 40% less frame-to-frame flicker than Small for +5% render time — see [Which depth model?](#which-depth-model). The temporal backend ships `small`/`large` only and defaults to small |
 | `--chunk-size N` | 8 | Temporal chunk length for the video backend (1 = off) |
 | `--chunk-overlap N` | 2 | Overlap frames ramp-blended at chunk boundaries |
@@ -620,9 +621,167 @@ resizes its input whatever field of view it covers. That is the one real cost
 of this approach, and it is the reason the overlap is no wider than it needs
 to be.
 
+The corner stretch is the reason given here for why wider hurts, and it is not
+the whole one: V3's own camera estimate stops tracking the truth at about 62°,
+so every width in this table is already past what it believes it is looking
+through, and the widths degrade in the order that mismatch predicts. See
+[The model's lens is narrower than the face it is given](#the-models-lens-is-narrower-than-the-face-it-is-given).
+
 Runtime is unchanged. The blend tables depend only on the output geometry, so
 they are built once per run (~2.5 s at 8K, ~450 MB) rather than per frame; a
 24-frame 8K render measured 45.5 s against 45.4 s with exact faces.
+
+### The model's lens is narrower than the face it is given
+
+Reported from a Quest 3, and the reason the section above is not the whole
+story: patches of ground *near the camera* sitting higher than they should. It
+looks like the seam problem and it is not.
+
+Geometry settles it without a reference model, the same way the widening was
+measured. A floor one camera height down puts a surface at distance
+`1/sin(-lat)` along any ray, exactly, so the estimate can be turned into a
+height above the true plane and plotted against distance from the tripod. Frame
+0 of the outdoor 8K clip, calibrated on the near apron (0.15–0.5 camera
+heights) where the ground is unambiguously flat concrete:
+
+| distance out, in camera heights | 0.3 | 0.5 | 0.7 | 0.85 | **1.0** | 1.2 | 1.5 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| height above the true floor | −0.01 | +0.02 | +0.07 | +0.12 | **+0.18** | +0.19 | +0.18 |
+
+Level under the tripod, then a steady climb to 0.18 camera heights — about
+30 cm on a 1.6 m tripod — reached at one camera height out, which is exactly
+where the down face's nominal edge crosses the floor. Reproduces on frame 240
+within 0.01 throughout.
+
+**It is not the seam.** Three things say so. The lift starts around half a
+camera height out, deep inside the down face where no neighbour contributes
+anything. Yawing the whole cube 45° moves the seam ring without moving the
+bulge. And a two-pass scheme that takes every direction from whichever cube
+sees it further from its own seam measured *worse* than one pass (+0.21 against
++0.18) — as did an oracle allowed to pick the better of the two per pixel
+(+0.18, i.e. no gain), which is what you get when both passes are wrong in the
+same direction by the same amount.
+
+#### The camera head saturates
+
+Depth Anything V3 predicts its own intrinsics, alongside depth and confidence.
+Fed the same six views at a sweep of fields of view, the focal length it
+reports says it stops believing wide lenses:
+
+| the face really spans | 61.9° | 73.7° | 90° | **98°** | 106.9° | 116° |
+| --- | --- | --- | --- | --- | --- | --- |
+| the model says | 58.9° | 64.3° | 65.7° | **65.6°** | 67.9° | 69.1° |
+| ratio | 0.95× | 0.87× | 0.73× | **0.67×** | 0.64× | 0.60× |
+
+It tracks the truth to about 62° and then flattens out around 65–69°, which is
+roughly a 28 mm-equivalent lens — a very common thing to have been trained on,
+and nothing like what this pipeline hands it.
+
+So it reconstructs for a much longer lens than it has. A ray genuinely 45° off
+the face axis is treated as though it were about 30° off; the distance it must
+travel to reach a surface is under-estimated, and the surface is placed too
+near. The error is zero on the axis and grows with angle off it, which is the
+shape measured above — and the reason it looks like a seam problem is only that
+a face edge is where that angle is largest before the face runs out.
+
+It also explains why wider faces measure worse, which the widening study saw as
+a mild cost and could not account for:
+
+| face width | 91.1° | 98° | 106.9° |
+| --- | --- | --- | --- |
+| height error at one camera height | +0.156 | +0.182 | +0.228 |
+
+Same ordering as the mismatch ratio.
+
+#### Why the scale fit cannot see it
+
+`align_overlapping_faces` reconciles the faces *with each other*. All six carry
+the same bias, so they agree with each other while all being wrong together —
+on every frame tested it chose a shift of exactly **0.000** for all six. A
+committee where everyone makes the same mistake votes unanimously.
+
+Nor is it fixable by fitting the faces to the ground instead. That was built
+and measured first: for any plane, inverse depth is exactly linear in the
+direction vector, so a four-parameter least squares over ground pixels gives
+the plane and the offset together, and the offset is the correction. It fits
+well — R² 0.962–0.968 across eight frames, offset stable to 2.6% — and it still
+fails, structurally. An offset in inverse depth acts on the depth *range*,
+while the error is in the *angle*; enough offset to flatten the near floor
+exceeds the entire inverse depth of anything far away:
+
+| ground fit looks below | worst floor error | frame clipped to infinity |
+| --- | --- | --- |
+| 8° | 0.157 | 17.6% |
+| 20° | 0.118 | **53.5%** |
+| 30° | 0.266 | 65.5% |
+
+There is no setting where the floor comes flat and the horizon survives.
+
+#### The correction
+
+Per-ray, then, matching the shape of the error: divide each face's inverse
+depth by `1 + F·(sec θ − 1)`, where `sec θ = √(1 + a² + b²)` is the ray's own
+foreshortening at face coords `(a, b)` — 1.00 at the face centre, 1.41 at the
+nominal cube edge, 1.91 at the widened corner. A cached per-face table and one
+divide per pixel: no second inference, no extra pass, no measurable runtime.
+
+Applied **before** the faces are fitted together, since it moves the values
+that fit would otherwise read.
+
+| `F` | worst floor error out to 1.2 camera heights | clipped |
+| --- | --- | --- |
+| 0.0 (today) | 0.196 | 0.00% |
+| 0.4 | 0.079 | 0.00% |
+| **0.55** | **0.032** | 0.00% |
+| 0.7 | 0.036 | 0.00% |
+| 1.0 (the full ray-versus-axis conversion) | 0.127 | 0.00% |
+
+`F = 1` is the complete conversion and overshoots, landing the ground 0.12
+camera heights *below* true. The best value per frame across the clip came out
+0.60, 0.50, 0.55, 0.60, 0.55 — one constant holds.
+
+On the reference photo's scorecard, through the V3 path at 11904×5952:
+
+| | chair gap (→1.0) | wall wobble (→0%) | floor rms (→0%) | depth span (keep) |
+| --- | --- | --- | --- | --- |
+| off | 1.42 | 19.6 | 27.7 | 1.30 |
+| **F = 0.55** | 1.39 | **8.5** | 24.5 | 1.07 |
+| F = 0.7 | 1.39 | **7.6** | 23.5 | 1.07 |
+| F = 1.0 | 1.38 | 9.4 | **20.9** | 1.07 |
+
+Wall wobble more than halves, which was the score most at risk — an angular
+correction touches every pixel, and a vertical plane crosses a face periphery
+the same way a floor does. It improves for the same reason the floor does.
+
+The depth span falls 17%, and score.py is right to flag that, so: by latitude
+band the loss is 3–5% on the bands sitting at face centres (nadir, zenith,
+horizon) against 13–15% on the bands at 45°, which are the seam latitudes. What
+is being removed is the false nearness at the peripheries, not stereo. The
+other three scores are ratios and scale-invariant by construction, so
+`--strength 1.2` restores the parallax without moving any of them.
+
+Seam agreement improves as a side effect it was not aiming at — the spread
+between overlapping faces over the lower hemisphere falls from 6.9% to 4.5% of
+local depth — because the faces were disagreeing precisely where each was least
+reliable.
+
+#### Why it is off by default
+
+Two scenes, one backend, one face width, and never yet judged in a headset.
+`F` is empirical rather than derived: the model's own predicted intrinsics
+imply about 0.36, so it is absorbing something the field-of-view story alone
+does not account for, and it is tied to V3 at 98° faces. Depth Pro — the stills
+default — is untested and would need its own constant, or none.
+
+Two things measured along the way and not used. Tiling narrows the field of
+view per inference, which ought to help, and makes it much worse (+0.41 at
+`--depth-tiles 2` against +0.20): `estimate_tiled` pins each tile to a coarse
+full-face reference with a scale-only fit, re-imposing the shape it was
+supposed to escape. And a second pass with the cube *tilted* rather than yawed
+does work — 0.196 → 0.150 for two passes, 0.137 for three — because a tilt
+changes each ray's angle off the axis where a yaw does not. It is a quarter of
+the benefit for double the inference, so it is worth remembering only if the
+correction above turns out not to transfer.
 
 ### Stereo geometry: the baseline follows your gaze
 
