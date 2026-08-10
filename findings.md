@@ -783,6 +783,106 @@ changes each ray's angle off the axis where a yaw does not. It is a quarter of
 the benefit for double the inference, so it is worth remembering only if the
 correction above turns out not to transfer.
 
+### Negative result: a thin trim the synthesised eye loses
+
+Reported from a headset on the reference photo: the plaster trim between the
+kitchen and the front door is clear in the left eye and gone in the right, so
+it reads as sinking into the wall behind it. This is the metallic-trim artifact
+that made Depth Pro the stills default, met again on the V3 path — which
+matters because V3 is what video uses, and an indoor video of the same room
+would show it.
+
+Nine things were tried and none fixed it. Recorded because most of them look
+obviously right beforehand.
+
+#### What is actually happening
+
+The trim is about 7 px wide. At 518² inference the depth boundary lands roughly
+**4 px past the picture's own boundary**, on the far side of the trim, so the
+whole strip is given the kitchen wall's depth. The near column then sweeps over
+it in the warp — correctly, given a depth map that says the column's surface
+starts where the trim is. Profiles across the edge in the `-X` face, row 1035:
+
+| face column | 174 | 176 | 178 | 180 | 182 | 184 | 186 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| picture (grey) | 174 | **161** | **125** | **76** | **50** | **47** | 54 |
+| depth, 518 | 0.590 | 0.591 | 0.595 | 0.678 | 0.896 | 1.193 | 1.566 |
+| depth, 1036 | 0.576 | **0.620** | **1.189** | **1.530** | 1.569 | 1.552 | 1.552 |
+
+The edge itself is *not* soft — the depth transition measures 5 px against the
+picture's 3. It is in the wrong place. At 1036 it moves onto the picture's
+edge and part of the trim finally reaches the near surface.
+
+#### What was tried
+
+Measured on rendered pixels: how far the trim falls below the walls either
+side, averaged over the 20 rows where the source trim is strong. The source
+falls 46.6 grey levels; the left eye is the source in every case except
+`--split-baseline`.
+
+| | right eye | of source |
+| --- | --- | --- |
+| **as shipped** | **28.3** | **61%** |
+| `--fg-erode 0` | 28.3 | 61% |
+| `--depth-tiles 3` | 28.2 | 61% |
+| `--smooth 8` | 27.5 | 59% |
+| `--split-baseline` | 27.4 | 59% |
+| two rotated cubes, best-of | 23.6 | 51% |
+| `--gradient-limit 0` | 21.9 | 47% |
+
+Nothing improves on the default, and two things measurably hurt. The guided
+filter was also swept properly (`--smooth` is a joint filter guided by the
+full-resolution face image): radius 8 → 64 widens the depth transition
+monotonically from 5 px to 19 px, because it is a smoother and there was never
+a soft edge to snap.
+
+`1036` at two views was scored against the shipped `518` at six, since six
+views at 1036 exhausts a 16 GB machine:
+
+| | chair gap | wall wobble | floor rms | depth span |
+| --- | --- | --- | --- | --- |
+| 518, 6 views | **1.42** | **19.6** | **27.7** | 1.30 |
+| 1036, 2 views | 1.48 | 22.3 | 29.7 | 1.47 |
+
+Worse on all three, including `chair_gap`, which is the thin-structure score.
+Losing the whole-sphere fusion costs more than the resolution buys. That does
+not say resolution is useless — 1036 at six views is the experiment that would
+isolate it, and it is not runnable here.
+
+#### The measurement trap, which is the real lesson
+
+Four conclusions were drawn and withdrawn before the numbers above were
+trusted, and three of the four came from the same two mistakes.
+
+**Measuring the wrong feature.** The trim is a *dark* line and the brightest
+thing within 200 px of it is the kitchen's white wall. A top-hat looking for a
+bright line reported the trim as 85–97% intact while the picture plainly showed
+it gone, and it ranked `--gradient-limit 0` as the worst option when the sound
+measure ranks it merely bad.
+
+**Measuring one row.** At row 2000 `--gradient-limit 0` scores 23 against the
+default's 8 and looks like a fix. Over all 20 strong rows it averages 21.9
+against 28.3. The trim is lost over part of its height and kept over the rest;
+any single row can say whatever you want.
+
+And one that invalidated four separate conclusions on its own: a "ramp width"
+helper that returned the span from the first to the last pixel lying between
+10% and 90% of a window's min–max. Plateau noise straying inside that band put
+the last index 85 px past the edge, so a 4 px transition measured 89 px. Every
+theory built on "the depth ramp is twelve times the feature" — the cross-fade
+smearing it, the face periphery softening it, two cubes narrowing it — was
+built on that number.
+
+The habits that would have caught all three: print the profile before trusting
+a summary statistic, and check that the statistic moves when the feature moves.
+
+#### Where it stands
+
+For stills, use the default. Depth Pro resolves this edge and is the stills
+default for exactly this reason — see [Choosing a depth
+model](#choosing-a-depth-model). For video, where Depth Pro's ~2 s a frame is
+prohibitive, it is unsolved.
+
 ### Stereo geometry: the baseline follows your gaze
 
 The right eye is offset to the side **of whichever direction is being looked
