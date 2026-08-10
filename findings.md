@@ -926,6 +926,32 @@ built on that number.
 The habits that would have caught all three: print the profile before trusting
 a summary statistic, and check that the statistic moves when the feature moves.
 
+#### Two sizes of thin, and only one of them is the trim
+
+A second complaint from the same photo turned out to have the same root and a
+different size. The chair's back post is a solid piece of wood about 24 px
+wide; in the synthesised eye it comes out about 7. Printed across it, at row
+2545, the reason is plain — V3 does not describe it as a surface:
+
+| across the post (24 px) | depth span |
+| --- | --- |
+| Depth Anything V3 | 0.07 → 0.67, **range 0.60** |
+| Depth Pro | 0.58 → 0.73, **range 0.15** |
+
+V3 climbs steadily across the wood, so the near edge shifts about twice as far
+as the far edge and the post is squeezed. Depth Pro steps at the post's left
+edge — the same columns where the picture's brightness goes 124 → 152 → 169 —
+and then holds flat. A plateau warps as one piece; a ramp does not.
+
+Both normalised to their own face's 5th–95th percentile, sampled in the +X face
+so no assembly or scale fit sits between the model and the number.
+
+So "thin structure" is two problems. A **7 px** trim is below what either model
+resolves as its own surface, and gets assigned wholesale to one side of a step.
+A **24 px** post is above what Depth Pro needs and below what V3 needs, so the
+backend choice decides it. That distinction matters when reading the advice
+above: the stills default fixes the post, and is not known to fix the trim.
+
 #### Where it stands
 
 For stills, use the default. Depth Pro resolves this edge and is the stills
