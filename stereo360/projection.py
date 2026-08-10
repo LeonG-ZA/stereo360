@@ -43,6 +43,7 @@ def clear_map_caches() -> None:
     _map_cache.clear()
     _f2e_cache.clear()
     _overlap_plan_cache.clear()
+    _angular_cache.clear()
 
 
 def _face_to_equirect_maps(out_w: int, out_h: int, face_size: int, pad: int,
@@ -827,6 +828,105 @@ FACE_OVERLAP = 0.15
 def face_fov_degrees(overlap: float = FACE_OVERLAP) -> float:
     """Field of view one face covers, in degrees."""
     return float(2.0 * np.degrees(np.arctan(1.0 + overlap)))
+
+
+#: How much of the ray-versus-axis correction to apply to each face's depth.
+#: Off by default: measured well on two scenes, never yet judged in a headset.
+#:
+#: Depth Anything V3 predicts its own camera, and that prediction saturates.
+#: Fed the same six views at a sweep of fields of view it answers 58.9 degrees
+#: for a real 61.9, then 64.3 for 73.7, then 65.7 for 90, 65.6 for our 98 and
+#: 67.9 for 106.9 -- it tracks the truth to about 62 degrees and then stops.
+#: So at the 98-degree faces this pipeline uses it under-reads by a third, and
+#: reconstructs depth for a much longer lens than it was given.
+#:
+#: The consequence is geometric and one-sided. A ray genuinely 45 degrees off
+#: the face axis -- which is exactly where the cube seam falls -- is treated as
+#: though it were about 30 degrees off, so the distance it must travel to reach
+#: a surface is under-estimated, and the surface is placed too near. On flat
+#: ground the estimate is faithful at the face centre and lifts steadily toward
+#: the edge: measured against exact plane geometry it reaches 0.18 camera
+#: heights of false elevation by the seam, which is the ground visibly bulging
+#: up toward the viewer at about one camera height out.
+#:
+#: The correction divides by 1 + strength*(sec(theta) - 1), where sec(theta) is
+#: the ray's own foreshortening: 1.00 at the face centre, 1.41 at the nominal
+#: cube edge, 1.91 at the widened corner. strength=1 is the full ray-versus-
+#: axis conversion and overshoots, landing the ground 0.12 camera heights
+#: *below* true. Between them:
+#:
+#:   strength   worst floor error out to 1.2 camera heights
+#:      0.0     0.196   (today)
+#:      0.4     0.079
+#:      0.55    0.032
+#:      0.7     0.036
+#:      1.0     0.127
+#:
+#: On the reference photo's scorecard, 0.55 takes wall wobble from 19.6% to
+#: 8.5% and floor rms from 27.7% to 24.5%, and 0.7 is better again on the wall.
+#: Depth span falls with it -- 1.30 to 1.07 -- but that is the point rather
+#: than a cost: by latitude the loss is 3-5% on the bands sitting at face
+#: centres and 13-15% on the bands at 45 degrees, so what is being removed is
+#: the false nearness at the peripheries. The other three scores are ratios and
+#: scale-invariant, so `--strength 1.2` restores the parallax for nothing.
+#:
+#: 0.55 is where the outdoor floor geometry lands and 0.7 where the indoor wall
+#: does; the optimum is not sharp and anything in that band is a large win on
+#: both. It is an empirical constant, not a derived one -- the model's own
+#: predicted intrinsics imply about 0.36 -- so it is tied to V3 at this face
+#: width and should not be assumed to transfer to another backend.
+ANGULAR_CORRECTION = 0.0
+
+_angular_cache: Dict[tuple, np.ndarray] = {}
+
+
+def angular_correction_table(face_size: int, overlap: float,
+                             strength: float) -> np.ndarray:
+    """Per-pixel divisor 1 + strength*(sec(theta) - 1) for a widened face.
+
+    Depends only on the face geometry, never on pixel data, so it is the same
+    for every face and every frame of a run -- the same reasoning that keeps
+    the remap tables cached. One entry per geometry, and a face-sized float32
+    array is small beside the tables it sits next to (15 MB at an 8K face
+    against ~540 MB for the blend plan).
+    """
+    key = (int(face_size), round(float(overlap), 6), round(float(strength), 6))
+    hit = _angular_cache.get(key)
+    if hit is not None:
+        return hit
+    lim = 1.0 + overlap
+    t = ((np.arange(face_size, dtype=np.float32) + 0.5) / face_size
+         * 2.0 - 1.0) * lim
+    a, b = np.meshgrid(t, t)
+    sec = np.sqrt(1.0 + a * a + b * b, dtype=np.float32)
+    out = (1.0 + strength * (sec - 1.0)).astype(np.float32)
+    _angular_cache.clear()
+    _angular_cache[key] = out
+    return out
+
+
+def apply_angular_correction(depth_faces: Dict[str, np.ndarray],
+                             overlap: float = FACE_OVERLAP,
+                             strength: float = ANGULAR_CORRECTION,
+                             ) -> Dict[str, np.ndarray]:
+    """Pull each face's periphery back onto its true rays. In place.
+
+    Runs *before* `align_overlapping_faces`, not after: the correction changes
+    what each face says in the band it shares with its neighbours, so fitting
+    the faces together first would fit them on values about to move. Doing it
+    in this order also improves the seam agreement it is not aiming at -- the
+    spread between faces over the lower hemisphere fell from 6.9% to 4.5% of
+    local depth, because the faces were disagreeing precisely where each was
+    least reliable.
+    """
+    if strength <= 0.0:
+        return depth_faces
+    face_size = depth_faces[FACES[0]].shape[0]
+    div = angular_correction_table(face_size, overlap, strength)
+    for face in FACES:
+        depth_faces[face] = (np.asarray(depth_faces[face], dtype=np.float32)
+                             / div)
+    return depth_faces
 
 
 def _axis_component(vec: np.ndarray) -> Tuple[int, float]:

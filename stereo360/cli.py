@@ -242,6 +242,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "stretches the corners past what a depth model was "
                         "trained on and costs accuracy without helping the "
                         "seam. (default: 0.15)")
+    p.add_argument("--face-angular-correction", type=float, default=None,
+                   metavar="F",
+                   help="Pull each depth face's edges back onto their true "
+                        "rays. Depth Anything V3 estimates its own camera and "
+                        "that estimate saturates around 65 degrees, so at the "
+                        "98-degree faces used here it thinks it is looking "
+                        "through a much longer lens than it is, and places "
+                        "everything toward a face edge nearer than it really "
+                        "is. On flat ground that reads as the floor bulging up "
+                        "toward you at about one camera height out, which is "
+                        "where the cube seam falls. F scales the fix: 0 is off, "
+                        "0.55-0.7 measured best, 1.0 overshoots the other way. "
+                        "It also lowers the depth range about 20%%, so pair it "
+                        "with --strength 1.2 to keep the same parallax. "
+                        "Measured on V3 only. (default: 0, off)")
     p.add_argument("--temporal-depth", type=float, default=0.02,
                    metavar="TAU",
                    help="Hold static depth still between frames, so a "
@@ -472,6 +487,9 @@ def _run(args, reporter, cancel, backends, pipeline):
     # Resolved here rather than in the parser so `--help` stays import-free.
     face_overlap = (pipeline.projection.FACE_OVERLAP
                     if args.face_overlap is None else args.face_overlap)
+    angular_correction = (pipeline.projection.ANGULAR_CORRECTION
+                          if args.face_angular_correction is None
+                          else args.face_angular_correction)
 
     if pipeline.ffmpeg_io.is_image_path(args.input):
         _refuse_video_only_flags(args)
@@ -489,6 +507,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             gradient_limit=args.gradient_limit,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            angular_correction=angular_correction,
             output_mode=args.output_mode,
             yaw=args.yaw,
             output_width=args.output_width,
@@ -520,6 +539,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             width=args.preview_width,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            angular_correction=angular_correction,
             output_mode=args.output_mode,
             yaw=args.yaw,
             reporter=reporter,
@@ -552,6 +572,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         input_projection=args.input_projection,
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
+        angular_correction=angular_correction,
         output_mode=args.output_mode,
         yaw=args.yaw,
         output_width=args.output_width,
