@@ -504,6 +504,56 @@ boundary colors. Holes are filled per connected component (padded crops), so
 memory stays bounded at 8K. CPU reference: ~75 s per 1920×960 frame; use a
 GPU for practical throughput.
 
+#### `--inpaint` is close to decorative, and here is why
+
+Worth knowing before installing anything for it: on a real frame the inpainter
+never runs at all. Instrumented on the reference photo at 7680×3840, strength
+1.2, by wrapping the shipped functions rather than reimplementing them:
+
+| | |
+| --- | --- |
+| disocclusion holes | 17,689 px — 0.060% of the eye |
+| filled by `_directional_fill` | 17,689 px — **100%** |
+| reaching Telea or LaMa | **0 px** |
+
+`fill_holes` continues each hole from the background side first and hands on
+only what that cannot reach, so the inpainter is dead code whenever the
+extension succeeds — which here was everywhere. `--inpaint learned` produced a
+**byte-identical** file, and LaMa was never even constructed.
+
+Forcing the issue does not help either. With the directional fill disabled so
+everything falls through to the inpainter, Telea against LaMa differs by
+0.001% of the eye — a few hundred pixels.
+
+The holes are small to begin with, because `--gradient-limit` exists to prevent
+them:
+
+| | hole area |
+| --- | --- |
+| `--gradient-limit 1.0` (default) | 1,584 px — 0.0054% |
+| `--gradient-limit 0` | 3,985 px — 0.0135% |
+
+So the streaking beside a near object's trailing edge — the artifact that sends
+people looking for a better inpainter — is not hole filling. It is the warp
+stretching the object across the depth cliff, which is what the gradient limit
+trades a hole for. Changing how the residue is filled cannot touch it.
+
+Measured leverage on the synthesised eye, same frame, one variable at a time:
+
+| lever | share of the eye it changes |
+| --- | --- |
+| `--strength` 1.2 → 0.8 | **31.85%** |
+| `--gradient-limit` 1.0 → 0 | 0.451% |
+| directional fill on → off | 0.001% |
+| `--inpaint simple` → `learned` | 0.001% |
+
+`--strength` is three orders of magnitude more consequential than the fill
+strategy. If disocclusion artifacts are the complaint, that is the knob.
+
+A `--no-directional-fill` flag was built to expose the third row and then
+reverted: it is a real switch that measurably does nothing, and the finding is
+worth more than the option.
+
 ### Which depth backend?
 
 `--depth-backend` defaults to `auto`, which probes what is actually installed
