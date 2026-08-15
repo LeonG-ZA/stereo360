@@ -286,6 +286,7 @@ def resolution_choices(width: int, height: int,
 _DEFAULTS = {
     "strength": 1.0,
     "gradientLimit": 1.0,
+    "faceAngularCorrection": 0.0,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -389,6 +390,10 @@ def build_argv(
     grad = _num(opts.get("gradientLimit"), 1.0)
     if abs(grad - _DEFAULTS["gradientLimit"]) > 1e-9:
         argv += ["--gradient-limit", f"{grad:g}"]
+
+    angular = _num(opts.get("faceAngularCorrection"), 0.0)
+    if abs(angular - _DEFAULTS["faceAngularCorrection"]) > 1e-9:
+        argv += ["--face-angular-correction", f"{angular:g}"]
 
     # Against the default for *this kind of job*: the CLI uses 3 for a photo
     # and 1 for a video, so a fixed comparison here would emit the flag when

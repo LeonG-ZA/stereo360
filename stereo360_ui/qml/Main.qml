@@ -53,6 +53,7 @@ ApplicationWindow {
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
     property real gradientLimit: 1.0
+    property real faceAngularCorrection: 0.0
     property bool splitBaseline: false
     property bool spatialAudio: false
     property bool sourceSubsampling: false
@@ -84,6 +85,7 @@ ApplicationWindow {
             "codec": codec, "outputMode": outputMode, "yaw": yaw,
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
+            "faceAngularCorrection": faceAngularCorrection,
             "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
             "faceSizeAuto": faceSizeAuto, "faceSize": faceSize,
@@ -981,6 +983,23 @@ ApplicationWindow {
                                 }
                                 Text {
                                     text: win.gradientLimit.toFixed(2)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
+                                }
+                            }
+
+                            Row2 {
+                                label: "Face angular correction"
+                                hint: "Straightens walls and floors that bow toward you. Depth Anything V3 only; 0 is off, 0.55-0.7 measured best. Costs about a fifth of the depth range, so pair it with a higher strength."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 1; stepSize: 0.05
+                                    value: win.faceAngularCorrection
+                                    onMoved: win.faceAngularCorrection = value
+                                }
+                                Text {
+                                    text: win.faceAngularCorrection.toFixed(2)
                                     color: Theme.text
                                     font.pixelSize: Theme.fontM
                                     Layout.preferredWidth: 32

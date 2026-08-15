@@ -82,6 +82,15 @@ def test_non_default_settings_are_emitted():
     assert "--split-baseline" in argv and "--spatial-audio" in argv
 
 
+def test_the_angular_correction_reaches_the_command_line():
+    """Off by default, so an untouched slider must not emit the flag at all --
+    a zero on the command line and no flag mean the same thing to the CLI, but
+    only one of them says the setting was left alone."""
+    assert "--face-angular-correction" not in options.build_argv(dict(BASE))
+    argv = options.build_argv(dict(BASE, faceAngularCorrection=0.55))
+    assert argv[argv.index("--face-angular-correction") + 1] == "0.55"
+
+
 def test_chunk_flags_only_for_the_temporal_backend():
     """They are accepted by the CLI regardless but do nothing elsewhere, and
     emitting them would imply the setting had an effect."""
