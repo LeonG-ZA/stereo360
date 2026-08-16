@@ -96,8 +96,9 @@ Nothing is ever renamed for you — the suggestion is only a suggestion.
   to be an NVIDIA one — see the accelerator table below.
 - 64-bit Windows, macOS or Linux.
 
-The Windows installer below supplies everything else. Installing by hand
-instead needs **Python 3.10+** and **FFmpeg and ffprobe on `PATH`**.
+The one-click installers below (Windows and Linux) supply everything else.
+Installing by hand instead needs **Python 3.10+** and **FFmpeg and ffprobe on
+`PATH`**.
 
 ## Installing on Windows: the one-click way
 
@@ -228,6 +229,92 @@ Trust attaches to the file rather than to how it arrived: the same bytes
 copied out of a winget package folder into a temp directory still ran. So
 installing through winget buys nothing here, and would put ffmpeg on your
 `PATH` and outside the install folder, which this deliberately avoids.
+
+## Installing on Linux: the one-line way
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LeonG-ZA/stereo360/main/installer/install-stereo360.sh | bash
+```
+
+Downloaded and run locally instead, it is just as plain: open it in an editor
+first if an unsigned script from the internet makes you uneasy, then
+`chmod +x install-stereo360.sh && ./install-stereo360.sh`.
+
+It installs everything: a private virtual environment (your system Python is
+never touched), the right PyTorch for your GPU, PySide6 for the interface,
+ffmpeg (or the one already on your `PATH`, if it works), and the depth model.
+Nothing is added to your shell's `PATH` except two symlinks under
+`~/.local/bin`. It installs to `~/.local/share/Programs/stereo360` by
+default — pass `--install-dir` to put it elsewhere.
+
+**One step needs root:** installing the X11 libraries Qt's xcb platform
+plugin links but PySide6's wheel does not ship — `libxcb-cursor0`,
+`libxcb-icccm4` and `libxcb-keysyms1` on Debian/Ubuntu, equivalents
+elsewhere. No pip package can supply them, and without them the interface
+does not fail cleanly: it crashes with `SIGABRT` even with a perfectly good
+display available.
+
+Which ones are actually missing is read from `ldd`, not assumed, and only
+those are installed — worth doing that way because Qt's own error message
+names just the first one, so fixing what it asks for changes the message
+and not the outcome. It asks for permission through `sudo` at a terminal,
+or the desktop's polkit password dialog when there isn't one (a shortcut, a
+file manager). If neither works it warns instead of failing and prints the
+exact command to run by hand. Nothing else here needs root.
+
+Run it again to upgrade; it recognises an existing install, says which
+version it is replacing, and keeps the virtual environment and ffmpeg if they
+already work — so an upgrade is a few megabytes, not a redownload of PyTorch.
+Uninstall with `~/.local/share/Programs/stereo360/uninstall.sh`, which removes
+only what the installer created; your settings and the downloaded models are
+kept unless you pass `--remove-settings` or `--remove-model-cache`.
+
+### Picking the accelerator
+
+```bash
+curl -fsSL .../install-stereo360.sh | bash -s -- --accelerator rocm
+```
+
+| `--accelerator` | For | Notes |
+|---|---|---|
+| `auto` (default) | detects an NVIDIA or AMD card and picks accordingly | — |
+| `cuda` | NVIDIA | torch **and** onnxruntime, each verified by running a real kernel |
+| `rocm` | AMD | `onnxruntime-rocm` for video, ROCm torch for stills |
+| `cpu` | no usable GPU; roughly 10× slower | uses PyPI's `cpu` wheel index explicitly — see below |
+
+**Both runtimes have to reach the GPU, and the ONNX one matters most.** The
+video default (Depth Anything V3) is an ONNX graph with *no torch path at
+all*, so an onnxruntime stuck on the CPU means the main use case is slow no
+matter how good the card is. Stills (Depth Pro) are the torch half.
+
+Two Linux-specific traps the installer handles, both of which fail *silently*:
+
+- **onnxruntime's CUDA major must match torch's.** `onnxruntime-gpu` moved to
+  CUDA 13 at 1.25, and torch's newest wheels are still CUDA 12 — so the
+  newest of each cannot be used together. Measured on an RTX 5070 Ti with
+  torch cu128: onnxruntime-gpu 1.28 advertised `CUDAExecutionProvider` and
+  then built every session on the CPU, because `libcublasLt.so.13` was not
+  there. Nothing errors. The installer reads `torch.version.cuda` and picks
+  the matching ORT line.
+- **onnxruntime needs `LD_LIBRARY_PATH` to find torch's CUDA.** The CUDA
+  runtime comes from torch's `nvidia-*-cu12` wheels and ORT does not look
+  inside them. The launchers set it, so renders get the same GPU the
+  installer verified.
+
+**The CPU choice matters more on Linux than on Windows.** Plain `pip install
+torch` pulls a CPU-only wheel on Windows, but on Linux the default wheel links
+CUDA and drags in several hundred MB of `nvidia-*-cu12` packages regardless of
+whether a GPU is present. `--accelerator cpu` asks PyPI's `cpu` index
+explicitly to avoid that.
+
+### Is torch needed at all?
+
+For **video**, the depth model itself does not use it — V3 is ONNX. torch is
+there for the **stills** default (Depth Pro), Depth Anything V2, Video Depth
+Anything (which *is* torch, despite the name's resemblance to V3), and the GPU
+warp. Every import of it is guarded, so a machine without it degrades rather
+than breaks — but `requirements.txt` asks for it and the still-image path
+needs it, so the installer installs it.
 
 ## Installing manually
 
