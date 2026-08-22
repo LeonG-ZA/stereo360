@@ -257,6 +257,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "It also lowers the depth range about 20%%, so pair it "
                         "with --strength 1.2 to keep the same parallax. "
                         "Measured on V3 only. (default: 0, off)")
+    p.add_argument("--flatten-ground", type=float, default=0.0, metavar="F",
+                   help="Pull the ground onto the flat plane it actually is. "
+                        "For any plane, inverse depth is exactly linear in the "
+                        "ray direction, so one plane is fitted to whatever is "
+                        "below the horizon and the ground is blended toward "
+                        "it. Fixes what --face-angular-correction cannot: that "
+                        "correction straightens the dome, which is symmetric "
+                        "about each face axis, and leaves the ground *tilted* "
+                        "-- measured on a road, 0.13 camera heights too high "
+                        "behind and 0.10 too low in front, which reads as the "
+                        "road still bulging. A pixel's correction fades out as "
+                        "it disagrees with the plane, so a kerb or a pothole "
+                        "keeps its own depth while a bowed road does not. "
+                        "Needs a dominant plane in view and refuses without "
+                        "one. 0 = off. (default: 0)")
     p.add_argument("--temporal-depth", type=float, default=0.02,
                    metavar="TAU",
                    help="Hold static depth still between frames, so a "
@@ -508,6 +523,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             input_projection=args.input_projection,
             face_overlap=face_overlap,
             angular_correction=angular_correction,
+            flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
             output_width=args.output_width,
@@ -540,6 +556,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             input_projection=args.input_projection,
             face_overlap=face_overlap,
             angular_correction=angular_correction,
+            flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
             reporter=reporter,
@@ -573,6 +590,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
         angular_correction=angular_correction,
+        flatten_ground=args.flatten_ground,
         output_mode=args.output_mode,
         yaw=args.yaw,
         output_width=args.output_width,

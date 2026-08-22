@@ -168,6 +168,7 @@ def right_eye_from_depth(
     stabiliser: Optional["DepthStabiliser"] = None,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
 ) -> tuple:
     """M2 path: per-face depth estimation -> equirect inverse depth -> DIBR.
 
@@ -175,7 +176,8 @@ def right_eye_from_depth(
     each frame normalises itself and the result wobbles; see `DepthRange`.
     """
     disp = depth_map_for_frame(frame, face_size, backend, depth_tiles, faces,
-                               face_overlap, angular_correction)
+                               face_overlap, angular_correction,
+                               flatten_ground)
     extra = {}
     if depth_range is not None:
         lo, hi = depth_range.update(disp)
@@ -323,6 +325,7 @@ def depth_map_for_frame(
     faces: Optional[dict] = None,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
 ) -> np.ndarray:
     """Single-frame equirect inverse-depth map via the cubemap stage."""
     h, w = frame.shape[:2]
@@ -337,7 +340,12 @@ def depth_map_for_frame(
         depths = backend.estimate_chunk([faces[f] for f in projection.FACES])
         disp_faces = dict(zip(projection.FACES, depths))
     del faces  # free ~66 MB at 8K before assembling the disparity map
-    return assemble_depth(disp_faces, w, h, face_overlap, angular_correction)
+    disp = assemble_depth(disp_faces, w, h, face_overlap, angular_correction)
+    if flatten_ground > 0.0:
+        from .ground import flatten
+
+        disp = flatten(disp, flatten_ground)
+    return disp
 
 
 def depth_maps_for_chunk(
@@ -348,6 +356,7 @@ def depth_maps_for_chunk(
     face_sets: Optional[list] = None,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
 ) -> list:
     """M3 path: estimate equirect inverse depth for a chunk of consecutive
     frames, using the backend's temporal chunk API per cubemap face.
@@ -375,6 +384,10 @@ def depth_maps_for_chunk(
         # gets its own reconciliation rather than one for the chunk.
         maps.append(assemble_depth({f: per_face[f][i] for f in projection.FACES},
                                    w, h, face_overlap, angular_correction))
+    if flatten_ground > 0.0:
+        from .ground import flatten
+
+        maps = [flatten(m, flatten_ground) for m in maps]
     return maps
 
 
@@ -999,6 +1012,7 @@ def convert(
     temporal_depth: float = DepthStabiliser.DEFAULT_TAU,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
     output_width: Optional[int] = None,
@@ -1090,7 +1104,7 @@ def convert(
                              strength, chunk_size, chunk_overlap,
                              fg_erode, inpaint_mode, temporal_fill, depth_tiles,
                              split_baseline, gradient_limit, face_overlap,
-                             angular_correction)
+                             angular_correction, flatten_ground)
         else:
             depth_range = DepthRange()
             stabiliser = (DepthStabiliser(temporal_depth)
@@ -1102,7 +1116,8 @@ def convert(
                         source.equirect, face_size, depth_backend, strength,
                         fg_erode, inpaint_mode, depth_tiles, split_baseline,
                         gradient_limit, source.faces, depth_range,
-                        stabiliser, face_overlap, angular_correction)
+                        stabiliser, face_overlap, angular_correction,
+                        flatten_ground)
                 elif use_cubemap:
                     right = right_eye_passthrough(source.equirect, face_size)
                 else:
@@ -1226,6 +1241,7 @@ def preview_frame(
     input_projection: str = "auto",
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
     reporter: Optional[Reporter] = None,
@@ -1292,7 +1308,8 @@ def preview_frame(
             source.equirect, face_size, depth_backend, strength, fg_erode,
             inpaint_mode, depth_tiles, split_baseline, gradient_limit,
             source.faces, face_overlap=face_overlap,
-            angular_correction=angular_correction)
+            angular_correction=angular_correction,
+            flatten_ground=flatten_ground)
     elif use_cubemap:
         right = right_eye_passthrough(source.equirect, face_size)
     else:
@@ -1432,6 +1449,7 @@ def _convert_chunked(
     gradient_limit: float = 0.0,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
+    flatten_ground: float = 0.0,
 ) -> None:
     """M3 streaming: buffer chunk_size frames, estimate depth with temporal
     context per cubemap face, blend chunk overlaps, warp, encode in order.
@@ -1458,7 +1476,7 @@ def _convert_chunked(
                      if sources[0].faces is not None else None)
         maps = depth_maps_for_chunk(chunk, face_size, backend, depth_tiles,
                                     face_sets, face_overlap,
-                                    angular_correction)
+                                    angular_correction, flatten_ground)
         if prev_tail:
             head = _blend_overlap(prev_tail, maps[:len(prev_tail)])
             maps = head + maps[len(prev_tail):]
