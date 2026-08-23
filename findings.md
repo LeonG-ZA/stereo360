@@ -1817,3 +1817,49 @@ projecting vertices and deciding cuts, **1.6%**. Nearly all of the cost is the
 brute-force stand-in for a rasteriser, and a mesh built at depth resolution
 rather than image resolution would start from about 16x fewer quads, since the
 depth resolves roughly one independent value per 7 px anyway.
+
+### A metric scale makes the baseline a dial, and indoors it is worth turning
+
+Once the depth is metric the eye separation stops being a taste setting and
+becomes a number with units, which makes an old trade newly measurable: how
+much depth is being bought with how much damage.
+
+The damage scales with how near the scene is, and a room is much nearer than a
+street. Measured over the same two scenes, at a true 65 mm:
+
+| scene | median depth | median disparity | p99 disparity | depth edges |
+|---|---|---|---|---|
+| road | 22.5 m | 3.5 px | 51.6 px | 5203 |
+| indoor | 1.6 m | **49.0 px** | 93.7 px | **32448** |
+
+The typical indoor pixel moves further than the road's 99th percentile, and
+there are six times as many depth discontinuities for it to move across — five
+times the total disocclusion area. None of that is a defect. At 0.8 m a 65 mm
+baseline subtends 4.4 degrees and a real pair of eyes verges 4.65, so the
+geometry is right; the scene is simply demanding, which is why VR capture
+generally avoids objects that close.
+
+Dropping to 40 mm indoors, changing nothing else:
+
+| | cut geometry, left / right |
+|---|---|
+| 65 mm | 0.42% / 0.36% |
+| 40 mm | **0.18% / 0.14%** |
+
+A 38% smaller baseline removed about 60% of it — steeper than linear, as the
+disocclusion numbers above predict. Judged in a headset the room still read
+with good depth and visibly less breakup, so indoors this is a trade worth
+making. It is not worth making on the road, which has almost no disocclusion to
+save at 3.5 px of median disparity.
+
+What it does *not* do is improve the renderer. The same artifacts are present
+in the same places; there is simply less warping for them to attach to. That
+distinction matters when reading any before-and-after: less work done is not
+the same as work done better.
+
+A second thing this comparison ruled out. The suspicion was that indoor scenes
+suffer because they are full of low-contrast boundaries — white chair against
+cream wall — and that the depth model cannot localise them. The population says
+otherwise: the median colour contrast across a depth step is 40 levels indoors
+against 39 on the road, and 12% of indoor edges fall below 10 levels against
+16% outdoors. Indoor is not lower contrast. It is just closer.
