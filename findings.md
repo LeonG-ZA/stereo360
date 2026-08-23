@@ -1929,3 +1929,86 @@ Open questions, none of them settled:
   the splat's two eyes scored 5.99 and 6.22 above their floor and the mesh's
   4.64 and 4.42, gaps of about 0.2 in both. Chaining should drive that gap
   toward zero while leaving the absolute error roughly where it was.
+
+### How the baseline is divided between the eyes, measured
+
+The preceding argument says the pair matters more than either half. That is
+testable: align each eye to the source by brute-force integer shift, which
+divides out where a feature sits and leaves how far its shape had to bend, and
+read the *difference between the eyes* rather than either eye's fidelity.
+
+Whole baseline, a reconstructed left eye, a round trip and an even split turn
+out not to be four ideas but four points on one axis — what fraction of the
+total separation the left eye takes. Measured on three small features that the
+depth map is known to get wrong, at a constant 65 mm total:
+
+| left eye's share | lamp finial | sign post | handrail |
+|---|---|---|---|
+| 0% (pristine) | 12.30 | 8.83 | 10.39 |
+| 15% | 1.77 | 2.65 | 5.01 |
+| 30% | 0.79 | 2.82 | 2.66 |
+| 50% | **0.09** | **1.27** | **0.63** |
+
+Two things fall out, and one of them was not expected.
+
+**A pristine eye is the worst case, by an order of magnitude.** Leaving one eye
+untouched guarantees maximum mismatch on exactly the small features the depth
+map gets wrong, because the other eye carries all of the error. This is the
+opposite of the intuition that an unmodified eye must be the safe one.
+
+**The curve has a knee, not a slope.** The expectation was that error would
+scale with displacement, so a 15% share would buy about 15% of the benefit.
+It buys 86% of it on the finial and 70% on the sign post. Once both eyes are
+being reconstructed at all they are in the same regime, and what remains is
+only the difference in how far each was pushed. Where there is a reason to keep
+one eye close to the original, 15/85 is therefore a real option; with no such
+reason 50/50 is still the minimum and is what the renderer does.
+
+Two arrangements that reconstruct the left eye *without* displacing it were
+also measured, and neither reaches an even split:
+
+| left eye | finial | sign post | handrail |
+|---|---|---|---|
+| reconstructed at zero baseline | 10.59 | 3.94 | 6.97 |
+| round trip out to the right eye and back | 8.82 | 1.34 | 5.19 |
+
+Reconstructing at zero baseline cannot work in principle: displacement is zero
+for every pixel whatever the depth says, so the eye picks up the rasteriser's
+resampling character and none of the depth map's geometry. The round trip does
+carry the geometry — the two warps fail to cancel wherever the depth is wrong —
+and it nearly closes on the sign post at 11 m, which barely moves. It fails on
+the finial at 1.6 m, which moves 27 px, opens large holes, and comes back
+carrying invented fill rather than its own distortion.
+
+Chaining the left eye off the right, rather than off the source, was the
+proposal this set out to test. It wins once (sign post 1.27 to 0.29), loses
+once (handrail 0.63 to 1.41) and ties once, while raising the absolute error
+every time through double resampling. Not worth its complexity on this
+evidence.
+
+**A caveat that limits all of the above.** The measure is the *magnitude* of
+each eye's distortion, not its direction. A 0.09 at 50/50 says the two eyes are
+distorted equally, not identically — and the finial is visibly distorted in
+*opposite* directions in the two eyes, leaning right in one and left in the
+other. If mirroring is itself uncomfortable, an even split scores well on a
+metric blind to its main flaw. Settling that needs the eyes aligned to each
+other rather than each to the source.
+
+### Two mesh renderer notes
+
+**A fold is not a stretch, and the cut test only sees stretch.** A quad whose
+warped corners reverse order has folded the surface back through itself; what
+gets drawn is its back face, mirrored. It is *narrow*, not wide, so a test on
+projected width passes it. Measured on one indoor scene, 12043 quads fold. In
+practice culling them changed 0.0001% of pixels because the folded faces were
+already losing the depth test to the surface in front — the cull is correct and
+nearly free, and it is not the fix for anything visible.
+
+**The mirrored fill duplicates objects.** `_directional_fill` continues
+background into a hole by mirroring across the hole boundary, which is right
+for grass or carpet and wrong when the neighbour is recognisable: a tap beside
+a stone pillar came back reflected into a symmetric phantom. Telea inpainting
+leaves a soft smear instead, differing on 0.07% of the frame, and in stereo the
+smear is much the lesser evil. The mirroring exists for temporal stability, so
+this is a still-image versus video trade rather than a defect: prefer
+inpainting for photos, keep mirroring for footage.
