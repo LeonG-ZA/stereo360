@@ -66,18 +66,26 @@ the other, which is the mismatch that tires a viewer; at 0.5 both eyes carry
 it equally instead. It is a trade between a sharper eye and a better-agreeing
 pair.
 
-## Fill the mesh renderer's cuts properly
+## Withdrawn: "the mesh renderer leaves cuts unfilled"
 
-The mesh path cuts geometry at silhouettes and then has to fill what it
-removed, and the fill does not reach everything: 0.012% to 0.025% of an indoor
-frame is left unfilled, with blobs up to about 2000 px. The splat path has no
-such problem because `gradient_limit` keeps the warp injective so holes never
-form — it pays for that by flattening small structures, which is the whole
-reason the mesh exists.
+There was an entry here claiming the mesh path fails to fill some of what it
+cuts. It was wrong and is kept only so the claim is not repeated.
 
-`fill_holes` was built for splat holes, which are thin ribbons along a depth
-edge. Mesh cuts are wider and shaped differently. Whether that is the reason
-has not been established.
+`fill_holes` fills the whole mask: handed 0.1378% of an indoor frame in blobs
+up to 11800 px, it leaves nothing, in both its directional and Telea modes.
+The pixels that looked unfilled sit on no cut at all -- they are near-black
+scene content, value 7 where the source is 12 and its surroundings 14, which
+crossed an arbitrary "darker than 8" line after resampling. At a threshold
+that catches genuine holes (value 0) an indoor mesh render measures 0.0000%.
 
-Until it is fixed the mesh path cannot be judged fairly on anything else,
-because the residual black dominates the impression.
+The black that really was there came from the measurement scripts, which skip
+filling on purpose so it cannot contaminate a shape residual. Assembling their
+output into viewable images was the mistake, and it was in the assembly, not
+the renderer.
+
+The mesh renderer's real open defects are the ones in its own docstring: a
+noise floor the splat does not have, and four hairlines at longitudes +/-45
+and +/-135 degrees. Both come from scattering rounded samples instead of
+computing coverage per output pixel, and both would go with a proper
+rasteriser -- which is also the fast one, since profiling puts the actual
+geometry at 1.6% of the cost.
