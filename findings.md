@@ -1636,3 +1636,184 @@ which is all the geometry requires).
 Whatever survives is filled by continuing the background inward from the side
 geometry says it lies on, which is deterministic and therefore stable frame to
 frame; `--inpaint` only sees what that cannot reach.
+
+### Depth Anything 3 metric: the scale is real, and the input size is part of it
+
+`DA3METRIC-LARGE` is a plain single-view DinoV2-L with a DPT head — its config
+has no camera decoder and no cross-view attention, so the six faces are
+independent and none of the multi-view machinery applies. On a CPU-only torch
+it runs a face in 3.2 s at its default `process_res` of 504, which is about the
+wall time the ONNX V3 small path takes on the GPU for all six.
+
+What it buys is the one thing relative depth cannot give: a scale. Every render
+before this had an arbitrary one — the same `--strength 1.2` produced a 49 mm
+eye separation outdoors and 35 mm indoors, against a human 65 mm, and there was
+no way to know which was which. The metric output can be checked against common
+sense with no ground truth at all:
+
+| scene | fitted camera height | check |
+|---|---|---|
+| road | 1.58 m | straight down measures 1.6 m |
+| indoor | 1.41 m | plus 1.01 m to the ceiling = a 2.41 m room |
+
+Both are what a tripod and a house actually are. With that, the baseline stops
+being a taste setting. The warp forms `lam = 1 / (dn + _MIN_INV_DEPTH)` and
+shifts by `strength * _BASELINE_SCALE` in those units, and normalisation is
+affine, so choosing `hi - lo = 1/S` and `lo = _MIN_INV_DEPTH/S` makes one
+relative unit mean `S` metres. The eye separation is then
+`strength * _BASELINE_SCALE * S` metres, and asking for 65 mm is arithmetic.
+
+**`process_res` is not a quality knob.** Raising it from 504 to 1008 sharpens
+the depth edge across a thin upright from 6 px to 2 px, and breaks the metric
+scale: the road camera drops from 1.58 m to 0.84 m and the room from 2.41 m to
+1.72 m. The input size is part of what the model was calibrated against. Nor is
+one constant enough to repair it — the ratio between the two runs has a median
+of 1.98 but an interquartile spread of 1.23, so a single rescale leaves about
+23% of depth-dependent distortion.
+
+Both can be had at once, because the two errors live at different spatial
+frequencies. The scale error is smooth (the model reading the wrong implied
+focal length); the detail is local. Dividing the 1008 map by a heavily
+low-passed version of its own ratio against the 504 map restores the calibrated
+scale and keeps the sharp edge:
+
+| | camera | depth edge |
+|---|---|---|
+| 504, calibrated | 1.58 m | 6 px |
+| 1008, sharp | 0.84 m | 2 px |
+| fused | **1.59 m** | **2 px** |
+
+Two smaller things the metric path forces:
+
+**The up face has nothing to measure.** Shown only sky it answers about 10 m
+where the side faces put the same sky at 88 m, which paints a ring across the
+sky at the latitude the faces meet — a step from 0.9 px of parallax to 8. It is
+fixed by rescaling that one face against the ratio the aligner wanted for the
+others (0.187 here), leaving the five faces that contain ground untouched.
+Indoors, with no sky, nothing needs rescuing.
+
+**The repo's tuned constants assume percentile normalisation.**
+`_erode_foreground` weights by `clip((rng - 0.05)/0.05, 0, 1)`, which is
+calibrated for a scene spread across most of [0, 1]. A metric encoding squeezes
+the midground toward zero: the van at 8.5 m and the road at 14.7 m came out at
+0.0676 and 0.0180, a contrast of 0.0496 — just under the threshold, so the
+erosion computed a weight of exactly zero and did nothing at all. Any constant
+expressed in normalised depth units needs re-reading when the normalisation
+changes.
+
+### There is no halo
+
+For most of an investigation into why a van's edge looked thicker in one eye,
+the working theory was that the depth map's foreground overhangs its silhouette
+by about 7 px — a halo — so a strip of road carries the vehicle's depth and
+travels with it. Four fixes were built against that theory and all four failed:
+
+| approach | depth-edge offset | edge width |
+|---|---|---|
+| none | +7 px | 3 px |
+| guided filter (r=8) | +10 px | 18 px |
+| joint bilateral (r=20) | +2 px | 26 px |
+| weighted mode, per face | +8 px | 3 px |
+| weighted mode, post-assembly | +2 px | 0 px |
+
+The guided filter and the joint bilateral are weighted *means*, and a mean
+across a depth step returns values between its two sides, so moving the edge to
+the right place costs it its sharpness — and a 26 px depth ramp is exactly what
+`--gradient-limit` exists to suppress. The weighted mode (split the window by
+colour similarity, take the side that wins, never average across) does move the
+edge without blurring it, but only after face assembly: the van sits at
+longitude -146 degrees, inside a face overlap, and sharpening two faces
+separately before cross-fading them puts the ramp straight back.
+
+`fg_erode` "fixed" it and cost more than it saved. At the reach needed to
+remove the overhang (8 px) it eats the van's own bodywork — the white strip
+between its rear window and its outer edge is only 10 px wide, and came out
+8 px in one eye against 13 in the other. There is no good setting: at 2-4 the
+strip is perfect and the road still drags, and at 6 and 7 the probe reads +4 and
+-13 px of disparity where the truth is -4, worse than either end. On the mesh
+path it was worse still, leaving railings and indoor chair posts visibly eaten.
+
+**Then the premise was measured, and it was wrong.** Across 38 edges with a
+step in both colour and depth, the two agree to within a pixel — median -1.0 px
+where the foreground lies left, +0.0 px where it lies right. Individually:
+handrail post +0, sign post -1, kerb -1, bin -1. There is no systematic halo to
+erode.
+
+The van is a special case, and the reason is visible in the raw pixels. Across
+its rear-right edge the body reads 128-139 and the road beside it 117-127:
+
+| edge | colour contrast across the depth step |
+|---|---|
+| **van rear-right** | **1 level** |
+| bin | 20 levels |
+| kerb / steps | 32 levels |
+| handrail post | 54 levels |
+| sign post | 73 levels |
+
+About one level. The only visible feature is a single dark trim line one pixel
+wide. There is no image evidence there for any algorithm to localise the
+boundary with, which is precisely why three colour-guided methods failed on it:
+they relocate a depth edge by following the picture's edge, and at the van
+there is no picture edge to follow.
+
+The original 7 px was also partly a measurement error — it compared the
+*midpoint of the depth ramp* (727) against the *dark trim line* (721), which
+are different landmarks. Measured like for like, the foreground ends at 724
+against a trim line at 721, about 3 px.
+
+The lesson is the ordinary one: measure the premise before building against it.
+Four implementations, each sound in itself, were aimed at a defect that the
+population statistics say is not there.
+
+### Rendering the warp as a mesh
+
+`right_eye_from_disparity` treats every source pixel as an independent point:
+lift it by its inverse depth, translate to the other eye, reproject, scatter it
+into a 2x2 footprint, keep the nearest. Nothing in that says two neighbouring
+pixels belong to one surface, so a small object's pixels land unevenly and
+shear along the warp direction — which is opposite in the two eyes. A bollard
+lamp's finial, the nearest object in one scene at 1.6 m, came out as a block
+leaning right in the left eye and left in the right eye.
+
+A mesh keeps them joined: vertices from the depth samples, quads between
+neighbours, each quad either kept or cut, and the surface between vertices
+interpolated rather than left to chance. Depth values are never rewritten, so
+`--gradient-limit` is not needed — the cut takes its place, and the object
+keeps its true depth. Measured as error against the source after allowing for
+parallax, above each renderer's own noise floor:
+
+| scene | mesh | splat |
+|---|---|---|
+| sign post | **0.99** | 4.59 |
+| lamp finial | **2.63** | 6.11 |
+| handrail | 5.53 | **5.05** |
+
+Two wins and a tie. The handrail is where a mesh has least to offer: a thin
+diagonal bar disoccludes along its whole length, so it produces the most cut
+area of anything in the frame.
+
+**Cut on projected stretch, not on depth ratio.** A ratio test is scale-free
+and fires just as hard on a tree forty metres away — where a leaf and the gap
+behind it differ by a fraction of a pixel — as on a silhouette two metres away.
+It left the canopy riddled: 1131 separate holes, 818 of them 4 px or smaller.
+Cutting instead when the warp pulls a quad wider than 2.5 output pixels drops
+that to 132 holes and takes the canopy and the van edge to zero, because it
+only removes geometry that would have been a visible rubber sheet.
+
+The prototype is not production, and its two remaining defects share one cause.
+It scatters samples rounded to the nearest pixel and composites them
+far-to-near, where a real rasteriser computes coverage per output pixel. That
+gives it a noise floor the splat does not have — rendering at zero baseline,
+where a perfect renderer must return the source exactly, it leaves a residual
+of 1.9 to 5.7 depending on the crop, against the splat's 0.00 — and it produces
+four hairlines at longitudes +/-45 and +/-135 degrees, where ties in the
+compositing order flip under float32 jitter and the texture coordinate steps a
+quarter of a pixel. Breaking ties by proximity to the pixel centre was tried
+and made it worse.
+
+Speed is not the obstacle it looks like. Profiling one band: argsort 46%, the
+sample blend 30%, rounding and scatter 23% — and the actual geometry,
+projecting vertices and deciding cuts, **1.6%**. Nearly all of the cost is the
+brute-force stand-in for a rasteriser, and a mesh built at depth resolution
+rather than image resolution would start from about 16x fewer quads, since the
+depth resolves roughly one independent value per 7 px anyway.
