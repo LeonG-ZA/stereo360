@@ -2012,3 +2012,83 @@ leaves a soft smear instead, differing on 0.07% of the frame, and in stereo the
 smear is much the lesser evil. The mirroring exists for temporal stability, so
 this is a still-image versus video trade rather than a defect: prefer
 inpainting for photos, keep mirroring for footage.
+
+## The mesh renderer was wrong, not slow, and the same change fixes both
+
+The mesh prototype was moved to the GPU to make it fast. Profiling the result
+said the port had missed the point: 90% of its time went to `round+mask`,
+`zbuffer+scatter` and `blend` -- the brute-force stand-in for a rasteriser --
+and 0.7% to the geometry. It was faster hardware running the wrong algorithm,
+and 2.9x was the ceiling that bought.
+
+**The wrong algorithm.** Each 1x1 source quad was sampled at 16 fixed points,
+each point rounded to the nearest output pixel and scattered. Wasteful where
+the warp compresses (16 samples onto one pixel), starved where it stretches
+(4 samples across 2.5 px), and wrong everywhere: the texture coordinate came
+from where a *sample* fell rather than from where the *output pixel* is, so
+the rounding error went into the resampled image.
+
+**The replacement** asks which output columns a segment actually covers -- the
+integers in `[u0, u1)` -- and solves for the source position at each. Segment i
+ends where segment i+1 begins, so on a connected surface every output column
+lies in exactly one segment: measured, 99.88% of candidates win their pixel
+uncontested, against 78% before. `max_stretch` bounds coverage to four
+columns, so the variable-length expansion a general rasteriser needs -- and
+which DirectML has no primitive for -- collapses to four masked passes.
+
+**Two tests with a knowable right answer** decided it, because equality with
+the renderer being replaced is the wrong bar.
+
+*Identity.* At baseline 0 the warp is a no-op, so the output must be the
+source; anything else is the renderer's own noise floor.
+
+*Constant depth.* `_eye_offset` is a rotation of the horizontal plane, so the
+whole sphere shifts by one uniform angle and `map_x` must step by exactly 1 per
+column. Departure from that is the hairline artifact, measured rather than
+eyeballed. The map is recovered by warping a float32 ramp whose value is the
+column index -- it must be float, since a byte-packed ramp wraps every 256
+columns and interpolating across that wrap returns nonsense.
+
+| | identity: pixels wrong | mean error | step error | worst column |
+|---|---|---|---|---|
+| scatter | 37.9% | 1.03 levels | 0.68 px | 4517x median at +134.8 deg |
+| scanline | **0.000%** | **0.0000** | **0.00000** | none |
+
+The scatter renderer's worst column landing on +134.8 degrees reproduces the
+documented +/-135 hairline from first principles. **The noise floor and the
+hairlines were one bug**, and exact coverage removes both -- so the "expect the
+mesh render to look slightly softer" caveat no longer applies.
+
+On the real 7680x3840 frame: **99.8 s to 8.7 s, 11.5x**, with *less* left
+unfilled (0.094% against 0.138%) because exact coverage wastes nothing.
+
+### Three porting bugs, and what they have in common
+
+None of them produced anything that looked broken.
+
+**The eye-offset sign.** `_eye_offset` is called as `_eye_offset(lam, d,
+-baseline)`; inlining it with `+baseline` renders the *opposite eye*. The
+output is a clean, plausible stereo frame the whole time. It took reading the
+numpy source line by line, not looking at the image, and it was worth 89% of
+pixels differing and double the cut area.
+
+**Half a pixel.** The projection ends `+ (w/2 - 1/2)`, not `+ w/2` -- pixel
+centres, not corners. Worth only 0.1% on its own, but it changes every
+rounding decision.
+
+**A large scalar subtraction.** Building a global scatter index and reducing it
+to band-local afterwards -- `flat = cat(flats) - y0 * w` -- is the obvious way
+to write it and it silently destroys the result. The offset passes 2**24 at row
+2184, and DirectML puts int64-minus-large-scalar through float32, where the
+spacing at 20M is 2. The low bit of the target column is lost, every write
+lands on an even column, and 21.6% of the frame comes out empty -- *all of it
+on odd columns*, and none of it below row 2184. Keeping the index band-local
+before the multiply keeps every value under 2**21, which float32 holds exactly
+whatever the backend does underneath.
+
+The device primitives were all innocent: `ceil`, `remainder`, `round`,
+`.long()`, `index_put_`, `scatter_reduce_`, `expand().reshape()` and int64
+arithmetic each tested exact, at scale and at the magnitudes involved. What
+found it was dumping the scatter index itself and noticing the k-loop parts
+were 50/50 even/odd while their concatenation was 100% even. The lesson is the
+project's usual one in a new place: measure the intermediate, not the output.

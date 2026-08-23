@@ -49,6 +49,7 @@ import numpy as np
 
 import da3_render as R
 import mesh_warp
+import mesh_raster_gpu
 from stereo360 import pipeline, projection, warp
 
 
@@ -80,6 +81,12 @@ def main():
                     help="fill holes by inpainting rather than by "
                          "mirroring the neighbouring background")
     ap.add_argument("--cut", type=float, default=mesh_warp.CUT_RATIO)
+    ap.add_argument("--raster", action="store_true",
+                    help="use the scanline rasteriser on the GPU instead of "
+                         "the subsampling scatter. Computes coverage per "
+                         "output pixel, so it reproduces its input exactly "
+                         "at zero baseline and has no hairlines; also ~11x "
+                         "faster. `--subdiv` is ignored when it is on")
     # Off. Applying it cost far more than the halo it fixed: the railing
     # posts and the indoor chair posts came back almost entirely eaten. The
     # cut mask is not the cause -- measured, eroding *reduced* cut area over
@@ -148,11 +155,13 @@ def main():
 
     eyes = []
     # Whole baseline: the left eye is the original, copied through rather
-    # than rendered. It has to be copied, not rendered at zero baseline --
-    # this rasteriser scatters rounded samples and does not reproduce its
-    # input even when nothing moves (a residual of 1.9 to 5.7 against the
-    # splat's 0.00), so rendering an identity warp would soften a frame that
-    # needs no warping at all.
+    # than rendered. With the scatter renderer it *has* to be copied: it
+    # rounds its samples and so does not reproduce its input even when
+    # nothing moves (a residual of 1.9 to 5.7 against the splat's 0.00), and
+    # rendering an identity warp would soften a frame that needs no warping.
+    # `--raster` no longer has that problem -- measured, it reproduces the
+    # source exactly at zero baseline, 0 levels on every pixel -- but the
+    # copy is still both correct and free, so it stays either way.
     #
     # Worth it where one eye's shift *occludes* rather than reveals: hiding
     # something behind a nearer surface costs nothing, while revealing what
@@ -168,10 +177,11 @@ def main():
     # the whole: an even split gives -1 and +1, and 15/85 gives -0.3 and +1.7.
     for name, sgn in plan:
         t = time.time()
-        img, cut = mesh_warp.render_full(eq, frame, sgn * b_units,
-                                         cut_ratio=args.cut,
-                                         subdiv=args.subdiv,
-                                         dn_cut=eq_cut)
+        render = (mesh_raster_gpu.render_full if args.raster
+                  else mesh_warp.render_full)
+        img, cut = render(eq, frame, sgn * b_units,
+                          cut_ratio=args.cut, subdiv=args.subdiv,
+                          dn_cut=eq_cut)
         print(f"  {name}: {time.time() - t:.0f}s, cut {100.0 * cut.mean():.2f}%",
               flush=True)
         if cut.any():
