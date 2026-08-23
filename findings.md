@@ -1863,3 +1863,69 @@ cream wall — and that the depth model cannot localise them. The population say
 otherwise: the median colour contrast across a depth step is 40 levels indoors
 against 39 on the road, and 12% of indoor edges fall below 10 levels against
 16% outdoors. Indoor is not lower contrast. It is just closer.
+
+### Consistency between the eyes may matter more than fidelity in either
+
+An argument from the user, recorded because it reframes what the renderer is
+for and applies to the splat path as much as to any mesh:
+
+> Because the depth map is low resolution, small details do not get rendered
+> correctly. With the whole baseline in one eye, the source eye has the detail
+> right and the reconstructed eye has it wrong, and the mismatch is what causes
+> fatigue. It would be better if the same detail were rendered *incorrectly in
+> both eyes*.
+
+The claim is that binocular agreement is worth more than per-eye accuracy. Two
+eyes that agree on a slightly wrong shape fuse into a slightly wrong object,
+which is comfortable; one right eye and one wrong eye fuse into nothing, and
+the visual system keeps trying.
+
+This is a different phenomenon from the one `--split-baseline` was justified
+by, and the two should not be confused:
+
+* A **monocular region** — content one eye can see and the other cannot — is
+  normal. Every real occluding edge produces one, and the brain suppresses the
+  unmatched side without complaint. That is what the existing note means by
+  each eye's holes falling in different places so fusion hides them, and it
+  stands.
+* A **shape mismatch** on a feature both eyes *can* see is not normal. It
+  presents conflicting disparity across the feature, and nothing in ordinary
+  vision produces it. This is what the argument above is about, and the
+  existing justification says nothing about it.
+
+Today's measurements support the distinction, and are not kind to the current
+split. On a bollard lamp's finial the splat rendered the ball leaning right in
+the left eye and leaning left in the right — the distortion is *mirrored*,
+because the two eyes are warped in opposite directions from the same source.
+That is the worst case for this argument, not the best: whole baseline would
+give one correct ball and one leaning ball, and split gives two balls leaning
+opposite ways.
+
+So there are three arrangements, and the repo has only ever measured the first
+two:
+
+| | left eye | right eye | shape error |
+|---|---|---|---|
+| whole baseline | pristine | distorted | present in one eye |
+| split baseline | distorted | distorted | mirrored between eyes |
+| chained | distorted | distorted | **shared** |
+
+The chained arrangement is the user's proposal: warp the source to the right
+eye, then warp *that* to the left eye rather than going back to the source.
+Whatever the depth map got wrong about a detail is then baked into the right
+eye and inherited by the left, so both carry the same error and the pair
+agrees.
+
+Open questions, none of them settled:
+
+* The left eye becomes a warp of a warp — two resamplings and two hole fills,
+  so it is softer than the right and inherits invented content as if it were
+  real. The pair agrees, but on something partly fictional.
+* Going right-to-left re-invents content the source actually contains. A
+  composite that prefers real source pixels where they exist would avoid that,
+  at the cost of reintroducing the very inconsistency the scheme is for.
+* It is testable without judging by eye. The measure is not each eye's error
+  against the source but the *disagreement between the eyes* — for the finial,
+  the splat's two eyes scored 5.99 and 6.22 above their floor and the mesh's
+  4.64 and 4.42, gaps of about 0.2 in both. Chaining should drive that gap
+  toward zero while leaving the absolute error roughly where it was.
