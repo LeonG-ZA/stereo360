@@ -2092,3 +2092,124 @@ arithmetic each tested exact, at scale and at the magnitudes involved. What
 found it was dumping the scatter index itself and noticing the k-loop parts
 were 50/50 even/odd while their concatenation was 100% even. The lesson is the
 project's usual one in a new place: measure the intermediate, not the output.
+
+## V3 Small under-covers the foreground, and every cure has the same side effect
+
+The depth boundary sits *inside* the object. Read straight off a profile of
+the road frame: at y=2735 the lamp post's picture runs to x=137 while the
+depth leaves its near plateau at x=122, so 15 px of post is told it is
+background. Those pixels stay behind when the post moves, which shaves rounded
+edges and thins thin structures in the warped eye.
+
+**Dilating the depth fixes the shapes.** Shape residual on the splat's right
+eye, going from no dilation to a 16 px dilation: lamp 7.07 -> 3.87, sign post
+5.31 -> 3.21, handrail 7.40 -> 4.53. It is renderer-independent -- it changes
+the depth map before anything is warped -- so the mesh and the splat both take
+it. `--fg-erode` is the exact inverse operation and must go to 0 alongside it.
+
+**And it drags the background with it.** Grass 0-5 px from the lamp reads 0.687
+against its true 0.43; 10-15 px out it is still 0.570. Indoors the same halo
+put an elbow in a grout line: the stretch of line inside the dilation band
+travelled at the table's disparity and the rest at the floor's, turning 3.44
+where the source turns 1.26.
+
+**These are one mechanism, not two.** Dilation does not extend the object. It
+floods the nearest depth in the neighbourhood over everything, so the object
+and its surroundings move together and nothing overtakes anything. That is
+exactly why the shapes survive *and* why the floor drags. No radius separates
+them.
+
+### The barrier idea, and why it cannot work here
+
+Four variants of a geodesic dilation -- one that floods outward but refuses to
+cross an image edge -- were built and measured. All of them keep the grout line
+straight (turn 1.30 to 1.34 against the source's 1.26) and none of them
+recovers the chair rail (bright band still 5.3 to 5.7 px thinner in the right
+eye, against plain dilation's 0.3).
+
+| barrier | bright band R-L | grout turn |
+|---|---|---|
+| none (plain dilate 16) | +0.3 | 3.44 |
+| luminance, edges frozen | -5.7 | 1.30 |
+| luminance, edges absorb | -5.3 | 1.34 |
+| chroma, edges frozen | -5.7 | 1.31 |
+| chroma, edges absorb | -5.7 | 1.31 |
+
+The reason is structural. At the chair there are two chairs stacked on one
+column: a far one at depth 0.23 and the near one whose bright top rail begins
+at depth 0.654. The rail's topmost rows carry the *far* chair's depth, so they
+lag and the band compresses. A barrier belongs exactly there -- it is a real
+boundary between two objects, strong in luminance and in chroma alike -- so
+every barrier blocks precisely where the fill is needed. Tuning the threshold
+or letting edge pixels absorb without emitting does not change that.
+
+Two smaller negatives on the same problem: a **guided filter** made the
+alignment worse rather than better (10.4% of the pole given background depth
+became 23.1% at radius 16 -- it smooths rather than snaps, and shrinks a small
+near-region), and a **colour-weighted median**, which snaps where a mean blurs,
+changed nothing (10.4% -> 10.3%). Both fail for the same reason the barriers
+do: the pole's rim is a specular highlight running brighter than either the
+pole body or the grass, so colour guidance cannot associate it with the object.
+
+The fix is upstream, in the depth map, not in post-processing it.
+
+## The near limit costs the nearest object its shape
+
+`metric_to_normalised` takes the near limit from the 99.9th percentile of
+inverse depth. On the road frame the lamp post exceeds it: 60.9% of the post
+sat at exactly 1.000 with about 0.72 m of real relief thrown away, so cap, rim
+and finial all shared one disparity and it rendered as a cutout.
+
+Raising the percentile to 99.99 removes the clipping (60.9% -> 0.4%) and is
+close to free, because `strength_for` compensates for the changed unit scale --
+the baseline is still the millimetres asked for. Measured left-to-right
+disparity either side of the change: kerb -16 -> -16, road ahead -5 -> -5, far
+treeline -6 -> -6, and only the lamp itself moves, -42 -> -45. The percentile
+exists to reject depth outliers, so 99.99 trusts the near tail further; it is
+a flag, not a new default.
+
+## Four ways a measurement lied, in one afternoon
+
+Worth recording as a set, because they were all the same mistake in different
+clothes: comparing two things that were not comparable.
+
+**A fixed output window across a parallax shift.** The grout line's slope was
+compared over the same output columns in both eyes. The right eye is shifted
+~35 px, so the window held different physical points -- and a straight floor
+line is a curve in equirect, so sampling a shifted piece of a curve changes the
+tangent by itself. That manufactured a slope "inversion" (+0.047 to -0.152)
+which does not exist. Carrying the same points forward instead put vertical
+disparity at 0.08 px under a fitted plane and 0.13 px under V3.
+
+**A threshold calibrated to one normalisation, reused under another.** "Depth
+above 0.95 is near" is meaningful when the near object is clipped at 1.000. It
+is meaningless once the clipping is removed, and it reported 74% of the pole as
+background when nothing had changed. It also made DA3METRIC unrankable against
+V3, since the two do not share a scale.
+
+**A detector gated on the wrong channel.** The chair rail's thickness was
+measured with a wood-hue test requiring saturation > 55. The feature that
+actually thins is the specular band along the rail's top, which is bright and
+*de*saturated, so the test skipped it and reported all variants identical --
+twice -- while the defect was plainly visible. Measuring the bright band
+directly showed 17.0 px in the left eye against 11.3 in the right.
+
+**An edge found by argmax.** "The depth edge sits 46 px outside the lamp" came
+from the single strongest luminance gradient on one scanline, which latched
+onto the cap's internal rim rather than the silhouette. A per-row comparison
+over the whole object reversed the sign: the depth edge sits *inside* the
+object on 8 of 11 rows.
+
+In every case the picture was right and the number was wrong.
+
+## The scanline rasteriser has no vertical coherence
+
+The rasteriser decides coverage independently per row, so a near-horizontal
+silhouette quantises to whole-row steps: the indoor chair rail's top edge comes
+out as a visible staircase where the splat's 2x2 bilinear footprint blends
+across rows and stays smooth. Smoothing the depth after dilation does not touch
+it (tried at sigma 3, 7 and 13), which is the expected result -- it is the
+sampling that is per-row, not the input. Fixing it means rasterising the quad
+rather than the row segment, which is the same move that removed the hairlines.
+Until then the two paths differ in kind: the rasteriser wins on shape and speed,
+the splat on vertical edges.

@@ -81,6 +81,15 @@ def main():
                     help="fill holes by inpainting rather than by "
                          "mirroring the neighbouring background")
     ap.add_argument("--cut", type=float, default=mesh_warp.CUT_RATIO)
+    ap.add_argument("--near-pct", type=float, default=99.9,
+                    help="percentile of inverse depth that defines the near "
+                         "limit. Anything nearer is clipped flat, which costs "
+                         "the closest object its shape: measured on the road "
+                         "frame's lamp post, 60.9%% of it sat at exactly 1.000 "
+                         "with 0.72 m of real relief thrown away. 99.99 "
+                         "removes the clipping there entirely. The percentile "
+                         "exists to reject depth outliers, so raising it "
+                         "trusts the near tail more")
     ap.add_argument("--raster", action="store_true",
                     help="use the scanline rasteriser on the GPU instead of "
                          "the subsampling scatter. Computes coverage per "
@@ -97,6 +106,26 @@ def main():
     # background can take the depth test through its flanks. That is a
     # hypothesis, not a proven mechanism. Either way the trade is bad: a
     # slightly thick van edge is worth far less than intact railings.
+    # The opposite of --fg-erode, and on this frame the more useful one.
+    # V3 Small puts the depth boundary *inside* the object: read straight off
+    # the profile, the lamp's picture runs to x=137 at y=2735 while the depth
+    # leaves its near plateau at x=122, so 15 px of pole is told it is
+    # background and stays behind while the pole moves. Dilating the depth
+    # pushes the boundary back out to the silhouette. Measured as shape
+    # residual on the right eye (lower is less bending): lamp 6.27 -> 2.84,
+    # sign post 5.54 -> 2.75, handrail 7.51 -> 2.91 going from 0 to 24.
+    #
+    # It is a trade, not a free win, and the cost is the one --fg-erode
+    # exists to remove: grass within the dilation radius takes some of the
+    # object's depth and travels with it. Measured at radius 24, grass 0-5 px
+    # from the pole reads 0.622 against its true 0.431, still 0.573 at
+    # 10-15 px. So the object keeps its shape and the ground around it drags.
+    # 8 is the conservative setting, 16 the one that visibly restores the
+    # lamp's finial and shoulder.
+    ap.add_argument("--fg-dilate", type=int, default=0,
+                    help="push the depth boundary outward by this many px "
+                         "before meshing, for depth maps that under-cover "
+                         "the foreground; 0 disables")
     ap.add_argument("--fg-erode", type=int, default=0,
                     help="pull the foreground halo back to the background "
                          "depth by this many px before meshing; 0 disables")
@@ -135,9 +164,17 @@ def main():
         print(f"anchored: plane was {pl.height:.2f} units, scaled by "
               f"{k:.3f} to sit at {args.anchor_height:.2f} m", flush=True)
 
-    d_near = float(1.0 / np.nanpercentile(eq, 99.9))
+    # The near limit sets what one relative unit means in metres, and
+    # `strength_for` compensates, so raising it does NOT scale everyone's
+    # disparity up -- the baseline is still `--mm` millimetres. What changes
+    # is that the nearest object stops being clipped flat and gets its own
+    # shape back.
+    d_near = float(1.0 / np.nanpercentile(eq, args.near_pct))
     scale = d_near * 1.05 * 0.98
     R.metric_to_normalised(eq, scale)
+    print(f"  near limit at the {args.near_pct} percentile; "
+          f"{100.0 * np.mean(eq >= 0.9999):.3f}% of the frame clipped flat",
+          flush=True)
     strength = R.strength_for(args.mm, scale)
     half = strength * 0.5
     b_units = half * warp._BASELINE_SCALE
@@ -145,6 +182,15 @@ def main():
           f"-> {args.mm:.0f} mm, baseline {b_units:.5f} units", flush=True)
 
     eq_cut = None
+    if args.fg_dilate > 0:
+        # Cuts stay on the true silhouette, decided from the un-dilated depth,
+        # for the same reason the erosion path keeps its own copy.
+        eq_cut = eq.copy()
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * args.fg_dilate + 1,) * 2)
+        eq = cv2.dilate(eq, k)
+        print(f"  dilated the foreground depth by {args.fg_dilate} px",
+              flush=True)
     if args.fg_erode > 0:
         # Keep the un-eroded copy: it decides where geometry is cut, while the
         # eroded one decides where the surface goes. See render_full's dn_cut.

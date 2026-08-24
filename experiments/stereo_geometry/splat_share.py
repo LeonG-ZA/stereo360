@@ -45,6 +45,23 @@ def main():
     ap.add_argument("--left-share", type=float, default=0.15)
     ap.add_argument("--gradient-limit", type=float, default=0.6)
     ap.add_argument("--fg-erode", type=int, default=2)
+    # The counterpart to --fg-erode, and nothing about it is specific to the
+    # mesh: it changes the depth map before anything is warped, so the splat
+    # path takes it unaltered. V3 Small puts the depth boundary inside the
+    # object -- on the road frame the lamp's picture runs 15 px past where the
+    # depth leaves its near plateau -- and those pixels stay behind when the
+    # object moves, shaving thin structures and rounded edges.
+    #
+    # Erosion is the opposite operation, so the two cancel; passing a dilation
+    # forces the erosion to 0 rather than letting them fight.
+    ap.add_argument("--fg-dilate", type=int, default=0,
+                    help="push the depth boundary outward by this many px "
+                         "before warping; 0 disables. Costs a halo of "
+                         "background dragged at the object's disparity, out "
+                         "to roughly this radius")
+    ap.add_argument("--near-pct", type=float, default=99.9,
+                    help="percentile of inverse depth defining the near "
+                         "limit; anything nearer is clipped flat")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -62,9 +79,17 @@ def main():
     if frame.shape[1] != w:
         frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
-    d_near = float(1.0 / np.nanpercentile(eq, 99.9))
+    d_near = float(1.0 / np.nanpercentile(eq, args.near_pct))
     S = d_near * 1.05 * 0.98
     R.metric_to_normalised(eq, S)
+    fg_erode = args.fg_erode
+    if args.fg_dilate > 0:
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * args.fg_dilate + 1,) * 2)
+        eq = cv2.dilate(eq, k)
+        fg_erode = 0
+        print(f"  dilated the foreground depth by {args.fg_dilate} px "
+              f"(erosion forced to 0)", flush=True)
     total = R.strength_for(args.mm, S)
     f = args.left_share
     print(f"scale {S:.2f} m/unit, strength {total:.3f} -> {args.mm:.0f} mm, "
@@ -75,7 +100,7 @@ def main():
         t = time.time()
         img, hole = warp.right_eye_from_disparity(
             frame, eq.copy(), s, normalize=False,
-            gradient_limit=args.gradient_limit, fg_erode=args.fg_erode)
+            gradient_limit=args.gradient_limit, fg_erode=fg_erode)
         eyes.append(img)
         print(f"  {name}: {time.time() - t:.0f}s, hole "
               f"{100.0 * (hole > 0).mean():.4f}%", flush=True)
