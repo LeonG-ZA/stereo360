@@ -26,6 +26,19 @@ def right_eye_passthrough(frame: np.ndarray, face_size: int) -> np.ndarray:
     return projection.cubemap_to_equirect(faces, w, h)
 
 
+#: Share of the separation the left eye carries by default. 0.5 -- an even
+#: split -- rather than 0, which is what every version before this used.
+#: Measured on the indoor and road frames with the detail split in place, an
+#: even split is equal or better on every tracked feature at 40 mm and pulls
+#: further ahead at 65 mm, because spreading a depth error over two eyes
+#: degrades more gracefully than concentrating it in one. The two are
+#: indistinguishable to look at on those scenes, so nothing is given up.
+#:
+#: What it costs: at 0.5 neither eye is the untouched photograph. If a scene
+#: reads soft overall, a smaller share is the fallback.
+DEFAULT_LEFT_SHARE = 0.5
+
+
 def _eyes_warped(left_share: float) -> int:
     """How many eyes are synthesized, which is what chunk memory scales with."""
     f = float(np.clip(left_share, 0.0, 1.0))
@@ -36,7 +49,7 @@ def stereo_pair(
     frame: np.ndarray,
     disp: np.ndarray,
     strength: float,
-    left_share: float = 0.0,
+    left_share: float = DEFAULT_LEFT_SHARE,
     **kw,
 ) -> tuple:
     """Return (left, right) for one frame given its inverse-depth map.
@@ -46,8 +59,8 @@ def stereo_pair(
     source, and how far off it the other sits:
 
     * ``0.0`` leaves the left eye untouched and puts the whole baseline in the
-      right. The default, and what every earlier version did.
-    * ``0.5`` splits it evenly.
+      right. What every version before `DEFAULT_LEFT_SHARE` did.
+    * ``0.5`` splits it evenly. The default.
     * ``1.0`` leaves the *right* eye untouched instead.
 
     The total disparity, and therefore the depth effect, is the same at every
@@ -190,7 +203,7 @@ def right_eye_from_depth(
     fg_erode: int = 2,
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
-    left_share: float = 0.0,
+    left_share: float = DEFAULT_LEFT_SHARE,
     gradient_limit: float = 0.0,
     faces: Optional[dict] = None,
     depth_range: Optional["DepthRange"] = None,
@@ -1032,7 +1045,7 @@ def convert(
     inpaint_mode: str = "simple",
     temporal_fill: bool = False,
     depth_tiles: int = 1,
-    left_share: float = 0.0,
+    left_share: float = DEFAULT_LEFT_SHARE,
     gradient_limit: float = 0.0,
     spatial_audio: bool = False,
     ambisonic_codec: str = "auto",
@@ -1264,7 +1277,7 @@ def preview_frame(
     fg_erode: int = 2,
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
-    left_share: float = 0.0,
+    left_share: float = DEFAULT_LEFT_SHARE,
     gradient_limit: float = 0.0,
     width: int = 2048,
     input_projection: str = "auto",
@@ -1474,7 +1487,7 @@ def _convert_chunked(
     inpaint_mode: str = "simple",
     temporal_fill: bool = False,
     depth_tiles: int = 1,
-    left_share: float = 0.0,
+    left_share: float = DEFAULT_LEFT_SHARE,
     gradient_limit: float = 0.0,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,

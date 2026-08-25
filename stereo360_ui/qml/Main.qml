@@ -59,7 +59,7 @@ ApplicationWindow {
     // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
     // an even split.
     property bool sourceRight: false
-    property real baselineShare: 0.0
+    property real baselineShare: 0.5
     readonly property real leftShare: sourceRight ? 1.0 - baselineShare : baselineShare
     property bool spatialAudio: false
     property bool sourceSubsampling: false
@@ -1014,7 +1014,7 @@ ApplicationWindow {
 
                             Row2 {
                                 label: "Sharp eye"
-                                hint: "Which eye keeps the original frame. The warped eye hides what is behind an occluder on one side and has to invent it on the other, so which to pick depends on the scene."
+                                hint: "Which eye keeps the original frame. Only applies below a 0.5 share - at 0.5 the separation is even and neither eye is the original. The warped eye hides what is behind an occluder on one side and has to invent it on the other, so which to pick depends on the scene."
                                 ComboBox {
                                     Layout.fillWidth: true
                                     model: ["Left", "Right"]
@@ -1025,7 +1025,7 @@ ApplicationWindow {
 
                             Row2 {
                                 label: "Baseline shared"
-                                hint: "How much of the separation the sharp eye also carries. 0 keeps it pristine and puts everything in the other eye; 0.5 splits evenly. The 3D effect is the same either way - this chooses where the errors land. Sharing gives far fewer holes per eye and makes the two eyes agree, at the cost of no longer having one untouched eye."
+                                hint: "How much of the separation the sharp eye also carries. 0.5, the default, splits it evenly so a depth error is spread over both eyes rather than concentrated in one; 0 keeps one eye pristine and puts everything in the other. The 3D effect is the same either way - this chooses where the errors land. An even split measured equal or better on every tracked feature and pulls further ahead at wider baselines, at the cost of no eye being the untouched original."
                                 Slider {
                                     Layout.fillWidth: true
                                     from: 0; to: 0.5; stepSize: 0.05

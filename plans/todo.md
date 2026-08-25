@@ -27,14 +27,26 @@ to -9.50 px against a geometric ideal of -9.29, within 3.1% -- the eyes move
 in proportion to their share, and the source eye is bit-identical to the
 input at both extremes.
 
-**Still to decide: the default.** It is 0.0, which is what every earlier
-version did, and the evidence for moving it is mixed. On three small
-features an even split scored 0.09-1.27 for eye-to-eye disagreement against
-8.8-12.3 for the whole baseline in one eye, with a knee suggesting 0.15
-recovers most of it. But the floor under the indoor table was still badly
-asymmetric at 0.15 (+0.93 / -5.27 px) and only symmetric at 0.5 (+/-3.10),
-so the knee may hold for small isolated features and not for extended
-surfaces. That wants headset time across a few scenes, not another metric.
+**The default is 0.5.** It was 0.0, which is what every earlier version did,
+and the evidence for moving it arrived once the detail split was in place.
+On the indoor and road frames the two are indistinguishable to look at at
+40 mm, and an even split is equal or better on every tracked feature:
+indoor the left eye's band goes 1.17 px off the source to 0.17 and the grout
+line 0.04 to 0.03; road, lamp 7.27 to 5.18, sign post 4.71 to 2.76, handrail
+4.74 to 3.26. The margin widens at 65 mm -- 2.09 to 2.47, 1.95 to 2.85, 1.48
+to 2.08 -- which is what spreading a depth error rather than concentrating
+it should do. Both renders use the detail split, so the shape residual's
+known bias against it is common to them and cancels.
+
+One received claim did not survive the check. `stereo_pair` used to argue
+splitting on ~8x less disocclusion per eye. With `gradient_limit` at its
+production 0.6 there are no holes at any share -- 0.0000% at 0, 0.15 and
+0.5 -- because the limiter clamps the depth gradient so the warp stays
+injective. That argument only applies with the limiter off.
+
+What it costs: at 0.5 neither eye is the untouched photograph, and no metric
+here sees overall softness. If a scene reads soft, a smaller share is the
+fallback, and it is a slider.
 
 ## Withdrawn: "the mesh renderer leaves cuts unfilled"
 

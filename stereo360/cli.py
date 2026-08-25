@@ -182,9 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "untouched.")
     p.add_argument("--left-share", type=float, default=None, metavar="F",
                    help="Fraction of the separation the LEFT eye carries, "
-                        "0 to 1. 0 (default) leaves the left eye untouched "
-                        "and puts the whole baseline in the right; 0.5 "
-                        "splits it evenly; 1 leaves the right eye untouched "
+                        "0 to 1. 0.5 (default) splits it evenly; 0 leaves "
+                        "the left eye untouched and puts the whole baseline "
+                        "in the right; 1 leaves the right eye untouched "
                         "instead. The 3D effect is identical at every "
                         "setting - this chooses where the errors land, not "
                         "whether there are any. Sharing costs a second warp "
@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "other, and which way that falls depends on where "
                         "each occluder sits.")
     p.add_argument("--split-baseline", action="store_true",
-                   help="Deprecated alias for --left-share 0.5.")
+                   help="Deprecated. Means --left-share 0.5, which is now the default anyway.")
     p.add_argument("--depth-tiles", type=int, default=None, metavar="N",
                    help="Split each cubemap face into NxN overlapping tiles "
                         "for depth inference (feather-blended). Higher = "
@@ -481,18 +481,26 @@ PHOTO_DEPTH_TILES = 1
 def _left_share(args) -> float:
     """The left eye's share of the separation, from three ways of saying it.
 
-    `--left-share` is the real control. `--source-eye` is shorthand for its
-    two ends, and `--split-baseline` is the old boolean, kept working because
-    it appears in saved presets and scripts. An explicit share always wins,
-    so a preset carrying both is not ambiguous.
+    `--left-share` is the real control. `--source-eye` names which eye keeps
+    the source frame untouched, which is shorthand for the two ends of that
+    range -- and it has to be handled explicitly now the default is an even
+    split, since "left" is no longer what happens anyway. `--split-baseline`
+    is the old boolean, kept working because it appears in saved presets and
+    scripts. An explicit share always wins, so a preset carrying both is not
+    ambiguous.
     """
     if getattr(args, "left_share", None) is not None:
         return float(min(max(args.left_share, 0.0), 1.0))
     if getattr(args, "source_eye", None) == "right":
         return 1.0
+    if getattr(args, "source_eye", None) == "left":
+        return 0.0
     if getattr(args, "split_baseline", False):
         return 0.5
-    return 0.0
+    # Imported here, not at module scope: `pipeline` is deliberately loaded
+    # late so `--help` and the probes do not pay for numpy and torch.
+    from . import pipeline
+    return pipeline.DEFAULT_LEFT_SHARE
 
 
 def resolve_depth_tiles(requested, is_image: bool) -> int:

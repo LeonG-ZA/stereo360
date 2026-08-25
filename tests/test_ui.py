@@ -79,20 +79,22 @@ def test_non_default_settings_are_emitted():
     assert argv[argv.index("--face-size") + 1] == "960"
     assert argv[argv.index("--max-frames") + 1] == "30"
     assert argv[argv.index("--start-frame") + 1] == "15"
-    # A preset saved before the share slider existed carries the old
-    # boolean, and must still mean an even split.
-    assert argv[argv.index("--left-share") + 1] == "0.5"
+    # A preset saved before the share slider existed carries the old boolean.
+    # It meant an even split, which is now the default, so it emits nothing --
+    # and that is the right answer rather than a lost setting.
+    assert "--left-share" not in argv
     assert "--spatial-audio" in argv
 
 
 def test_the_baseline_share_reaches_the_command_line():
-    """0 is the default and must emit nothing -- the CLI reads a missing
-    flag and an explicit 0 the same way, but only one of them says the
-    control was left alone. An explicit share also has to beat the legacy
-    boolean, so a preset carrying both is not ambiguous."""
+    """An even split is the default and must emit nothing, while every other
+    share must emit. A missing flag and an explicit default mean the same
+    thing to the CLI, but only one of them says the control was left alone.
+    An explicit share also has to beat the legacy boolean, so a preset
+    carrying both is not ambiguous."""
     assert "--left-share" not in options.build_argv(dict(BASE))
-    assert "--left-share" not in options.build_argv(dict(BASE, leftShare=0.0))
-    for share, want in ((0.15, "0.15"), (0.5, "0.5"), (1.0, "1")):
+    assert "--left-share" not in options.build_argv(dict(BASE, leftShare=0.5))
+    for share, want in ((0.15, "0.15"), (0.0, "0"), (1.0, "1")):
         argv = options.build_argv(dict(BASE, leftShare=share))
         assert argv[argv.index("--left-share") + 1] == want
     both = options.build_argv(dict(BASE, splitBaseline=True, leftShare=0.15))

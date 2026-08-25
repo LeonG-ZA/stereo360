@@ -287,7 +287,7 @@ _DEFAULTS = {
     "strength": 1.0,
     "gradientLimit": 1.0,
     "faceAngularCorrection": 0.0,
-    "leftShare": 0.0,
+    "leftShare": 0.5,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -405,8 +405,10 @@ def build_argv(
 
     # One number covers both halves of the control: which eye keeps the
     # source, and how far off it the other sits. 0 leaves the left eye
-    # untouched, 1 the right, 0.5 splits evenly. `splitBaseline` is still
-    # honoured so presets saved before the slider existed keep working.
+    # untouched, 1 the right, 0.5 splits evenly and is the default.
+    # `splitBaseline` is still honoured so presets saved before the slider
+    # existed keep working -- it also meant 0.5, so those presets now agree
+    # with the default and emit nothing.
     share = _num(opts.get("leftShare"), _DEFAULTS["leftShare"])
     if opts.get("leftShare") is None and opts.get("splitBaseline"):
         share = 0.5
