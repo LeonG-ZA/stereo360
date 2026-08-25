@@ -32,6 +32,18 @@ def equirect(tmp_path: Path, name="src.jpg", w=512, h=256) -> str:
 
 
 def run(*args, expect=0):
+    """Spawn the real CLI, which on a cold cache downloads a depth model --
+    1.9 GB for the stills default. Every caller is therefore marked `slow`
+    (see pytest.ini), refusals included: an exit code of 1 comes from
+    application-level validation, which happens *after* setup has already
+    reached for the model, so a refusal is no cheaper than a render on the
+    first run. `test_an_image_will_not_write_a_video` blocks on the download
+    exactly like the tests that succeed.
+
+    Without the marker a cold `-m "not slow"` run stalls: each spawn gets
+    900s, dies mid-download, and leaves a ~1.2 GB partial that the next test
+    cannot resume -- eight tests once cost 8.7 GB and cached nothing.
+    """
     proc = subprocess.run([sys.executable, "-m", "stereo360", *args],
                           capture_output=True, text=True, cwd=str(ROOT),
                           timeout=900)
@@ -108,6 +120,7 @@ def test_an_unreadable_still_says_so_in_words(tmp_path):
 
 # ------------------------------------------------------------- the front door
 
+@pytest.mark.slow
 def test_a_photo_converts_with_no_flags_at_all(tmp_path):
     """The whole point of step 1. This used to need
     `--preview-frame 0 --preview-width 0`, which describes the mechanism
@@ -123,6 +136,7 @@ def test_a_photo_converts_with_no_flags_at_all(tmp_path):
     assert "Wrote" in proc.stdout, "a photo is not a 'preview'"
 
 
+@pytest.mark.slow
 def test_the_photo_comes_out_at_full_resolution(tmp_path):
     """Not capped at the 2048 a preview uses. A 7680x7680 stereo photo
     displays on a Quest 3 -- the 35.6 Mpx cap is the video decoder's, and a
@@ -133,6 +147,7 @@ def test_the_photo_comes_out_at_full_resolution(tmp_path):
     assert ffmpeg_io.probe(dst).width == 4096
 
 
+@pytest.mark.slow
 def test_vr180_works_for_photos_too(tmp_path):
     src = equirect(tmp_path)
     dst = str(tmp_path / "half.jpg")
@@ -141,6 +156,7 @@ def test_vr180_works_for_photos_too(tmp_path):
     assert (info.width, info.height) == (512, 256), "side by side, half sphere"
 
 
+@pytest.mark.slow
 def test_the_exit_code_is_zero(tmp_path):
     """Caught a real bug: the image branch fell through to the video summary,
     which asks a PreviewResult for `cancelled`. The file was written and the
@@ -152,6 +168,7 @@ def test_the_exit_code_is_zero(tmp_path):
 
 # ------------------------------------------------------------------ refusals
 
+@pytest.mark.slow
 def test_an_image_will_not_write_a_video(tmp_path):
     src = equirect(tmp_path)
     proc = run(src, "-o", str(tmp_path / "out.mp4"), expect=1)
@@ -188,6 +205,7 @@ def test_asking_for_one_tile_on_a_photo_is_honoured():
     assert cli.resolve_depth_tiles(1, True) == 1
 
 
+@pytest.mark.slow
 def test_a_photo_actually_renders_with_the_photo_default(tmp_path):
     """End to end rather than by inspection, and in both directions: the
     default must *be* one tile, and tiling must still work when asked for.
@@ -205,6 +223,7 @@ def test_a_photo_actually_renders_with_the_photo_default(tmp_path):
         "--depth-tiles is being ignored"
 
 
+@pytest.mark.slow
 def test_a_preview_of_a_video_is_tagged_too(tmp_path):
     """A stereo JPEG is a stereo JPEG, whatever asked for it.
 
@@ -225,6 +244,7 @@ def test_a_preview_of_a_video_is_tagged_too(tmp_path):
     assert gpano.read_projection(str(out)), "no GPano in a video preview"
 
 
+@pytest.mark.slow
 def test_a_png_preview_is_left_alone(tmp_path):
     """XMP goes in a JPEG APP1 segment. A PNG could carry it in an iTXt
     chunk, but that is not what players read, so writing one would be work
@@ -260,6 +280,7 @@ def test_a_video_will_not_write_a_picture_and_says_so_before_rendering(
     assert not out.exists(), "refused before anything was written"
 
 
+@pytest.mark.slow
 def test_an_image_will_not_write_a_format_opencv_cannot_encode(tmp_path):
     """`.heic` names a still, so the old check -- "is the output an image?" --
     waved it through and left the failure to cv2.imencode, which returns
@@ -275,6 +296,7 @@ def test_an_image_will_not_write_a_format_opencv_cannot_encode(tmp_path):
     ("--start-frame", "5"),
     ("--preview-frame", "0"),
 ])
+@pytest.mark.slow
 def test_video_only_flags_are_named_not_ignored(tmp_path, flag, value):
     """Silently ignoring a flag someone typed teaches them that the flags are
     decorative. Each refusal says why it does not apply."""
@@ -284,6 +306,7 @@ def test_video_only_flags_are_named_not_ignored(tmp_path, flag, value):
     assert "the input is an image" in proc.stderr
 
 
+@pytest.mark.slow
 def test_spatial_audio_is_refused_for_a_photo(tmp_path):
     src = equirect(tmp_path)
     proc = run(src, "-o", str(tmp_path / "out.jpg"), "--spatial-audio",
@@ -291,6 +314,7 @@ def test_spatial_audio_is_refused_for_a_photo(tmp_path):
     assert "no audio track" in proc.stderr
 
 
+@pytest.mark.slow
 def test_a_square_image_is_still_refused_as_a_half_equirect(tmp_path):
     """The input checks apply to photos exactly as they do to video -- a 1:1
     still is a 180 crop, and the tool wants the original sphere."""
@@ -301,6 +325,7 @@ def test_a_square_image_is_still_refused_as_a_half_equirect(tmp_path):
 
 # ------------------------------------------------- the video paths still work
 
+@pytest.mark.slow
 def test_video_conversion_is_unaffected(tmp_path):
     """The rule from vr180.md, kept here: nothing about adding photos may
     change what a video does."""
@@ -315,6 +340,7 @@ def test_video_conversion_is_unaffected(tmp_path):
     assert ffmpeg_io.probe(dst).height == 128
 
 
+@pytest.mark.slow
 def test_a_video_preview_is_still_called_a_preview(tmp_path):
     """The two single-image paths report differently on purpose: one is the
     deliverable, the other is a look at what the deliverable will be."""
@@ -327,6 +353,7 @@ def test_a_video_preview_is_still_called_a_preview(tmp_path):
     assert "Preview of frame 1" in proc.stdout
 
 
+@pytest.mark.slow
 def test_video_only_flags_are_fine_on_a_video(tmp_path):
     """The refusal must be scoped to image input, not applied everywhere."""
     from test_end_to_end import make_test_video
@@ -364,6 +391,7 @@ def test_convert_image_passes_settings_through(tmp_path):
 
 # ----------------------------------------------------------------- encoding
 
+@pytest.mark.slow
 def test_jpeg_output_is_not_chroma_subsampled(tmp_path):
     """OpenCV defaults to 4:2:0, which is sensible for a web image and wrong
     for one that gets magnified across a headset's field of view. Measured on
@@ -409,6 +437,7 @@ def test_the_case_of_the_extension_does_not_matter(tmp_path):
             == pipeline.image_encode_params(".jpg"))
 
 
+@pytest.mark.slow
 def test_quality_settings_apply_to_video_previews_too(tmp_path):
     """Deliberate. A preview exists so someone can judge --strength and
     --gradient-limit by eye, and it cannot do that while adding compression
@@ -449,6 +478,7 @@ def test_the_settings_actually_reduce_error(tmp_path):
 
 # ------------------------------------------------------------- GPano metadata
 
+@pytest.mark.slow
 def test_a_photo_is_tagged_as_a_sphere(tmp_path):
     """Without this a viewer sees a large flat JPEG. Measured on a Quest 3,
     GPano alone is enough to get a stacked frame read as stereo 360."""
@@ -465,6 +495,7 @@ def test_a_photo_is_tagged_as_a_sphere(tmp_path):
     assert tags["StitchingSoftware"] == "stereo360"
 
 
+@pytest.mark.slow
 def test_the_tag_describes_one_eye_not_the_stacked_frame(tmp_path):
     """GPano cannot describe a stacked pair, so it describes the panorama one
     eye covers. Device testing showed the dimensions are not read for layout
@@ -484,6 +515,7 @@ def test_the_tag_describes_one_eye_not_the_stacked_frame(tmp_path):
     assert tags["CroppedAreaLeftPixels"] == "0", "360 crops nothing"
 
 
+@pytest.mark.slow
 def test_vr180_is_tagged_as_a_crop_from_the_middle(tmp_path):
     """A VR180 eye covers 180 degrees, which in GPano's terms is a crop from
     the middle of a sphere twice as wide. These are the exact numbers of the
@@ -517,6 +549,7 @@ def test_the_geometry_matches_what_was_tested_on_the_device(mode, size,
     assert gpano.eye_geometry(*size, mode) == expected
 
 
+@pytest.mark.slow
 def test_no_stereo_field_is_invented(tmp_path):
     """GPano defines none. Writing one anyway would be a plausible-looking
     property that no reader honours, and it would imply the file is described
@@ -530,6 +563,7 @@ def test_no_stereo_field_is_invented(tmp_path):
                    for k in gpano.read_projection(dst)), "invented a field"
 
 
+@pytest.mark.slow
 def test_tagging_twice_leaves_one_packet(tmp_path):
     """Nothing writes a JPEG that already has XMP, so this is not a live bug.
     The equivalent guard on the MP4 side was quietly broken for months, which
@@ -547,6 +581,7 @@ def test_tagging_twice_leaves_one_packet(tmp_path):
     assert once.count(gpano.XMP_APP1_HEADER) == 1
 
 
+@pytest.mark.slow
 def test_the_packet_is_found_by_walking_markers_not_searching(tmp_path):
     """Searching for the namespace string would also match those bytes inside
     compressed image data. Not hypothetical: the same shortcut on MP4 found an
@@ -564,6 +599,7 @@ def test_the_packet_is_found_by_walking_markers_not_searching(tmp_path):
     assert gpano.read_projection(dst)["ProjectionType"] == "equirectangular"
 
 
+@pytest.mark.slow
 def test_a_non_jpeg_says_it_carries_no_metadata(tmp_path):
     """PNG can hold XMP in an iTXt chunk, but that is not what players read,
     so writing it would be work in service of a file nobody can view."""
@@ -579,6 +615,7 @@ def test_an_untagged_jpeg_reads_as_untagged(tmp_path):
     assert gpano.read_projection(equirect(tmp_path)) is None
 
 
+@pytest.mark.slow
 def test_video_output_is_untouched_by_any_of_this(tmp_path):
     """GPano is for stills. An MP4 carries st3d/sv3d and must not grow an
     APP1 segment or lose what it already has."""
@@ -655,6 +692,7 @@ def test_the_suggestion_keeps_the_directory_and_extension():
     assert got.endswith("_360_TB.jpeg")
 
 
+@pytest.mark.slow
 def test_a_plain_name_gets_advice_naming_the_players(tmp_path):
     src = equirect(tmp_path)
     proc = run(src, "-o", str(tmp_path / "garden.jpg"))
@@ -662,6 +700,7 @@ def test_a_plain_name_gets_advice_naming_the_players(tmp_path):
     assert "SKYBOX" in proc.stdout, "should say who reads filenames"
 
 
+@pytest.mark.slow
 def test_a_named_file_is_not_nagged(tmp_path):
     """Advice that fires when it is not needed stops being read."""
     src = equirect(tmp_path)
@@ -669,12 +708,14 @@ def test_a_named_file_is_not_nagged(tmp_path):
     assert "filename does not say" not in proc.stdout
 
 
+@pytest.mark.slow
 def test_vr180_is_advised_its_own_tokens(tmp_path):
     src = equirect(tmp_path)
     proc = run(src, "-o", str(tmp_path / "half.jpg"), "--output-mode", "vr180")
     assert "half_180x180_3dh.jpg" in proc.stdout
 
 
+@pytest.mark.slow
 def test_nothing_is_renamed_behind_your_back(tmp_path):
     """It suggests. The file goes exactly where it was asked to go."""
     src = equirect(tmp_path)
@@ -695,6 +736,7 @@ def _size(path) -> tuple:
     return img.shape[1], img.shape[0]
 
 
+@pytest.mark.slow
 def test_output_width_resizes_a_photo(tmp_path):
     """It used to be accepted and then ignored, which is the worst of the
     three options. The interface offers a Resolution dropdown on a photo job,
@@ -712,6 +754,7 @@ def test_output_width_resizes_a_photo(tmp_path):
     assert _size(small) == (256, 256)
 
 
+@pytest.mark.slow
 def test_output_width_larger_than_the_source_is_refused(tmp_path):
     """Same rule as a video, and the same reason: upscaling invents detail.
     Silently clamping would be the ignoring bug wearing a different hat."""
@@ -721,6 +764,7 @@ def test_output_width_larger_than_the_source_is_refused(tmp_path):
     assert "larger than the 512-wide source" in proc.stderr
 
 
+@pytest.mark.slow
 def test_output_width_at_the_source_width_changes_nothing(tmp_path):
     """The UI omits the flag when it matches the source, but the CLI must not
     depend on that -- and a resize to the size it already is would still cost
