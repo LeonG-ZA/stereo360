@@ -64,7 +64,8 @@ def fuse(sharp: np.ndarray, calibrated: np.ndarray,
 
 if __name__ == "__main__":
     OUT = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, r"C:\Users\leong\OneDrive\Documents\stereo360")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(
+                          os.path.dirname(os.path.abspath(__file__)))))
     from stereo360 import ground
 
     sharp = np.load(os.path.join(OUT, "da3metric_7680p_1008_eq.npy"))

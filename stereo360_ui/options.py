@@ -287,6 +287,7 @@ _DEFAULTS = {
     "strength": 1.0,
     "gradientLimit": 1.0,
     "faceAngularCorrection": 0.0,
+    "leftShare": 0.0,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -402,8 +403,15 @@ def build_argv(
     if tiles != (PHOTO_DEPTH_TILES if photo else _DEFAULTS["depthTiles"]):
         argv += ["--depth-tiles", str(tiles)]
 
-    if opts.get("splitBaseline"):
-        argv += ["--split-baseline"]
+    # One number covers both halves of the control: which eye keeps the
+    # source, and how far off it the other sits. 0 leaves the left eye
+    # untouched, 1 the right, 0.5 splits evenly. `splitBaseline` is still
+    # honoured so presets saved before the slider existed keep working.
+    share = _num(opts.get("leftShare"), _DEFAULTS["leftShare"])
+    if opts.get("leftShare") is None and opts.get("splitBaseline"):
+        share = 0.5
+    if abs(share - _DEFAULTS["leftShare"]) > 1e-9:
+        argv += ["--left-share", f"{share:g}"]
 
     # Empty means the CLI's own per-job default -- V3 for video, Depth Pro for
     # a still. Passing nothing is what selects it, so the UI never has to know

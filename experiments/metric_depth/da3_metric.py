@@ -33,7 +33,10 @@ import os
 import sys
 import time
 
-REPO = r"C:\Users\leong\OneDrive\Documents\stereo360"
+REPO = os.environ.get(
+    "STEREO360_REPO",
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
 OUT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, REPO)
 sys.path.insert(0, OUT)

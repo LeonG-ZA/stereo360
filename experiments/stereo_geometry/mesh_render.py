@@ -39,7 +39,8 @@ import sys
 import time
 
 REPO = os.environ.get("STEREO360_REPO",
-                      r"C:\Users\leong\OneDrive\Documents\stereo360")
+                      os.path.dirname(os.path.dirname(
+                          os.path.dirname(os.path.abspath(__file__)))))
 OUT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, REPO)
 sys.path.insert(0, OUT)
@@ -216,7 +217,8 @@ def main():
     # what put a mirrored phantom of a tap into the left eye, which whole
     # baseline cannot do because the left eye is never touched.
     f = 0.0 if args.whole_baseline else args.left_share
-    plan = (("right", 2.0 * (1.0 - f)),) if f <= 0.0         else (("left", -2.0 * f), ("right", 2.0 * (1.0 - f)))
+    plan = ((("right", 2.0 * (1.0 - f)),) if f <= 0.0
+            else (("left", -2.0 * f), ("right", 2.0 * (1.0 - f))))
     if f <= 0.0:
         eyes.append(frame)
     # b_units is half the separation, so the multipliers above are shares of

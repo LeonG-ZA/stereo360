@@ -54,7 +54,13 @@ ApplicationWindow {
     property real strength: 1.0
     property real gradientLimit: 1.0
     property real faceAngularCorrection: 0.0
-    property bool splitBaseline: false
+    // Two controls the user thinks in -- which eye stays sharp, and how
+    // much of the separation it carries -- and the single number the
+    // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
+    // an even split.
+    property bool sourceRight: false
+    property real baselineShare: 0.0
+    readonly property real leftShare: sourceRight ? 1.0 - baselineShare : baselineShare
     property bool spatialAudio: false
     property bool sourceSubsampling: false
     property bool faceSizeAuto: true
@@ -86,7 +92,7 @@ ApplicationWindow {
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
             "faceAngularCorrection": faceAngularCorrection,
-            "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
+            "leftShare": leftShare, "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
             "faceSizeAuto": faceSizeAuto, "faceSize": faceSize,
             "depthTiles": depthTiles, "depthBackend": depthBackend,
@@ -1007,11 +1013,30 @@ ApplicationWindow {
                             }
 
                             Row2 {
-                                label: "Split baseline"
-                                hint: "Warp both eyes half as far in opposite directions. Far fewer holes per eye."
-                                Switch {
-                                    checked: win.splitBaseline
-                                    onToggled: win.splitBaseline = checked
+                                label: "Sharp eye"
+                                hint: "Which eye keeps the original frame. The warped eye hides what is behind an occluder on one side and has to invent it on the other, so which to pick depends on the scene."
+                                ComboBox {
+                                    Layout.fillWidth: true
+                                    model: ["Left", "Right"]
+                                    currentIndex: win.sourceRight ? 1 : 0
+                                    onActivated: win.sourceRight = (currentIndex === 1)
+                                }
+                            }
+
+                            Row2 {
+                                label: "Baseline shared"
+                                hint: "How much of the separation the sharp eye also carries. 0 keeps it pristine and puts everything in the other eye; 0.5 splits evenly. The 3D effect is the same either way - this chooses where the errors land. Sharing gives far fewer holes per eye and makes the two eyes agree, at the cost of no longer having one untouched eye."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 0.5; stepSize: 0.05
+                                    value: win.baselineShare
+                                    onMoved: win.baselineShare = value
+                                }
+                                Text {
+                                    text: win.baselineShare.toFixed(2)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
                                 }
                             }
 

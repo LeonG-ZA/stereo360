@@ -4,67 +4,37 @@ Work that is understood and wanted but not yet built. Each entry says what it
 is, why it earns its place, and what the evidence for it was — so it can be
 picked up cold.
 
-## Choose which eye is the source, and how far off it the other sits
+## Done: choose which eye is the source, and how far off it the other sits
 
-**What.** Two related controls, one number each:
+Built as one number, `left_share`, rather than the two controls this entry
+originally described. The share and the side are not independent -- "which
+eye is the source" is just which end of the range you are at -- so one
+parameter covers both and there is a single code path instead of two.
 
-* which eye keeps the source — the left, as now, or the right;
-* what share of the separation that eye takes, from 0 (untouched source) to
-  0.5 (an even split).
+* `stereo360/pipeline.py` -- `stereo_pair(frame, disp, strength,
+  left_share=0.0)`. 0 leaves the left eye untouched, 0.5 splits evenly, 1
+  leaves the right eye untouched. The video path builds one stream at the
+  extremes and two in between, and `_eyes_warped` tells the chunk sizer
+  which, since that is what chunk memory scales with.
+* `stereo360/cli.py` -- `--left-share F` and `--source-eye {left,right}`,
+  resolved by `_left_share`. `--split-baseline` still works and means 0.5.
+* `stereo360_ui/` -- a "Sharp eye" combo and a "Baseline shared" slider,
+  which write one derived `leftShare`. Presets saved with the old boolean
+  still open and still mean an even split.
 
-Both are already possible in the warp: `right_eye_from_disparity` multiplies
-its `strength` by `_BASELINE_SCALE`, so passing `-f * total` and
-`(1 - f) * total` puts the eyes at those shares, and swapping the signs swaps
-which eye is the source. Only `stereo_pair` needs widening — it currently
-offers whole-baseline or an even split and nothing between.
+Verified: total disparity is conserved across every share -- measured -9.00
+to -9.50 px against a geometric ideal of -9.29, within 3.1% -- the eyes move
+in proportion to their share, and the source eye is bit-identical to the
+input at both extremes.
 
-**Why it is scene-dependent, and therefore a control rather than a default.**
-Which eye is the source decides, for every occluding edge in the scene,
-whether the warped eye *hides* what is behind it or *reveals* it. Hiding costs
-nothing: the geometry simply covers something up. Revealing has to be invented.
-And which way round that falls depends on where each occluder sits relative to
-the camera, so no single choice is right for every frame.
-
-The indoor scene shows both halves of it. With the source as the left eye, the
-generated right eye slides the stone pillar *over* the kitchen tap, so the tap
-never has to be invented. With the source as the right eye, the generated left
-eye has to reconstruct what lies behind that wall, which it cannot know. On the
-same frame the near chair's top rail goes the other way: the warped eye chews
-its lower edge ragged, so whichever eye is warped is the one that damages the
-rail. A wall at a different angle in another scene reverses both.
-
-**Evidence.** Measured on the near chair's top rail, indoors at 40 mm and a
-15/85 share:
-
-| | left eye | right eye |
-|---|---|---|
-| source near the left | intact (~50 px) | ragged |
-| source near the right | ragged | intact (~50 px) |
-
-And on the share itself, measured as how far the two eyes' distortion differs
-on three small features, the whole separation in one eye scores 8.8 to 12.3
-while an even split scores 0.09 to 1.27. The curve between them has a knee
-rather than a slope: a 15% share already recovers most of the agreement. So
-the useful range is roughly 0.15 to 0.5, and 0 is only for someone who
-deliberately wants one eye untouched.
-
-**Where it goes.**
-
-* `stereo360/pipeline.py` — `stereo_pair` takes a share and a side instead of
-  a boolean `split`.
-* `stereo360/cli.py` — a flag pair, e.g. `--source-eye {left,right}` and
-  `--left-share F`, with the current behaviour as the default so nothing
-  existing changes.
-* `stereo360_ui/` — a combo box for the side and a slider for the share, in
-  `qml/Main.qml`, with defaults in `options.py` (`_DEFAULTS`) and its argv
-  emission, plus the dump list in `app.py`. The angular-correction slider added
-  earlier is the pattern to copy.
-
-**Caveat worth stating in the UI text.** This chooses *where* the error lands,
-not whether there is one. At any share below 0.5 one eye is more correct than
-the other, which is the mismatch that tires a viewer; at 0.5 both eyes carry
-it equally instead. It is a trade between a sharper eye and a better-agreeing
-pair.
+**Still to decide: the default.** It is 0.0, which is what every earlier
+version did, and the evidence for moving it is mixed. On three small
+features an even split scored 0.09-1.27 for eye-to-eye disagreement against
+8.8-12.3 for the whole baseline in one eye, with a knee suggesting 0.15
+recovers most of it. But the floor under the indoor table was still badly
+asymmetric at 0.15 (+0.93 / -5.27 px) and only symmetric at 0.5 (+/-3.10),
+so the knee may hold for small isolated features and not for extended
+surfaces. That wants headset time across a few scenes, not another metric.
 
 ## Withdrawn: "the mesh renderer leaves cuts unfilled"
 

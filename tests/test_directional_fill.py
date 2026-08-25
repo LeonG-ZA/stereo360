@@ -77,7 +77,7 @@ def test_split_baseline_delivers_the_geometric_disparity():
     ideal = -(strength * warp._BASELINE_SCALE) / lam / (2 * np.pi) * img.shape[1]
 
     left, right = pipeline.stereo_pair(
-        img, dn.copy(), strength, split=True, inpaint=False, normalize=False)
+        img, dn.copy(), strength, 0.5, inpaint=False, normalize=False)
 
     def bar_x(im, row=130):
         line = (im[row, :, 0] > 200).astype(np.float64)

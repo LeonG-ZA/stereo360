@@ -26,35 +26,64 @@ def right_eye_passthrough(frame: np.ndarray, face_size: int) -> np.ndarray:
     return projection.cubemap_to_equirect(faces, w, h)
 
 
+def _eyes_warped(left_share: float) -> int:
+    """How many eyes are synthesized, which is what chunk memory scales with."""
+    f = float(np.clip(left_share, 0.0, 1.0))
+    return 1 if (f <= 0.0 or f >= 1.0) else 2
+
+
 def stereo_pair(
     frame: np.ndarray,
     disp: np.ndarray,
     strength: float,
-    split: bool,
+    left_share: float = 0.0,
     **kw,
 ) -> tuple:
     """Return (left, right) for one frame given its inverse-depth map.
 
-    Without `split` the left eye is the untouched source and the right eye
-    carries the whole baseline. That is the worst arrangement for
-    disocclusion: hole area grows far faster than linearly with warp distance
-    (measured on 8K footage, roughly cubic -- 0.002% of the frame at strength
-    0.3 against 0.071% at 1.0), so putting the entire baseline in one eye
-    maximises it.
+    `left_share` is the fraction of the separation the left eye carries, and
+    one number covers both questions worth asking -- which eye keeps the
+    source, and how far off it the other sits:
 
-    With `split` each eye is warped half as far in opposite directions. The
-    disparity between the eyes -- and therefore the depth effect -- is
-    unchanged, but each eye's holes shrink by about 8x, and they land in
-    *different places* in each eye, so wherever one eye has a hole the other
-    has real content and binocular fusion suppresses it. The cost is that the
-    left eye is no longer pristine.
+    * ``0.0`` leaves the left eye untouched and puts the whole baseline in the
+      right. The default, and what every earlier version did.
+    * ``0.5`` splits it evenly.
+    * ``1.0`` leaves the *right* eye untouched instead.
+
+    The total disparity, and therefore the depth effect, is the same at every
+    setting. What changes is where the errors land, and there are two of them
+    pulling opposite ways.
+
+    Disocclusion favours splitting. Hole area grows far faster than linearly
+    with warp distance -- measured on 8K footage, roughly cubic, 0.002% of the
+    frame at strength 0.3 against 0.071% at 1.0 -- so one eye carrying
+    everything maximises it. Splitting shrinks each eye's holes about 8x and
+    puts them in *different places*, where binocular fusion suppresses them.
+
+    Depth error favours splitting too, for a different reason. The depth map
+    misplaces object boundaries, so a warped eye renders thin structures
+    slightly wrong. At an uneven share one eye is much more wrong than the
+    other, and it is the *disagreement* that tires a viewer rather than the
+    error itself; at 0.5 both eyes are wrong identically and fuse cleanly.
+    Measured on three small features, eye-to-eye disagreement scores 8.8 to
+    12.3 with the whole baseline in one eye against 0.09 to 1.27 at an even
+    split.
+
+    Against both, per-eye fidelity favours *not* splitting: at 0.0 one eye is
+    the photograph, untouched. So this is a trade between a pristine eye and a
+    better-agreeing pair, which is why it is a control and not a constant.
     """
-    if not split:
+    f = float(np.clip(left_share, 0.0, 1.0))
+    if f <= 0.0:
         right, _ = warp.right_eye_from_disparity(frame, disp, strength, **kw)
         return frame, right
-    half = strength * 0.5
-    left, _ = warp.right_eye_from_disparity(frame, disp.copy(), -half, **kw)
-    right, _ = warp.right_eye_from_disparity(frame, disp, half, **kw)
+    if f >= 1.0:
+        left, _ = warp.right_eye_from_disparity(frame, disp, -strength, **kw)
+        return left, frame
+    left, _ = warp.right_eye_from_disparity(frame, disp.copy(),
+                                            -f * strength, **kw)
+    right, _ = warp.right_eye_from_disparity(frame, disp,
+                                             (1.0 - f) * strength, **kw)
     return left, right
 
 
@@ -161,7 +190,7 @@ def right_eye_from_depth(
     fg_erode: int = 2,
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
-    split_baseline: bool = False,
+    left_share: float = 0.0,
     gradient_limit: float = 0.0,
     faces: Optional[dict] = None,
     depth_range: Optional["DepthRange"] = None,
@@ -187,7 +216,7 @@ def right_eye_from_depth(
         if stabiliser is not None:
             disp = stabiliser.apply(disp)
         extra["normalize"] = False
-    return stereo_pair(frame, disp, strength, split_baseline,
+    return stereo_pair(frame, disp, strength, left_share,
                        fg_erode=fg_erode, inpaint_mode=inpaint_mode,
                        gradient_limit=gradient_limit, **extra)
 
@@ -1003,7 +1032,7 @@ def convert(
     inpaint_mode: str = "simple",
     temporal_fill: bool = False,
     depth_tiles: int = 1,
-    split_baseline: bool = False,
+    left_share: float = 0.0,
     gradient_limit: float = 0.0,
     spatial_audio: bool = False,
     ambisonic_codec: str = "auto",
@@ -1098,12 +1127,12 @@ def convert(
                    input=input_path, output=output_path, face_size=face_size)
     try:
         chunk_size = fit_chunk_size(chunk_size, w, h,
-                                    2 if split_baseline else 1, reporter)
+                                    _eyes_warped(left_share), reporter)
         if depth_backend is not None and chunk_size > 1:
             _convert_chunked(frames, sink, face_size, depth_backend,
                              strength, chunk_size, chunk_overlap,
                              fg_erode, inpaint_mode, temporal_fill, depth_tiles,
-                             split_baseline, gradient_limit, face_overlap,
+                             left_share, gradient_limit, face_overlap,
                              angular_correction, flatten_ground)
         else:
             depth_range = DepthRange()
@@ -1114,7 +1143,7 @@ def convert(
                 if depth_backend is not None:
                     left, right = right_eye_from_depth(
                         source.equirect, face_size, depth_backend, strength,
-                        fg_erode, inpaint_mode, depth_tiles, split_baseline,
+                        fg_erode, inpaint_mode, depth_tiles, left_share,
                         gradient_limit, source.faces, depth_range,
                         stabiliser, face_overlap, angular_correction,
                         flatten_ground)
@@ -1235,7 +1264,7 @@ def preview_frame(
     fg_erode: int = 2,
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
-    split_baseline: bool = False,
+    left_share: float = 0.0,
     gradient_limit: float = 0.0,
     width: int = 2048,
     input_projection: str = "auto",
@@ -1306,7 +1335,7 @@ def preview_frame(
     if depth_backend is not None:
         left, right = right_eye_from_depth(
             source.equirect, face_size, depth_backend, strength, fg_erode,
-            inpaint_mode, depth_tiles, split_baseline, gradient_limit,
+            inpaint_mode, depth_tiles, left_share, gradient_limit,
             source.faces, face_overlap=face_overlap,
             angular_correction=angular_correction,
             flatten_ground=flatten_ground)
@@ -1445,7 +1474,7 @@ def _convert_chunked(
     inpaint_mode: str = "simple",
     temporal_fill: bool = False,
     depth_tiles: int = 1,
-    split_baseline: bool = False,
+    left_share: float = 0.0,
     gradient_limit: float = 0.0,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
@@ -1495,12 +1524,19 @@ def _convert_chunked(
 
         # Warp without inpainting first so holes can be filled temporally
         # from other frames in the chunk before any spatial fill happens.
-        # With split_baseline both eyes are synthesized, each at half the
-        # baseline and in opposite directions (see stereo_pair); the eyes are
-        # warped, temporally filled and spatially filled as two independent
-        # streams, since their holes fall in different places by construction.
-        eyes = ((-0.5 * strength,), (0.5 * strength,)) if split_baseline \
-            else ((strength,),)
+        # At a shared baseline both eyes are synthesized, each carrying its
+        # own share and in opposite directions (see stereo_pair); the eyes
+        # are warped, temporally filled and spatially filled as two
+        # independent streams, since their holes fall in different places by
+        # construction. At either extreme only one eye is synthesized and
+        # the other is the source frame, so only one stream is built.
+        f = float(np.clip(left_share, 0.0, 1.0))
+        if f <= 0.0:
+            eyes = ((strength,),)
+        elif f >= 1.0:
+            eyes = ((-strength,),)
+        else:
+            eyes = ((-f * strength,), ((1.0 - f) * strength,))
         streams = []
         for (eye_strength,) in eyes:
             dn_pres, rights, holes = [], [], []
@@ -1508,7 +1544,7 @@ def _convert_chunked(
                 dn_pres.append(maps[i].copy())  # pre-erosion, chunk-normalized
                 # The warp erodes its depth map in place, so when both eyes
                 # are synthesized the second one needs an intact copy.
-                dn_warp = maps[i].copy() if split_baseline else maps[i]
+                dn_warp = maps[i].copy() if len(eyes) > 1 else maps[i]
                 right, hole = warp.right_eye_from_disparity(
                     chunk[i], dn_warp, eye_strength, fg_erode=fg_erode,
                     inpaint=False, normalize=False,
@@ -1530,8 +1566,12 @@ def _convert_chunked(
             del dn_pres, holes
 
         for i in range(emit):
-            left = streams[0][i] if split_baseline else chunk[i]
-            right = streams[-1][i]
+            if f <= 0.0:
+                left, right = chunk[i], streams[0][i]
+            elif f >= 1.0:
+                left, right = streams[0][i], chunk[i]
+            else:
+                left, right = streams[0][i], streams[1][i]
             sink.write(left, right)
         prev_tail = maps[emit:] if keep else []
         return keep
