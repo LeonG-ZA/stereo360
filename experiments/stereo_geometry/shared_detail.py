@@ -46,6 +46,12 @@ numbers as evidence against this; they are measuring the wrong thing for it.
 `detail_mix` interpolates back toward the ordinary warp and was tried at 0.25
 and 0.5. It is a dial between this and plain and resolves nothing: every
 target moves monotonically back toward its plain value.
+
+**With the limiter at its proper 0.6** the numbers settle differently and
+better. Indoor: the chair rail's disagreement goes -7.50 to -0.83 and the
+grout line 0.08 to 0.04. Road: sign post 5.43 to 4.71 and handrail 7.48 to
+4.74, with the lamp finial a wash at 7.18 against 7.27 -- the penalty it
+showed at limiter 0 was the limiter's absence, not this.
 """
 from __future__ import annotations
 
@@ -114,8 +120,19 @@ def render_eye(base, detail, dn, dn_smooth, strength, **kw):
 
 def stereo_pair(frame, dn, strength, left_share=0.0, detail_sigma=6.0,
                 depth_sigma=40.0, detail_mix=0.0, shared=True,
-                gradient_limit=0.0, fg_erode=0, **kw):
-    """(left, right). With `shared` false this is the ordinary warp."""
+                gradient_limit=0.6, fg_erode=2, **kw):
+    """(left, right). With `shared` false this is the ordinary warp.
+
+    `gradient_limit` and `fg_erode` default to what the pipeline uses, and
+    that matters more than it looks. An earlier version of this file carried
+    0 and 0 over from the segmentation experiments, where the limiter has to
+    be off because it re-creates the ramp a segment removes. Nothing here
+    needs that, and without the limiter a strong vertical depth edge -- a
+    curtain against a wall -- opens a disocclusion wide enough that the fill
+    comes back as a blocky sawtooth several pixels across. It is plainly
+    visible and it is not caused by the detail split: the ordinary warp shows
+    the same artefact at 0. At 0.6 it disappears from both.
+    """
     f = float(np.clip(left_share, 0.0, 1.0))
     common = dict(gradient_limit=gradient_limit, fg_erode=fg_erode, **kw)
 
