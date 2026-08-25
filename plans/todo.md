@@ -48,6 +48,40 @@ What it costs: at 0.5 neither eye is the untouched photograph, and no metric
 here sees overall softness. If a scene reads soft, a smaller share is the
 fallback, and it is a slider.
 
+## Done: warp fine detail on a smoothed depth
+
+Thin structures disagreed between the eyes because they sit on depth
+boundaries the model misplaces by 10-25 px, and each eye sheared them
+differently. Six attempts to put those boundaries in the right place are
+recorded on the segment-depth branch, all failed. This gives up on placing
+them: the frame splits into a blurred base warped with the real depth and
+the detail above it warped with a smoothed one, which has no steps and so
+cannot shear. Detail arrives whole and identically in both eyes, at the
+cost of sitting at a slightly wrong depth.
+
+* `stereo360/warp.py` -- `right_eye_banded`, keeping the `(image, hole)`
+  contract so temporal fill, stabilisation and chunking are untouched.
+  `detail_sigma=None` scales the radius to the frame; 0 turns it off.
+* `stereo360/pipeline.py`, `cli.py` -- threaded through both the image and
+  chunked video paths; `--detail-sigma` and `--depth-sigma`.
+* `stereo360_ui/` -- a "Detail on smooth depth" switch, on by default.
+
+Measured at share 0.5: indoor, the chair rail's eye-to-eye disagreement
+goes -8.17 px to -1.17 and the floor grout 0.08 to 0.03; road, sign post
+5.43 to 2.76 and handrail 5.08 to 3.26. Verified bit-identical to the
+experiment it was promoted from, and confirmed on 120 frames of video.
+
+**The radius scales with the width the warp sees, not the delivery width.**
+Each eye is rendered at the source's native size and downsampled after, so
+a 5760-wide delivery from a 7680 source still warps at 7680 and wants 12.
+
+**Not yet examined: temporal behaviour beyond one 120-frame clip.** The
+smoothed depth is computed after `stabilize_depth` and `DepthRange`, and a
+Gaussian blur cannot amplify frame-to-frame variation, so it should inherit
+the real depth's stability rather than add its own. That is an argument, not
+a measurement. If fine detail ever swims on textured surfaces, stabilising
+the smoothed field across the chunk is the fix.
+
 ## Withdrawn: "the mesh renderer leaves cuts unfilled"
 
 There was an entry here claiming the mesh path fails to fill some of what it

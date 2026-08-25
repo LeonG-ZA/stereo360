@@ -58,6 +58,7 @@ ApplicationWindow {
     // much of the separation it carries -- and the single number the
     // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
     // an even split.
+    property bool sharedDetail: true
     property bool sourceRight: false
     property real baselineShare: 0.5
     readonly property real leftShare: sourceRight ? 1.0 - baselineShare : baselineShare
@@ -92,7 +93,8 @@ ApplicationWindow {
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
             "faceAngularCorrection": faceAngularCorrection,
-            "leftShare": leftShare, "spatialAudio": spatialAudio,
+            "leftShare": leftShare, "sharedDetail": sharedDetail,
+            "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
             "faceSizeAuto": faceSizeAuto, "faceSize": faceSize,
             "depthTiles": depthTiles, "depthBackend": depthBackend,
@@ -1009,6 +1011,15 @@ ApplicationWindow {
                                     color: Theme.text
                                     font.pixelSize: Theme.fontM
                                     Layout.preferredWidth: 32
+                                }
+                            }
+
+                            Row2 {
+                                label: "Detail on smooth depth"
+                                hint: "Warp fine detail on a smoothed depth instead of the real one, so it cannot shear where the depth map puts a boundary in the wrong place. Thin structures then arrive whole and the same way in both eyes, at the cost of sitting at a slightly wrong depth. Costs a second warp per eye."
+                                Switch {
+                                    checked: win.sharedDetail
+                                    onToggled: win.sharedDetail = checked
                                 }
                             }
 

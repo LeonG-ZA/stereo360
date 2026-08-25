@@ -198,6 +198,21 @@ def build_parser() -> argparse.ArgumentParser:
                         "occluder on one side and has to INVENT it on the "
                         "other, and which way that falls depends on where "
                         "each occluder sits.")
+    p.add_argument("--detail-sigma", type=float, default=None, metavar="PX",
+                   help="Radius of the detail split, in pixels. Fine detail "
+                        "is warped on a smoothed depth instead of the real "
+                        "one, so it cannot shear at a misplaced depth "
+                        "boundary: the blurred base keeps the true depth and "
+                        "the detail above it rides a smooth field, arriving "
+                        "whole and the same way in both eyes. Defaults to a "
+                        "radius scaled to the frame (12 px at 7680 wide). "
+                        "Pass 0 to turn the split off and warp the frame "
+                        "whole. Costs a second warp per eye, and fine detail "
+                        "then sits at a slightly wrong depth -- the trade is "
+                        "that both eyes agree about it.")
+    p.add_argument("--depth-sigma", type=float, default=40.0, metavar="PX",
+                   help="How hard the depth is smoothed for that detail warp. "
+                        "Only used with --detail-sigma.")
     p.add_argument("--split-baseline", action="store_true",
                    help="Deprecated. Means --left-share 0.5, which is now the default anyway.")
     p.add_argument("--depth-tiles", type=int, default=None, metavar="N",
@@ -556,6 +571,8 @@ def _run(args, reporter, cancel, backends, pipeline):
             inpaint_mode=args.inpaint,
             depth_tiles=args.depth_tiles,
             left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
             gradient_limit=args.gradient_limit,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
@@ -588,6 +605,8 @@ def _run(args, reporter, cancel, backends, pipeline):
             inpaint_mode=args.inpaint,
             depth_tiles=args.depth_tiles,
             left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
             gradient_limit=args.gradient_limit,
             width=args.preview_width,
             input_projection=args.input_projection,
@@ -619,6 +638,8 @@ def _run(args, reporter, cancel, backends, pipeline):
         temporal_fill=args.temporal_fill,
         depth_tiles=args.depth_tiles,
         left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
         gradient_limit=args.gradient_limit,
         spatial_audio=args.spatial_audio,
         ambisonic_codec=args.ambisonic_codec,

@@ -288,6 +288,7 @@ _DEFAULTS = {
     "gradientLimit": 1.0,
     "faceAngularCorrection": 0.0,
     "leftShare": 0.5,
+    "sharedDetail": True,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -409,6 +410,12 @@ def build_argv(
     # `splitBaseline` is still honoured so presets saved before the slider
     # existed keep working -- it also meant 0.5, so those presets now agree
     # with the default and emit nothing.
+    # On by default, so only the off case has anything to say. 0 is what
+    # turns the split off; leaving the flag out asks for the frame-scaled
+    # radius, which is what "on" means.
+    if not opts.get("sharedDetail", _DEFAULTS["sharedDetail"]):
+        argv += ["--detail-sigma", "0"]
+
     share = _num(opts.get("leftShare"), _DEFAULTS["leftShare"])
     if opts.get("leftShare") is None and opts.get("splitBaseline"):
         share = 0.5

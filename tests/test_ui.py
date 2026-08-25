@@ -101,6 +101,18 @@ def test_the_baseline_share_reaches_the_command_line():
     assert both[both.index("--left-share") + 1] == "0.15"
 
 
+def test_the_detail_split_is_on_unless_switched_off():
+    """On by default, so the default emits nothing and only "off" speaks.
+
+    Leaving the flag out asks for a radius scaled to the frame, which is not
+    the same as passing 0 -- 0 turns the split off entirely."""
+    assert "--detail-sigma" not in options.build_argv(dict(BASE))
+    assert "--detail-sigma" not in options.build_argv(
+        dict(BASE, sharedDetail=True))
+    argv = options.build_argv(dict(BASE, sharedDetail=False))
+    assert argv[argv.index("--detail-sigma") + 1] == "0"
+
+
 def test_the_angular_correction_reaches_the_command_line():
     """Off by default, so an untouched slider must not emit the flag at all --
     a zero on the command line and no flag mean the same thing to the CLI, but

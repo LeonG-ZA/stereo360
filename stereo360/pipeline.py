@@ -50,6 +50,8 @@ def stereo_pair(
     disp: np.ndarray,
     strength: float,
     left_share: float = DEFAULT_LEFT_SHARE,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
     **kw,
 ) -> tuple:
     """Return (left, right) for one frame given its inverse-depth map.
@@ -87,17 +89,16 @@ def stereo_pair(
     better-agreeing pair, which is why it is a control and not a constant.
     """
     f = float(np.clip(left_share, 0.0, 1.0))
+
+    def eye(s):
+        return warp.right_eye_banded(frame, disp.copy(), s, detail_sigma,
+                                     depth_sigma, **kw)[0]
+
     if f <= 0.0:
-        right, _ = warp.right_eye_from_disparity(frame, disp, strength, **kw)
-        return frame, right
+        return frame, eye(strength)
     if f >= 1.0:
-        left, _ = warp.right_eye_from_disparity(frame, disp, -strength, **kw)
-        return left, frame
-    left, _ = warp.right_eye_from_disparity(frame, disp.copy(),
-                                            -f * strength, **kw)
-    right, _ = warp.right_eye_from_disparity(frame, disp,
-                                             (1.0 - f) * strength, **kw)
-    return left, right
+        return eye(-strength), frame
+    return eye(-f * strength), eye((1.0 - f) * strength)
 
 
 class DepthRange:
@@ -204,6 +205,8 @@ def right_eye_from_depth(
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
     left_share: float = DEFAULT_LEFT_SHARE,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
     gradient_limit: float = 0.0,
     faces: Optional[dict] = None,
     depth_range: Optional["DepthRange"] = None,
@@ -230,6 +233,8 @@ def right_eye_from_depth(
             disp = stabiliser.apply(disp)
         extra["normalize"] = False
     return stereo_pair(frame, disp, strength, left_share,
+                       detail_sigma=detail_sigma,
+                       depth_sigma=depth_sigma,
                        fg_erode=fg_erode, inpaint_mode=inpaint_mode,
                        gradient_limit=gradient_limit, **extra)
 
@@ -1046,6 +1051,8 @@ def convert(
     temporal_fill: bool = False,
     depth_tiles: int = 1,
     left_share: float = DEFAULT_LEFT_SHARE,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
     gradient_limit: float = 0.0,
     spatial_audio: bool = False,
     ambisonic_codec: str = "auto",
@@ -1145,7 +1152,8 @@ def convert(
             _convert_chunked(frames, sink, face_size, depth_backend,
                              strength, chunk_size, chunk_overlap,
                              fg_erode, inpaint_mode, temporal_fill, depth_tiles,
-                             left_share, gradient_limit, face_overlap,
+                             left_share, detail_sigma, depth_sigma,
+                             gradient_limit, face_overlap,
                              angular_correction, flatten_ground)
         else:
             depth_range = DepthRange()
@@ -1157,6 +1165,7 @@ def convert(
                     left, right = right_eye_from_depth(
                         source.equirect, face_size, depth_backend, strength,
                         fg_erode, inpaint_mode, depth_tiles, left_share,
+                        detail_sigma, depth_sigma,
                         gradient_limit, source.faces, depth_range,
                         stabiliser, face_overlap, angular_correction,
                         flatten_ground)
@@ -1278,6 +1287,8 @@ def preview_frame(
     inpaint_mode: str = "simple",
     depth_tiles: int = 1,
     left_share: float = DEFAULT_LEFT_SHARE,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
     gradient_limit: float = 0.0,
     width: int = 2048,
     input_projection: str = "auto",
@@ -1348,7 +1359,8 @@ def preview_frame(
     if depth_backend is not None:
         left, right = right_eye_from_depth(
             source.equirect, face_size, depth_backend, strength, fg_erode,
-            inpaint_mode, depth_tiles, left_share, gradient_limit,
+            inpaint_mode, depth_tiles, left_share, detail_sigma,
+            depth_sigma, gradient_limit,
             source.faces, face_overlap=face_overlap,
             angular_correction=angular_correction,
             flatten_ground=flatten_ground)
@@ -1488,6 +1500,8 @@ def _convert_chunked(
     temporal_fill: bool = False,
     depth_tiles: int = 1,
     left_share: float = DEFAULT_LEFT_SHARE,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
     gradient_limit: float = 0.0,
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
@@ -1558,8 +1572,9 @@ def _convert_chunked(
                 # The warp erodes its depth map in place, so when both eyes
                 # are synthesized the second one needs an intact copy.
                 dn_warp = maps[i].copy() if len(eyes) > 1 else maps[i]
-                right, hole = warp.right_eye_from_disparity(
-                    chunk[i], dn_warp, eye_strength, fg_erode=fg_erode,
+                right, hole = warp.right_eye_banded(
+                    chunk[i], dn_warp, eye_strength, detail_sigma,
+                    depth_sigma, fg_erode=fg_erode,
                     inpaint=False, normalize=False,
                     gradient_limit=gradient_limit)
                 rights.append(right)
