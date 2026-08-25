@@ -531,6 +531,86 @@ def _erode_foreground(dn: np.ndarray, k: int, thresh: float = 0.05) -> None:
     _map_bands(band, dn.shape[0], 256, dn.shape[1] * 24)
 
 
+#: Detail split radius that measured best, at the width it was measured on.
+#: The band is defined in pixels, so the default scales with the frame the
+#: warp actually sees -- which is the source's native width, not the delivery
+#: width: each eye is rendered full size and downsampled afterwards.
+DETAIL_SIGMA_AT_8K = 12.0
+DETAIL_REFERENCE_WIDTH = 7680
+
+
+def detail_sigma_for(width: int) -> float:
+    """The default split radius for a frame this wide."""
+    return DETAIL_SIGMA_AT_8K * float(width) / DETAIL_REFERENCE_WIDTH
+
+
+def right_eye_banded(
+    left_rgb: np.ndarray,
+    inv_depth: np.ndarray,
+    strength: float,
+    detail_sigma: float | None = None,
+    depth_sigma: float = 40.0,
+    **kw,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Warp coarse structure and fine detail on different depth fields.
+
+    Thin structures disagree between the eyes because they sit on depth
+    discontinuities the model misplaces by 10-25 px: each eye shears them by a
+    different amount and the pair stops fusing. Placing those boundaries
+    correctly was tried at length and did not work.
+
+    So the frame is split into a blurred base and the detail that blur
+    removed. The base is warped with the real depth, keeping every
+    discontinuity the coarse depth percept needs -- and being blurred, a
+    boundary error of a few pixels moves smooth content and barely shows. The
+    detail is warped with a *smoothed* depth: a field with no steps cannot
+    tear or shear a thin structure, so the detail arrives whole and arrives
+    the same way in both eyes.
+
+    Fine detail then sits at a slightly wrong depth. That is the trade and it
+    is the point: detail both eyes agree on fuses more easily than detail at
+    the right depth they disagree about, and coarse disparity -- which the
+    base still carries correctly -- is what the depth percept mostly rests on.
+
+    Returns the same `(rgb, hole)` as `right_eye_from_disparity`, with the
+    base's hole mask, so temporal fill and everything downstream is unchanged.
+
+    `detail_sigma` of None means "scale it to this frame", which is the
+    default; an explicit 0 turns the split off and falls back to the ordinary
+    warp.
+    """
+    if detail_sigma is None:
+        detail_sigma = detail_sigma_for(left_rgb.shape[1])
+    if detail_sigma <= 0:
+        return right_eye_from_disparity(left_rgb, inv_depth, strength, **kw)
+
+    def _blur(img, sigma):
+        k = int(2 * round(3 * sigma) + 1)
+        return cv2.GaussianBlur(img, (k, k), sigma)
+
+    inpaint = kw.pop("inpaint", True)
+    inpaint_mode = kw.get("inpaint_mode", "simple")
+    f = left_rgb.astype(np.float32)
+    base = _blur(f, detail_sigma)
+    detail = f - base
+    dn_pre = inv_depth.copy()
+    smooth = _blur(inv_depth.astype(np.float32), depth_sigma)
+
+    b, hole = right_eye_from_disparity(base, inv_depth.copy(), strength,
+                                       inpaint=False, **kw)
+    d, dhole = right_eye_from_disparity(detail, smooth, strength,
+                                        inpaint=False, **kw)
+    # A hole in the detail layer means "no detail known here", not black:
+    # adding nothing leaves the base showing through, which is right.
+    d = d.astype(np.float32)
+    d[dhole > 0] = 0.0
+    out = np.clip(b.astype(np.float32) + d, 0, 255).astype(left_rgb.dtype)
+    if inpaint and hole.any():
+        out = fill_holes(out, hole, dn_pre, inpaint_mode=inpaint_mode,
+                         baseline_sign=1.0 if strength >= 0 else -1.0)
+    return out, hole
+
+
 def right_eye_from_disparity(
     left_rgb: np.ndarray,
     inv_depth: np.ndarray,

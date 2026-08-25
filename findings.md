@@ -35,6 +35,7 @@ Options:
 | `--no-temporal-fill` | (fill is **on**) | Disable filling holes from other frames in the chunk. On by default: real pixels another frame saw beat anything invented. Needs `--chunk-size` > 1 |
 | `--depth-tiles N` | 1 | Split each cubemap face into N×N overlapping tiles for depth (feather-blended). Higher = finer depth on thin structures; N² times slower |
 | `--face-overlap F` | 0.15 | How far each depth face reaches past its nominal 90° (0.15 = 98° per face), so neighbours share a band rather than only an edge. 0 restores exact faces, which creases the ground at a seam — see [Cube seams in the depth map](#cube-seams-in-the-depth-map) |
+| `--face-angular-correction F` | 0 (off) | Pull each depth face's edges back onto their true rays, undoing the field of view V3 believes it has rather than the one it was given. 0.55–0.7 measured best, 1.0 overshoots. Costs ~20% of the depth range, so pair it with `--strength 1.2`. Measured on V3 only — see [The model's lens is narrower than the face it is given](#the-models-lens-is-narrower-than-the-face-it-is-given) |
 | `--depth-model ID` | **per backend** | `small` for `depth-anything-v3` (`base`/`large` also accepted, and both measured worse — see [Choosing a depth model](#choosing-a-depth-model)); ignored by `depth-pro`, which ships one checkpoint. For `depth-anything`, a HuggingFace model id, default Depth-Anything-V2-Base: lowest depth noise and 40% less frame-to-frame flicker than Small for +5% render time — see [Which depth model?](#which-depth-model). The temporal backend ships `small`/`large` only and defaults to small |
 | `--chunk-size N` | 8 | Temporal chunk length for the video backend (1 = off) |
 | `--chunk-overlap N` | 2 | Overlap frames ramp-blended at chunk boundaries |
@@ -503,6 +504,56 @@ boundary colors. Holes are filled per connected component (padded crops), so
 memory stays bounded at 8K. CPU reference: ~75 s per 1920×960 frame; use a
 GPU for practical throughput.
 
+#### `--inpaint` is close to decorative, and here is why
+
+Worth knowing before installing anything for it: on a real frame the inpainter
+never runs at all. Instrumented on the reference photo at 7680×3840, strength
+1.2, by wrapping the shipped functions rather than reimplementing them:
+
+| | |
+| --- | --- |
+| disocclusion holes | 17,689 px — 0.060% of the eye |
+| filled by `_directional_fill` | 17,689 px — **100%** |
+| reaching Telea or LaMa | **0 px** |
+
+`fill_holes` continues each hole from the background side first and hands on
+only what that cannot reach, so the inpainter is dead code whenever the
+extension succeeds — which here was everywhere. `--inpaint learned` produced a
+**byte-identical** file, and LaMa was never even constructed.
+
+Forcing the issue does not help either. With the directional fill disabled so
+everything falls through to the inpainter, Telea against LaMa differs by
+0.001% of the eye — a few hundred pixels.
+
+The holes are small to begin with, because `--gradient-limit` exists to prevent
+them:
+
+| | hole area |
+| --- | --- |
+| `--gradient-limit 1.0` (default) | 1,584 px — 0.0054% |
+| `--gradient-limit 0` | 3,985 px — 0.0135% |
+
+So the streaking beside a near object's trailing edge — the artifact that sends
+people looking for a better inpainter — is not hole filling. It is the warp
+stretching the object across the depth cliff, which is what the gradient limit
+trades a hole for. Changing how the residue is filled cannot touch it.
+
+Measured leverage on the synthesised eye, same frame, one variable at a time:
+
+| lever | share of the eye it changes |
+| --- | --- |
+| `--strength` 1.2 → 0.8 | **31.85%** |
+| `--gradient-limit` 1.0 → 0 | 0.451% |
+| directional fill on → off | 0.001% |
+| `--inpaint simple` → `learned` | 0.001% |
+
+`--strength` is three orders of magnitude more consequential than the fill
+strategy. If disocclusion artifacts are the complaint, that is the knob.
+
+A `--no-directional-fill` flag was built to expose the third row and then
+reverted: it is a real switch that measurably does nothing, and the finding is
+worth more than the option.
+
 ### Which depth backend?
 
 `--depth-backend` defaults to `auto`, which probes what is actually installed
@@ -620,9 +671,293 @@ resizes its input whatever field of view it covers. That is the one real cost
 of this approach, and it is the reason the overlap is no wider than it needs
 to be.
 
+The corner stretch is the reason given here for why wider hurts, and it is not
+the whole one: V3's own camera estimate stops tracking the truth at about 62°,
+so every width in this table is already past what it believes it is looking
+through, and the widths degrade in the order that mismatch predicts. See
+[The model's lens is narrower than the face it is given](#the-models-lens-is-narrower-than-the-face-it-is-given).
+
 Runtime is unchanged. The blend tables depend only on the output geometry, so
 they are built once per run (~2.5 s at 8K, ~450 MB) rather than per frame; a
 24-frame 8K render measured 45.5 s against 45.4 s with exact faces.
+
+### The model's lens is narrower than the face it is given
+
+Reported from a Quest 3, and the reason the section above is not the whole
+story: patches of ground *near the camera* sitting higher than they should. It
+looks like the seam problem and it is not.
+
+Geometry settles it without a reference model, the same way the widening was
+measured. A floor one camera height down puts a surface at distance
+`1/sin(-lat)` along any ray, exactly, so the estimate can be turned into a
+height above the true plane and plotted against distance from the tripod. Frame
+0 of the outdoor 8K clip, calibrated on the near apron (0.15–0.5 camera
+heights) where the ground is unambiguously flat concrete:
+
+| distance out, in camera heights | 0.3 | 0.5 | 0.7 | 0.85 | **1.0** | 1.2 | 1.5 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| height above the true floor | −0.01 | +0.02 | +0.07 | +0.12 | **+0.18** | +0.19 | +0.18 |
+
+Level under the tripod, then a steady climb to 0.18 camera heights — about
+30 cm on a 1.6 m tripod — reached at one camera height out, which is exactly
+where the down face's nominal edge crosses the floor. Reproduces on frame 240
+within 0.01 throughout.
+
+**It is not the seam.** Three things say so. The lift starts around half a
+camera height out, deep inside the down face where no neighbour contributes
+anything. Yawing the whole cube 45° moves the seam ring without moving the
+bulge. And a two-pass scheme that takes every direction from whichever cube
+sees it further from its own seam measured *worse* than one pass (+0.21 against
++0.18) — as did an oracle allowed to pick the better of the two per pixel
+(+0.18, i.e. no gain), which is what you get when both passes are wrong in the
+same direction by the same amount.
+
+#### The camera head saturates
+
+Depth Anything V3 predicts its own intrinsics, alongside depth and confidence.
+Fed the same six views at a sweep of fields of view, the focal length it
+reports says it stops believing wide lenses:
+
+| the face really spans | 61.9° | 73.7° | 90° | **98°** | 106.9° | 116° |
+| --- | --- | --- | --- | --- | --- | --- |
+| the model says | 58.9° | 64.3° | 65.7° | **65.6°** | 67.9° | 69.1° |
+| ratio | 0.95× | 0.87× | 0.73× | **0.67×** | 0.64× | 0.60× |
+
+It tracks the truth to about 62° and then flattens out around 65–69°, which is
+roughly a 28 mm-equivalent lens — a very common thing to have been trained on,
+and nothing like what this pipeline hands it.
+
+So it reconstructs for a much longer lens than it has. A ray genuinely 45° off
+the face axis is treated as though it were about 30° off; the distance it must
+travel to reach a surface is under-estimated, and the surface is placed too
+near. The error is zero on the axis and grows with angle off it, which is the
+shape measured above — and the reason it looks like a seam problem is only that
+a face edge is where that angle is largest before the face runs out.
+
+It also explains why wider faces measure worse, which the widening study saw as
+a mild cost and could not account for:
+
+| face width | 91.1° | 98° | 106.9° |
+| --- | --- | --- | --- |
+| height error at one camera height | +0.156 | +0.182 | +0.228 |
+
+Same ordering as the mismatch ratio.
+
+#### Why the scale fit cannot see it
+
+`align_overlapping_faces` reconciles the faces *with each other*. All six carry
+the same bias, so they agree with each other while all being wrong together —
+on every frame tested it chose a shift of exactly **0.000** for all six. A
+committee where everyone makes the same mistake votes unanimously.
+
+Nor is it fixable by fitting the faces to the ground instead. That was built
+and measured first: for any plane, inverse depth is exactly linear in the
+direction vector, so a four-parameter least squares over ground pixels gives
+the plane and the offset together, and the offset is the correction. It fits
+well — R² 0.962–0.968 across eight frames, offset stable to 2.6% — and it still
+fails, structurally. An offset in inverse depth acts on the depth *range*,
+while the error is in the *angle*; enough offset to flatten the near floor
+exceeds the entire inverse depth of anything far away:
+
+| ground fit looks below | worst floor error | frame clipped to infinity |
+| --- | --- | --- |
+| 8° | 0.157 | 17.6% |
+| 20° | 0.118 | **53.5%** |
+| 30° | 0.266 | 65.5% |
+
+There is no setting where the floor comes flat and the horizon survives.
+
+#### The correction
+
+Per-ray, then, matching the shape of the error: divide each face's inverse
+depth by `1 + F·(sec θ − 1)`, where `sec θ = √(1 + a² + b²)` is the ray's own
+foreshortening at face coords `(a, b)` — 1.00 at the face centre, 1.41 at the
+nominal cube edge, 1.91 at the widened corner. A cached per-face table and one
+divide per pixel: no second inference, no extra pass, no measurable runtime.
+
+Applied **before** the faces are fitted together, since it moves the values
+that fit would otherwise read.
+
+| `F` | worst floor error out to 1.2 camera heights | clipped |
+| --- | --- | --- |
+| 0.0 (today) | 0.196 | 0.00% |
+| 0.4 | 0.079 | 0.00% |
+| **0.55** | **0.032** | 0.00% |
+| 0.7 | 0.036 | 0.00% |
+| 1.0 (the full ray-versus-axis conversion) | 0.127 | 0.00% |
+
+`F = 1` is the complete conversion and overshoots, landing the ground 0.12
+camera heights *below* true. The best value per frame across the clip came out
+0.60, 0.50, 0.55, 0.60, 0.55 — one constant holds.
+
+On the reference photo's scorecard, through the V3 path at 11904×5952:
+
+| | chair gap (→1.0) | wall wobble (→0%) | floor rms (→0%) | depth span (keep) |
+| --- | --- | --- | --- | --- |
+| off | 1.42 | 19.6 | 27.7 | 1.30 |
+| **F = 0.55** | 1.39 | **8.5** | 24.5 | 1.07 |
+| F = 0.7 | 1.39 | **7.6** | 23.5 | 1.07 |
+| F = 1.0 | 1.38 | 9.4 | **20.9** | 1.07 |
+
+Wall wobble more than halves, which was the score most at risk — an angular
+correction touches every pixel, and a vertical plane crosses a face periphery
+the same way a floor does. It improves for the same reason the floor does.
+
+The depth span falls 17%, and score.py is right to flag that, so: by latitude
+band the loss is 3–5% on the bands sitting at face centres (nadir, zenith,
+horizon) against 13–15% on the bands at 45°, which are the seam latitudes. What
+is being removed is the false nearness at the peripheries, not stereo. The
+other three scores are ratios and scale-invariant by construction, so
+`--strength 1.2` restores the parallax without moving any of them.
+
+Seam agreement improves as a side effect it was not aiming at — the spread
+between overlapping faces over the lower hemisphere falls from 6.9% to 4.5% of
+local depth — because the faces were disagreeing precisely where each was least
+reliable.
+
+#### Why it is off by default
+
+Two scenes, one backend, one face width, and never yet judged in a headset.
+`F` is empirical rather than derived: the model's own predicted intrinsics
+imply about 0.36, so it is absorbing something the field-of-view story alone
+does not account for, and it is tied to V3 at 98° faces. Depth Pro — the stills
+default — is untested and would need its own constant, or none.
+
+Two things measured along the way and not used. Tiling narrows the field of
+view per inference, which ought to help, and makes it much worse (+0.41 at
+`--depth-tiles 2` against +0.20): `estimate_tiled` pins each tile to a coarse
+full-face reference with a scale-only fit, re-imposing the shape it was
+supposed to escape. And a second pass with the cube *tilted* rather than yawed
+does work — 0.196 → 0.150 for two passes, 0.137 for three — because a tilt
+changes each ray's angle off the axis where a yaw does not. It is a quarter of
+the benefit for double the inference, so it is worth remembering only if the
+correction above turns out not to transfer.
+
+### Negative result: a thin trim the synthesised eye loses
+
+Reported from a headset on the reference photo: the plaster trim between the
+kitchen and the front door is clear in the left eye and gone in the right, so
+it reads as sinking into the wall behind it. This is the metallic-trim artifact
+that made Depth Pro the stills default, met again on the V3 path — which
+matters because V3 is what video uses, and an indoor video of the same room
+would show it.
+
+Nine things were tried and none fixed it. Recorded because most of them look
+obviously right beforehand.
+
+#### What is actually happening
+
+The trim is about 7 px wide. At 518² inference the depth boundary lands roughly
+**4 px past the picture's own boundary**, on the far side of the trim, so the
+whole strip is given the kitchen wall's depth. The near column then sweeps over
+it in the warp — correctly, given a depth map that says the column's surface
+starts where the trim is. Profiles across the edge in the `-X` face, row 1035:
+
+| face column | 174 | 176 | 178 | 180 | 182 | 184 | 186 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| picture (grey) | 174 | **161** | **125** | **76** | **50** | **47** | 54 |
+| depth, 518 | 0.590 | 0.591 | 0.595 | 0.678 | 0.896 | 1.193 | 1.566 |
+| depth, 1036 | 0.576 | **0.620** | **1.189** | **1.530** | 1.569 | 1.552 | 1.552 |
+
+The edge itself is *not* soft — the depth transition measures 5 px against the
+picture's 3. It is in the wrong place. At 1036 it moves onto the picture's
+edge and part of the trim finally reaches the near surface.
+
+#### What was tried
+
+Measured on rendered pixels: how far the trim falls below the walls either
+side, averaged over the 20 rows where the source trim is strong. The source
+falls 46.6 grey levels; the left eye is the source in every case except
+`--split-baseline`.
+
+| | right eye | of source |
+| --- | --- | --- |
+| **as shipped** | **28.3** | **61%** |
+| `--fg-erode 0` | 28.3 | 61% |
+| `--depth-tiles 3` | 28.2 | 61% |
+| `--smooth 8` | 27.5 | 59% |
+| `--split-baseline` | 27.4 | 59% |
+| two rotated cubes, best-of | 23.6 | 51% |
+| `--gradient-limit 0` | 21.9 | 47% |
+
+Nothing improves on the default, and two things measurably hurt. The guided
+filter was also swept properly (`--smooth` is a joint filter guided by the
+full-resolution face image): radius 8 → 64 widens the depth transition
+monotonically from 5 px to 19 px, because it is a smoother and there was never
+a soft edge to snap.
+
+`1036` at two views was scored against the shipped `518` at six, since six
+views at 1036 exhausts a 16 GB machine:
+
+| | chair gap | wall wobble | floor rms | depth span |
+| --- | --- | --- | --- | --- |
+| 518, 6 views | **1.42** | **19.6** | **27.7** | 1.30 |
+| 1036, 2 views | 1.48 | 22.3 | 29.7 | 1.47 |
+
+Worse on all three, including `chair_gap`, which is the thin-structure score.
+Losing the whole-sphere fusion costs more than the resolution buys. That does
+not say resolution is useless — 1036 at six views is the experiment that would
+isolate it, and it is not runnable here.
+
+#### The measurement trap, which is the real lesson
+
+Four conclusions were drawn and withdrawn before the numbers above were
+trusted, and three of the four came from the same two mistakes.
+
+**Measuring the wrong feature.** The trim is a *dark* line and the brightest
+thing within 200 px of it is the kitchen's white wall. A top-hat looking for a
+bright line reported the trim as 85–97% intact while the picture plainly showed
+it gone, and it ranked `--gradient-limit 0` as the worst option when the sound
+measure ranks it merely bad.
+
+**Measuring one row.** At row 2000 `--gradient-limit 0` scores 23 against the
+default's 8 and looks like a fix. Over all 20 strong rows it averages 21.9
+against 28.3. The trim is lost over part of its height and kept over the rest;
+any single row can say whatever you want.
+
+And one that invalidated four separate conclusions on its own: a "ramp width"
+helper that returned the span from the first to the last pixel lying between
+10% and 90% of a window's min–max. Plateau noise straying inside that band put
+the last index 85 px past the edge, so a 4 px transition measured 89 px. Every
+theory built on "the depth ramp is twelve times the feature" — the cross-fade
+smearing it, the face periphery softening it, two cubes narrowing it — was
+built on that number.
+
+The habits that would have caught all three: print the profile before trusting
+a summary statistic, and check that the statistic moves when the feature moves.
+
+#### Two sizes of thin, and only one of them is the trim
+
+A second complaint from the same photo turned out to have the same root and a
+different size. The chair's back post is a solid piece of wood about 24 px
+wide; in the synthesised eye it comes out about 7. Printed across it, at row
+2545, the reason is plain — V3 does not describe it as a surface:
+
+| across the post (24 px) | depth span |
+| --- | --- |
+| Depth Anything V3 | 0.07 → 0.67, **range 0.60** |
+| Depth Pro | 0.58 → 0.73, **range 0.15** |
+
+V3 climbs steadily across the wood, so the near edge shifts about twice as far
+as the far edge and the post is squeezed. Depth Pro steps at the post's left
+edge — the same columns where the picture's brightness goes 124 → 152 → 169 —
+and then holds flat. A plateau warps as one piece; a ramp does not.
+
+Both normalised to their own face's 5th–95th percentile, sampled in the +X face
+so no assembly or scale fit sits between the model and the number.
+
+So "thin structure" is two problems. A **7 px** trim is below what either model
+resolves as its own surface, and gets assigned wholesale to one side of a step.
+A **24 px** post is above what Depth Pro needs and below what V3 needs, so the
+backend choice decides it. That distinction matters when reading the advice
+above: the stills default fixes the post, and is not known to fix the trim.
+
+#### Where it stands
+
+For stills, use the default. Depth Pro resolves this edge and is the stills
+default for exactly this reason — see [Choosing a depth
+model](#choosing-a-depth-model). For video, where Depth Pro's ~2 s a frame is
+prohibitive, it is unsolved.
 
 ### Stereo geometry: the baseline follows your gaze
 
@@ -1301,3 +1636,580 @@ which is all the geometry requires).
 Whatever survives is filled by continuing the background inward from the side
 geometry says it lies on, which is deterministic and therefore stable frame to
 frame; `--inpaint` only sees what that cannot reach.
+
+### Depth Anything 3 metric: the scale is real, and the input size is part of it
+
+`DA3METRIC-LARGE` is a plain single-view DinoV2-L with a DPT head — its config
+has no camera decoder and no cross-view attention, so the six faces are
+independent and none of the multi-view machinery applies. On a CPU-only torch
+it runs a face in 3.2 s at its default `process_res` of 504, which is about the
+wall time the ONNX V3 small path takes on the GPU for all six.
+
+What it buys is the one thing relative depth cannot give: a scale. Every render
+before this had an arbitrary one — the same `--strength 1.2` produced a 49 mm
+eye separation outdoors and 35 mm indoors, against a human 65 mm, and there was
+no way to know which was which. The metric output can be checked against common
+sense with no ground truth at all:
+
+| scene | fitted camera height | check |
+|---|---|---|
+| road | 1.58 m | straight down measures 1.6 m |
+| indoor | 1.41 m | plus 1.01 m to the ceiling = a 2.41 m room |
+
+Both are what a tripod and a house actually are. With that, the baseline stops
+being a taste setting. The warp forms `lam = 1 / (dn + _MIN_INV_DEPTH)` and
+shifts by `strength * _BASELINE_SCALE` in those units, and normalisation is
+affine, so choosing `hi - lo = 1/S` and `lo = _MIN_INV_DEPTH/S` makes one
+relative unit mean `S` metres. The eye separation is then
+`strength * _BASELINE_SCALE * S` metres, and asking for 65 mm is arithmetic.
+
+**`process_res` is not a quality knob.** Raising it from 504 to 1008 sharpens
+the depth edge across a thin upright from 6 px to 2 px, and breaks the metric
+scale: the road camera drops from 1.58 m to 0.84 m and the room from 2.41 m to
+1.72 m. The input size is part of what the model was calibrated against. Nor is
+one constant enough to repair it — the ratio between the two runs has a median
+of 1.98 but an interquartile spread of 1.23, so a single rescale leaves about
+23% of depth-dependent distortion.
+
+Both can be had at once, because the two errors live at different spatial
+frequencies. The scale error is smooth (the model reading the wrong implied
+focal length); the detail is local. Dividing the 1008 map by a heavily
+low-passed version of its own ratio against the 504 map restores the calibrated
+scale and keeps the sharp edge:
+
+| | camera | depth edge |
+|---|---|---|
+| 504, calibrated | 1.58 m | 6 px |
+| 1008, sharp | 0.84 m | 2 px |
+| fused | **1.59 m** | **2 px** |
+
+Two smaller things the metric path forces:
+
+**The up face has nothing to measure.** Shown only sky it answers about 10 m
+where the side faces put the same sky at 88 m, which paints a ring across the
+sky at the latitude the faces meet — a step from 0.9 px of parallax to 8. It is
+fixed by rescaling that one face against the ratio the aligner wanted for the
+others (0.187 here), leaving the five faces that contain ground untouched.
+Indoors, with no sky, nothing needs rescuing.
+
+**The repo's tuned constants assume percentile normalisation.**
+`_erode_foreground` weights by `clip((rng - 0.05)/0.05, 0, 1)`, which is
+calibrated for a scene spread across most of [0, 1]. A metric encoding squeezes
+the midground toward zero: the van at 8.5 m and the road at 14.7 m came out at
+0.0676 and 0.0180, a contrast of 0.0496 — just under the threshold, so the
+erosion computed a weight of exactly zero and did nothing at all. Any constant
+expressed in normalised depth units needs re-reading when the normalisation
+changes.
+
+### There is no halo
+
+For most of an investigation into why a van's edge looked thicker in one eye,
+the working theory was that the depth map's foreground overhangs its silhouette
+by about 7 px — a halo — so a strip of road carries the vehicle's depth and
+travels with it. Four fixes were built against that theory and all four failed:
+
+| approach | depth-edge offset | edge width |
+|---|---|---|
+| none | +7 px | 3 px |
+| guided filter (r=8) | +10 px | 18 px |
+| joint bilateral (r=20) | +2 px | 26 px |
+| weighted mode, per face | +8 px | 3 px |
+| weighted mode, post-assembly | +2 px | 0 px |
+
+The guided filter and the joint bilateral are weighted *means*, and a mean
+across a depth step returns values between its two sides, so moving the edge to
+the right place costs it its sharpness — and a 26 px depth ramp is exactly what
+`--gradient-limit` exists to suppress. The weighted mode (split the window by
+colour similarity, take the side that wins, never average across) does move the
+edge without blurring it, but only after face assembly: the van sits at
+longitude -146 degrees, inside a face overlap, and sharpening two faces
+separately before cross-fading them puts the ramp straight back.
+
+`fg_erode` "fixed" it and cost more than it saved. At the reach needed to
+remove the overhang (8 px) it eats the van's own bodywork — the white strip
+between its rear window and its outer edge is only 10 px wide, and came out
+8 px in one eye against 13 in the other. There is no good setting: at 2-4 the
+strip is perfect and the road still drags, and at 6 and 7 the probe reads +4 and
+-13 px of disparity where the truth is -4, worse than either end. On the mesh
+path it was worse still, leaving railings and indoor chair posts visibly eaten.
+
+**Then the premise was measured, and it was wrong.** Across 38 edges with a
+step in both colour and depth, the two agree to within a pixel — median -1.0 px
+where the foreground lies left, +0.0 px where it lies right. Individually:
+handrail post +0, sign post -1, kerb -1, bin -1. There is no systematic halo to
+erode.
+
+The van is a special case, and the reason is visible in the raw pixels. Across
+its rear-right edge the body reads 128-139 and the road beside it 117-127:
+
+| edge | colour contrast across the depth step |
+|---|---|
+| **van rear-right** | **1 level** |
+| bin | 20 levels |
+| kerb / steps | 32 levels |
+| handrail post | 54 levels |
+| sign post | 73 levels |
+
+About one level. The only visible feature is a single dark trim line one pixel
+wide. There is no image evidence there for any algorithm to localise the
+boundary with, which is precisely why three colour-guided methods failed on it:
+they relocate a depth edge by following the picture's edge, and at the van
+there is no picture edge to follow.
+
+The original 7 px was also partly a measurement error — it compared the
+*midpoint of the depth ramp* (727) against the *dark trim line* (721), which
+are different landmarks. Measured like for like, the foreground ends at 724
+against a trim line at 721, about 3 px.
+
+The lesson is the ordinary one: measure the premise before building against it.
+Four implementations, each sound in itself, were aimed at a defect that the
+population statistics say is not there.
+
+### Rendering the warp as a mesh
+
+`right_eye_from_disparity` treats every source pixel as an independent point:
+lift it by its inverse depth, translate to the other eye, reproject, scatter it
+into a 2x2 footprint, keep the nearest. Nothing in that says two neighbouring
+pixels belong to one surface, so a small object's pixels land unevenly and
+shear along the warp direction — which is opposite in the two eyes. A bollard
+lamp's finial, the nearest object in one scene at 1.6 m, came out as a block
+leaning right in the left eye and left in the right eye.
+
+A mesh keeps them joined: vertices from the depth samples, quads between
+neighbours, each quad either kept or cut, and the surface between vertices
+interpolated rather than left to chance. Depth values are never rewritten, so
+`--gradient-limit` is not needed — the cut takes its place, and the object
+keeps its true depth. Measured as error against the source after allowing for
+parallax, above each renderer's own noise floor:
+
+| scene | mesh | splat |
+|---|---|---|
+| sign post | **0.99** | 4.59 |
+| lamp finial | **2.63** | 6.11 |
+| handrail | 5.53 | **5.05** |
+
+Two wins and a tie. The handrail is where a mesh has least to offer: a thin
+diagonal bar disoccludes along its whole length, so it produces the most cut
+area of anything in the frame.
+
+**Cut on projected stretch, not on depth ratio.** A ratio test is scale-free
+and fires just as hard on a tree forty metres away — where a leaf and the gap
+behind it differ by a fraction of a pixel — as on a silhouette two metres away.
+It left the canopy riddled: 1131 separate holes, 818 of them 4 px or smaller.
+Cutting instead when the warp pulls a quad wider than 2.5 output pixels drops
+that to 132 holes and takes the canopy and the van edge to zero, because it
+only removes geometry that would have been a visible rubber sheet.
+
+The prototype is not production, and its two remaining defects share one cause.
+It scatters samples rounded to the nearest pixel and composites them
+far-to-near, where a real rasteriser computes coverage per output pixel. That
+gives it a noise floor the splat does not have — rendering at zero baseline,
+where a perfect renderer must return the source exactly, it leaves a residual
+of 1.9 to 5.7 depending on the crop, against the splat's 0.00 — and it produces
+four hairlines at longitudes +/-45 and +/-135 degrees, where ties in the
+compositing order flip under float32 jitter and the texture coordinate steps a
+quarter of a pixel. Breaking ties by proximity to the pixel centre was tried
+and made it worse.
+
+Speed is not the obstacle it looks like. Profiling one band: argsort 46%, the
+sample blend 30%, rounding and scatter 23% — and the actual geometry,
+projecting vertices and deciding cuts, **1.6%**. Nearly all of the cost is the
+brute-force stand-in for a rasteriser, and a mesh built at depth resolution
+rather than image resolution would start from about 16x fewer quads, since the
+depth resolves roughly one independent value per 7 px anyway.
+
+### A metric scale makes the baseline a dial, and indoors it is worth turning
+
+Once the depth is metric the eye separation stops being a taste setting and
+becomes a number with units, which makes an old trade newly measurable: how
+much depth is being bought with how much damage.
+
+The damage scales with how near the scene is, and a room is much nearer than a
+street. Measured over the same two scenes, at a true 65 mm:
+
+| scene | median depth | median disparity | p99 disparity | depth edges |
+|---|---|---|---|---|
+| road | 22.5 m | 3.5 px | 51.6 px | 5203 |
+| indoor | 1.6 m | **49.0 px** | 93.7 px | **32448** |
+
+The typical indoor pixel moves further than the road's 99th percentile, and
+there are six times as many depth discontinuities for it to move across — five
+times the total disocclusion area. None of that is a defect. At 0.8 m a 65 mm
+baseline subtends 4.4 degrees and a real pair of eyes verges 4.65, so the
+geometry is right; the scene is simply demanding, which is why VR capture
+generally avoids objects that close.
+
+Dropping to 40 mm indoors, changing nothing else:
+
+| | cut geometry, left / right |
+|---|---|
+| 65 mm | 0.42% / 0.36% |
+| 40 mm | **0.18% / 0.14%** |
+
+A 38% smaller baseline removed about 60% of it — steeper than linear, as the
+disocclusion numbers above predict. Judged in a headset the room still read
+with good depth and visibly less breakup, so indoors this is a trade worth
+making. It is not worth making on the road, which has almost no disocclusion to
+save at 3.5 px of median disparity.
+
+What it does *not* do is improve the renderer. The same artifacts are present
+in the same places; there is simply less warping for them to attach to. That
+distinction matters when reading any before-and-after: less work done is not
+the same as work done better.
+
+A second thing this comparison ruled out. The suspicion was that indoor scenes
+suffer because they are full of low-contrast boundaries — white chair against
+cream wall — and that the depth model cannot localise them. The population says
+otherwise: the median colour contrast across a depth step is 40 levels indoors
+against 39 on the road, and 12% of indoor edges fall below 10 levels against
+16% outdoors. Indoor is not lower contrast. It is just closer.
+
+### Consistency between the eyes may matter more than fidelity in either
+
+An argument from the user, recorded because it reframes what the renderer is
+for and applies to the splat path as much as to any mesh:
+
+> Because the depth map is low resolution, small details do not get rendered
+> correctly. With the whole baseline in one eye, the source eye has the detail
+> right and the reconstructed eye has it wrong, and the mismatch is what causes
+> fatigue. It would be better if the same detail were rendered *incorrectly in
+> both eyes*.
+
+The claim is that binocular agreement is worth more than per-eye accuracy. Two
+eyes that agree on a slightly wrong shape fuse into a slightly wrong object,
+which is comfortable; one right eye and one wrong eye fuse into nothing, and
+the visual system keeps trying.
+
+This is a different phenomenon from the one `--split-baseline` was justified
+by, and the two should not be confused:
+
+* A **monocular region** — content one eye can see and the other cannot — is
+  normal. Every real occluding edge produces one, and the brain suppresses the
+  unmatched side without complaint. That is what the existing note means by
+  each eye's holes falling in different places so fusion hides them, and it
+  stands.
+* A **shape mismatch** on a feature both eyes *can* see is not normal. It
+  presents conflicting disparity across the feature, and nothing in ordinary
+  vision produces it. This is what the argument above is about, and the
+  existing justification says nothing about it.
+
+Today's measurements support the distinction, and are not kind to the current
+split. On a bollard lamp's finial the splat rendered the ball leaning right in
+the left eye and leaning left in the right — the distortion is *mirrored*,
+because the two eyes are warped in opposite directions from the same source.
+That is the worst case for this argument, not the best: whole baseline would
+give one correct ball and one leaning ball, and split gives two balls leaning
+opposite ways.
+
+So there are three arrangements, and the repo has only ever measured the first
+two:
+
+| | left eye | right eye | shape error |
+|---|---|---|---|
+| whole baseline | pristine | distorted | present in one eye |
+| split baseline | distorted | distorted | mirrored between eyes |
+| chained | distorted | distorted | **shared** |
+
+The chained arrangement is the user's proposal: warp the source to the right
+eye, then warp *that* to the left eye rather than going back to the source.
+Whatever the depth map got wrong about a detail is then baked into the right
+eye and inherited by the left, so both carry the same error and the pair
+agrees.
+
+Open questions, none of them settled:
+
+* The left eye becomes a warp of a warp — two resamplings and two hole fills,
+  so it is softer than the right and inherits invented content as if it were
+  real. The pair agrees, but on something partly fictional.
+* Going right-to-left re-invents content the source actually contains. A
+  composite that prefers real source pixels where they exist would avoid that,
+  at the cost of reintroducing the very inconsistency the scheme is for.
+* It is testable without judging by eye. The measure is not each eye's error
+  against the source but the *disagreement between the eyes* — for the finial,
+  the splat's two eyes scored 5.99 and 6.22 above their floor and the mesh's
+  4.64 and 4.42, gaps of about 0.2 in both. Chaining should drive that gap
+  toward zero while leaving the absolute error roughly where it was.
+
+### How the baseline is divided between the eyes, measured
+
+The preceding argument says the pair matters more than either half. That is
+testable: align each eye to the source by brute-force integer shift, which
+divides out where a feature sits and leaves how far its shape had to bend, and
+read the *difference between the eyes* rather than either eye's fidelity.
+
+Whole baseline, a reconstructed left eye, a round trip and an even split turn
+out not to be four ideas but four points on one axis — what fraction of the
+total separation the left eye takes. Measured on three small features that the
+depth map is known to get wrong, at a constant 65 mm total:
+
+| left eye's share | lamp finial | sign post | handrail |
+|---|---|---|---|
+| 0% (pristine) | 12.30 | 8.83 | 10.39 |
+| 15% | 1.77 | 2.65 | 5.01 |
+| 30% | 0.79 | 2.82 | 2.66 |
+| 50% | **0.09** | **1.27** | **0.63** |
+
+Two things fall out, and one of them was not expected.
+
+**A pristine eye is the worst case, by an order of magnitude.** Leaving one eye
+untouched guarantees maximum mismatch on exactly the small features the depth
+map gets wrong, because the other eye carries all of the error. This is the
+opposite of the intuition that an unmodified eye must be the safe one.
+
+**The curve has a knee, not a slope.** The expectation was that error would
+scale with displacement, so a 15% share would buy about 15% of the benefit.
+It buys 86% of it on the finial and 70% on the sign post. Once both eyes are
+being reconstructed at all they are in the same regime, and what remains is
+only the difference in how far each was pushed. Where there is a reason to keep
+one eye close to the original, 15/85 is therefore a real option; with no such
+reason 50/50 is still the minimum and is what the renderer does.
+
+Two arrangements that reconstruct the left eye *without* displacing it were
+also measured, and neither reaches an even split:
+
+| left eye | finial | sign post | handrail |
+|---|---|---|---|
+| reconstructed at zero baseline | 10.59 | 3.94 | 6.97 |
+| round trip out to the right eye and back | 8.82 | 1.34 | 5.19 |
+
+Reconstructing at zero baseline cannot work in principle: displacement is zero
+for every pixel whatever the depth says, so the eye picks up the rasteriser's
+resampling character and none of the depth map's geometry. The round trip does
+carry the geometry — the two warps fail to cancel wherever the depth is wrong —
+and it nearly closes on the sign post at 11 m, which barely moves. It fails on
+the finial at 1.6 m, which moves 27 px, opens large holes, and comes back
+carrying invented fill rather than its own distortion.
+
+Chaining the left eye off the right, rather than off the source, was the
+proposal this set out to test. It wins once (sign post 1.27 to 0.29), loses
+once (handrail 0.63 to 1.41) and ties once, while raising the absolute error
+every time through double resampling. Not worth its complexity on this
+evidence.
+
+**A caveat that limits all of the above.** The measure is the *magnitude* of
+each eye's distortion, not its direction. A 0.09 at 50/50 says the two eyes are
+distorted equally, not identically — and the finial is visibly distorted in
+*opposite* directions in the two eyes, leaning right in one and left in the
+other. If mirroring is itself uncomfortable, an even split scores well on a
+metric blind to its main flaw. Settling that needs the eyes aligned to each
+other rather than each to the source.
+
+### Two mesh renderer notes
+
+**A fold is not a stretch, and the cut test only sees stretch.** A quad whose
+warped corners reverse order has folded the surface back through itself; what
+gets drawn is its back face, mirrored. It is *narrow*, not wide, so a test on
+projected width passes it. Measured on one indoor scene, 12043 quads fold. In
+practice culling them changed 0.0001% of pixels because the folded faces were
+already losing the depth test to the surface in front — the cull is correct and
+nearly free, and it is not the fix for anything visible.
+
+**The mirrored fill duplicates objects.** `_directional_fill` continues
+background into a hole by mirroring across the hole boundary, which is right
+for grass or carpet and wrong when the neighbour is recognisable: a tap beside
+a stone pillar came back reflected into a symmetric phantom. Telea inpainting
+leaves a soft smear instead, differing on 0.07% of the frame, and in stereo the
+smear is much the lesser evil. The mirroring exists for temporal stability, so
+this is a still-image versus video trade rather than a defect: prefer
+inpainting for photos, keep mirroring for footage.
+
+## The mesh renderer was wrong, not slow, and the same change fixes both
+
+The mesh prototype was moved to the GPU to make it fast. Profiling the result
+said the port had missed the point: 90% of its time went to `round+mask`,
+`zbuffer+scatter` and `blend` -- the brute-force stand-in for a rasteriser --
+and 0.7% to the geometry. It was faster hardware running the wrong algorithm,
+and 2.9x was the ceiling that bought.
+
+**The wrong algorithm.** Each 1x1 source quad was sampled at 16 fixed points,
+each point rounded to the nearest output pixel and scattered. Wasteful where
+the warp compresses (16 samples onto one pixel), starved where it stretches
+(4 samples across 2.5 px), and wrong everywhere: the texture coordinate came
+from where a *sample* fell rather than from where the *output pixel* is, so
+the rounding error went into the resampled image.
+
+**The replacement** asks which output columns a segment actually covers -- the
+integers in `[u0, u1)` -- and solves for the source position at each. Segment i
+ends where segment i+1 begins, so on a connected surface every output column
+lies in exactly one segment: measured, 99.88% of candidates win their pixel
+uncontested, against 78% before. `max_stretch` bounds coverage to four
+columns, so the variable-length expansion a general rasteriser needs -- and
+which DirectML has no primitive for -- collapses to four masked passes.
+
+**Two tests with a knowable right answer** decided it, because equality with
+the renderer being replaced is the wrong bar.
+
+*Identity.* At baseline 0 the warp is a no-op, so the output must be the
+source; anything else is the renderer's own noise floor.
+
+*Constant depth.* `_eye_offset` is a rotation of the horizontal plane, so the
+whole sphere shifts by one uniform angle and `map_x` must step by exactly 1 per
+column. Departure from that is the hairline artifact, measured rather than
+eyeballed. The map is recovered by warping a float32 ramp whose value is the
+column index -- it must be float, since a byte-packed ramp wraps every 256
+columns and interpolating across that wrap returns nonsense.
+
+| | identity: pixels wrong | mean error | step error | worst column |
+|---|---|---|---|---|
+| scatter | 37.9% | 1.03 levels | 0.68 px | 4517x median at +134.8 deg |
+| scanline | **0.000%** | **0.0000** | **0.00000** | none |
+
+The scatter renderer's worst column landing on +134.8 degrees reproduces the
+documented +/-135 hairline from first principles. **The noise floor and the
+hairlines were one bug**, and exact coverage removes both -- so the "expect the
+mesh render to look slightly softer" caveat no longer applies.
+
+On the real 7680x3840 frame: **99.8 s to 8.7 s, 11.5x**, with *less* left
+unfilled (0.094% against 0.138%) because exact coverage wastes nothing.
+
+### Three porting bugs, and what they have in common
+
+None of them produced anything that looked broken.
+
+**The eye-offset sign.** `_eye_offset` is called as `_eye_offset(lam, d,
+-baseline)`; inlining it with `+baseline` renders the *opposite eye*. The
+output is a clean, plausible stereo frame the whole time. It took reading the
+numpy source line by line, not looking at the image, and it was worth 89% of
+pixels differing and double the cut area.
+
+**Half a pixel.** The projection ends `+ (w/2 - 1/2)`, not `+ w/2` -- pixel
+centres, not corners. Worth only 0.1% on its own, but it changes every
+rounding decision.
+
+**A large scalar subtraction.** Building a global scatter index and reducing it
+to band-local afterwards -- `flat = cat(flats) - y0 * w` -- is the obvious way
+to write it and it silently destroys the result. The offset passes 2**24 at row
+2184, and DirectML puts int64-minus-large-scalar through float32, where the
+spacing at 20M is 2. The low bit of the target column is lost, every write
+lands on an even column, and 21.6% of the frame comes out empty -- *all of it
+on odd columns*, and none of it below row 2184. Keeping the index band-local
+before the multiply keeps every value under 2**21, which float32 holds exactly
+whatever the backend does underneath.
+
+The device primitives were all innocent: `ceil`, `remainder`, `round`,
+`.long()`, `index_put_`, `scatter_reduce_`, `expand().reshape()` and int64
+arithmetic each tested exact, at scale and at the magnitudes involved. What
+found it was dumping the scatter index itself and noticing the k-loop parts
+were 50/50 even/odd while their concatenation was 100% even. The lesson is the
+project's usual one in a new place: measure the intermediate, not the output.
+
+## V3 Small under-covers the foreground, and every cure has the same side effect
+
+The depth boundary sits *inside* the object. Read straight off a profile of
+the road frame: at y=2735 the lamp post's picture runs to x=137 while the
+depth leaves its near plateau at x=122, so 15 px of post is told it is
+background. Those pixels stay behind when the post moves, which shaves rounded
+edges and thins thin structures in the warped eye.
+
+**Dilating the depth fixes the shapes.** Shape residual on the splat's right
+eye, going from no dilation to a 16 px dilation: lamp 7.07 -> 3.87, sign post
+5.31 -> 3.21, handrail 7.40 -> 4.53. It is renderer-independent -- it changes
+the depth map before anything is warped -- so the mesh and the splat both take
+it. `--fg-erode` is the exact inverse operation and must go to 0 alongside it.
+
+**And it drags the background with it.** Grass 0-5 px from the lamp reads 0.687
+against its true 0.43; 10-15 px out it is still 0.570. Indoors the same halo
+put an elbow in a grout line: the stretch of line inside the dilation band
+travelled at the table's disparity and the rest at the floor's, turning 3.44
+where the source turns 1.26.
+
+**These are one mechanism, not two.** Dilation does not extend the object. It
+floods the nearest depth in the neighbourhood over everything, so the object
+and its surroundings move together and nothing overtakes anything. That is
+exactly why the shapes survive *and* why the floor drags. No radius separates
+them.
+
+### The barrier idea, and why it cannot work here
+
+Four variants of a geodesic dilation -- one that floods outward but refuses to
+cross an image edge -- were built and measured. All of them keep the grout line
+straight (turn 1.30 to 1.34 against the source's 1.26) and none of them
+recovers the chair rail (bright band still 5.3 to 5.7 px thinner in the right
+eye, against plain dilation's 0.3).
+
+| barrier | bright band R-L | grout turn |
+|---|---|---|
+| none (plain dilate 16) | +0.3 | 3.44 |
+| luminance, edges frozen | -5.7 | 1.30 |
+| luminance, edges absorb | -5.3 | 1.34 |
+| chroma, edges frozen | -5.7 | 1.31 |
+| chroma, edges absorb | -5.7 | 1.31 |
+
+The reason is structural. At the chair there are two chairs stacked on one
+column: a far one at depth 0.23 and the near one whose bright top rail begins
+at depth 0.654. The rail's topmost rows carry the *far* chair's depth, so they
+lag and the band compresses. A barrier belongs exactly there -- it is a real
+boundary between two objects, strong in luminance and in chroma alike -- so
+every barrier blocks precisely where the fill is needed. Tuning the threshold
+or letting edge pixels absorb without emitting does not change that.
+
+Two smaller negatives on the same problem: a **guided filter** made the
+alignment worse rather than better (10.4% of the pole given background depth
+became 23.1% at radius 16 -- it smooths rather than snaps, and shrinks a small
+near-region), and a **colour-weighted median**, which snaps where a mean blurs,
+changed nothing (10.4% -> 10.3%). Both fail for the same reason the barriers
+do: the pole's rim is a specular highlight running brighter than either the
+pole body or the grass, so colour guidance cannot associate it with the object.
+
+The fix is upstream, in the depth map, not in post-processing it.
+
+## The near limit costs the nearest object its shape
+
+`metric_to_normalised` takes the near limit from the 99.9th percentile of
+inverse depth. On the road frame the lamp post exceeds it: 60.9% of the post
+sat at exactly 1.000 with about 0.72 m of real relief thrown away, so cap, rim
+and finial all shared one disparity and it rendered as a cutout.
+
+Raising the percentile to 99.99 removes the clipping (60.9% -> 0.4%) and is
+close to free, because `strength_for` compensates for the changed unit scale --
+the baseline is still the millimetres asked for. Measured left-to-right
+disparity either side of the change: kerb -16 -> -16, road ahead -5 -> -5, far
+treeline -6 -> -6, and only the lamp itself moves, -42 -> -45. The percentile
+exists to reject depth outliers, so 99.99 trusts the near tail further; it is
+a flag, not a new default.
+
+## Four ways a measurement lied, in one afternoon
+
+Worth recording as a set, because they were all the same mistake in different
+clothes: comparing two things that were not comparable.
+
+**A fixed output window across a parallax shift.** The grout line's slope was
+compared over the same output columns in both eyes. The right eye is shifted
+~35 px, so the window held different physical points -- and a straight floor
+line is a curve in equirect, so sampling a shifted piece of a curve changes the
+tangent by itself. That manufactured a slope "inversion" (+0.047 to -0.152)
+which does not exist. Carrying the same points forward instead put vertical
+disparity at 0.08 px under a fitted plane and 0.13 px under V3.
+
+**A threshold calibrated to one normalisation, reused under another.** "Depth
+above 0.95 is near" is meaningful when the near object is clipped at 1.000. It
+is meaningless once the clipping is removed, and it reported 74% of the pole as
+background when nothing had changed. It also made DA3METRIC unrankable against
+V3, since the two do not share a scale.
+
+**A detector gated on the wrong channel.** The chair rail's thickness was
+measured with a wood-hue test requiring saturation > 55. The feature that
+actually thins is the specular band along the rail's top, which is bright and
+*de*saturated, so the test skipped it and reported all variants identical --
+twice -- while the defect was plainly visible. Measuring the bright band
+directly showed 17.0 px in the left eye against 11.3 in the right.
+
+**An edge found by argmax.** "The depth edge sits 46 px outside the lamp" came
+from the single strongest luminance gradient on one scanline, which latched
+onto the cap's internal rim rather than the silhouette. A per-row comparison
+over the whole object reversed the sign: the depth edge sits *inside* the
+object on 8 of 11 rows.
+
+In every case the picture was right and the number was wrong.
+
+## The scanline rasteriser has no vertical coherence
+
+The rasteriser decides coverage independently per row, so a near-horizontal
+silhouette quantises to whole-row steps: the indoor chair rail's top edge comes
+out as a visible staircase where the splat's 2x2 bilinear footprint blends
+across rows and stays smooth. Smoothing the depth after dilation does not touch
+it (tried at sigma 3, 7 and 13), which is the expected result -- it is the
+sampling that is per-row, not the input. Fixing it means rasterising the quad
+rather than the row segment, which is the same move that removed the hairlines.
+Until then the two paths differ in kind: the rasteriser wins on shape and speed,
+the splat on vertical edges.

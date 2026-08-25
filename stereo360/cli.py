@@ -180,14 +180,41 @@ def build_parser() -> argparse.ArgumentParser:
                         "accepts, and it warns that it is the worse encoder. "
                         "Ignored without a yaw, when audio is copied "
                         "untouched.")
+    p.add_argument("--left-share", type=float, default=None, metavar="F",
+                   help="Fraction of the separation the LEFT eye carries, "
+                        "0 to 1. 0.5 (default) splits it evenly; 0 leaves "
+                        "the left eye untouched and puts the whole baseline "
+                        "in the right; 1 leaves the right eye untouched "
+                        "instead. The 3D effect is identical at every "
+                        "setting - this chooses where the errors land, not "
+                        "whether there are any. Sharing costs a second warp "
+                        "per frame and roughly doubles chunk memory; "
+                        "consider a smaller --chunk-size with it.")
+    p.add_argument("--source-eye", choices=("left", "right"), default=None,
+                   help="Which eye keeps the source frame when --left-share "
+                        "is 0 or 1. Shorthand: --source-eye right is "
+                        "--left-share 1. Which one to pick is scene "
+                        "dependent: the warped eye HIDES what is behind an "
+                        "occluder on one side and has to INVENT it on the "
+                        "other, and which way that falls depends on where "
+                        "each occluder sits.")
+    p.add_argument("--detail-sigma", type=float, default=None, metavar="PX",
+                   help="Radius of the detail split, in pixels. Fine detail "
+                        "is warped on a smoothed depth instead of the real "
+                        "one, so it cannot shear at a misplaced depth "
+                        "boundary: the blurred base keeps the true depth and "
+                        "the detail above it rides a smooth field, arriving "
+                        "whole and the same way in both eyes. Defaults to a "
+                        "radius scaled to the frame (12 px at 7680 wide). "
+                        "Pass 0 to turn the split off and warp the frame "
+                        "whole. Costs a second warp per eye, and fine detail "
+                        "then sits at a slightly wrong depth -- the trade is "
+                        "that both eyes agree about it.")
+    p.add_argument("--depth-sigma", type=float, default=40.0, metavar="PX",
+                   help="How hard the depth is smoothed for that detail warp. "
+                        "Only used with --detail-sigma.")
     p.add_argument("--split-baseline", action="store_true",
-                   help="Warp BOTH eyes by half the baseline in opposite "
-                        "directions instead of leaving the left eye untouched. "
-                        "Same 3D effect, but ~8x less disocclusion per eye, "
-                        "and the holes land in different places in each eye so "
-                        "binocular fusion hides them. Costs a second warp per "
-                        "frame and roughly doubles chunk memory - consider a "
-                        "smaller --chunk-size with it.")
+                   help="Deprecated. Means --left-share 0.5, which is now the default anyway.")
     p.add_argument("--depth-tiles", type=int, default=None, metavar="N",
                    help="Split each cubemap face into NxN overlapping tiles "
                         "for depth inference (feather-blended). Higher = "
@@ -242,6 +269,36 @@ def build_parser() -> argparse.ArgumentParser:
                         "stretches the corners past what a depth model was "
                         "trained on and costs accuracy without helping the "
                         "seam. (default: 0.15)")
+    p.add_argument("--face-angular-correction", type=float, default=None,
+                   metavar="F",
+                   help="Pull each depth face's edges back onto their true "
+                        "rays. Depth Anything V3 estimates its own camera and "
+                        "that estimate saturates around 65 degrees, so at the "
+                        "98-degree faces used here it thinks it is looking "
+                        "through a much longer lens than it is, and places "
+                        "everything toward a face edge nearer than it really "
+                        "is. On flat ground that reads as the floor bulging up "
+                        "toward you at about one camera height out, which is "
+                        "where the cube seam falls. F scales the fix: 0 is off, "
+                        "0.55-0.7 measured best, 1.0 overshoots the other way. "
+                        "It also lowers the depth range about 20%%, so pair it "
+                        "with --strength 1.2 to keep the same parallax. "
+                        "Measured on V3 only. (default: 0, off)")
+    p.add_argument("--flatten-ground", type=float, default=0.0, metavar="F",
+                   help="Pull the ground onto the flat plane it actually is. "
+                        "For any plane, inverse depth is exactly linear in the "
+                        "ray direction, so one plane is fitted to whatever is "
+                        "below the horizon and the ground is blended toward "
+                        "it. Fixes what --face-angular-correction cannot: that "
+                        "correction straightens the dome, which is symmetric "
+                        "about each face axis, and leaves the ground *tilted* "
+                        "-- measured on a road, 0.13 camera heights too high "
+                        "behind and 0.10 too low in front, which reads as the "
+                        "road still bulging. A pixel's correction fades out as "
+                        "it disagrees with the plane, so a kerb or a pothole "
+                        "keeps its own depth while a bowed road does not. "
+                        "Needs a dominant plane in view and refuses without "
+                        "one. 0 = off. (default: 0)")
     p.add_argument("--temporal-depth", type=float, default=0.02,
                    metavar="TAU",
                    help="Hold static depth still between frames, so a "
@@ -436,6 +493,31 @@ VIDEO_DEPTH_TILES = 1
 PHOTO_DEPTH_TILES = 1
 
 
+def _left_share(args) -> float:
+    """The left eye's share of the separation, from three ways of saying it.
+
+    `--left-share` is the real control. `--source-eye` names which eye keeps
+    the source frame untouched, which is shorthand for the two ends of that
+    range -- and it has to be handled explicitly now the default is an even
+    split, since "left" is no longer what happens anyway. `--split-baseline`
+    is the old boolean, kept working because it appears in saved presets and
+    scripts. An explicit share always wins, so a preset carrying both is not
+    ambiguous.
+    """
+    if getattr(args, "left_share", None) is not None:
+        return float(min(max(args.left_share, 0.0), 1.0))
+    if getattr(args, "source_eye", None) == "right":
+        return 1.0
+    if getattr(args, "source_eye", None) == "left":
+        return 0.0
+    if getattr(args, "split_baseline", False):
+        return 0.5
+    # Imported here, not at module scope: `pipeline` is deliberately loaded
+    # late so `--help` and the probes do not pay for numpy and torch.
+    from . import pipeline
+    return pipeline.DEFAULT_LEFT_SHARE
+
+
 def resolve_depth_tiles(requested, is_image: bool) -> int:
     """How many tiles to use, given what was asked for and what came in.
 
@@ -472,6 +554,9 @@ def _run(args, reporter, cancel, backends, pipeline):
     # Resolved here rather than in the parser so `--help` stays import-free.
     face_overlap = (pipeline.projection.FACE_OVERLAP
                     if args.face_overlap is None else args.face_overlap)
+    angular_correction = (pipeline.projection.ANGULAR_CORRECTION
+                          if args.face_angular_correction is None
+                          else args.face_angular_correction)
 
     if pipeline.ffmpeg_io.is_image_path(args.input):
         _refuse_video_only_flags(args)
@@ -485,10 +570,14 @@ def _run(args, reporter, cancel, backends, pipeline):
             fg_erode=args.fg_erode,
             inpaint_mode=args.inpaint,
             depth_tiles=args.depth_tiles,
-            split_baseline=args.split_baseline,
+            left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
             gradient_limit=args.gradient_limit,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            angular_correction=angular_correction,
+            flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
             output_width=args.output_width,
@@ -515,11 +604,15 @@ def _run(args, reporter, cancel, backends, pipeline):
             fg_erode=args.fg_erode,
             inpaint_mode=args.inpaint,
             depth_tiles=args.depth_tiles,
-            split_baseline=args.split_baseline,
+            left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
             gradient_limit=args.gradient_limit,
             width=args.preview_width,
             input_projection=args.input_projection,
             face_overlap=face_overlap,
+            angular_correction=angular_correction,
+            flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
             reporter=reporter,
@@ -544,7 +637,9 @@ def _run(args, reporter, cancel, backends, pipeline):
         inpaint_mode=args.inpaint,
         temporal_fill=args.temporal_fill,
         depth_tiles=args.depth_tiles,
-        split_baseline=args.split_baseline,
+        left_share=_left_share(args),
+        detail_sigma=args.detail_sigma,
+        depth_sigma=args.depth_sigma,
         gradient_limit=args.gradient_limit,
         spatial_audio=args.spatial_audio,
         ambisonic_codec=args.ambisonic_codec,
@@ -552,6 +647,8 @@ def _run(args, reporter, cancel, backends, pipeline):
         input_projection=args.input_projection,
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
+        angular_correction=angular_correction,
+        flatten_ground=args.flatten_ground,
         output_mode=args.output_mode,
         yaw=args.yaw,
         output_width=args.output_width,

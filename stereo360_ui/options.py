@@ -286,6 +286,9 @@ def resolution_choices(width: int, height: int,
 _DEFAULTS = {
     "strength": 1.0,
     "gradientLimit": 1.0,
+    "faceAngularCorrection": 0.0,
+    "leftShare": 0.5,
+    "sharedDetail": True,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -390,6 +393,10 @@ def build_argv(
     if abs(grad - _DEFAULTS["gradientLimit"]) > 1e-9:
         argv += ["--gradient-limit", f"{grad:g}"]
 
+    angular = _num(opts.get("faceAngularCorrection"), 0.0)
+    if abs(angular - _DEFAULTS["faceAngularCorrection"]) > 1e-9:
+        argv += ["--face-angular-correction", f"{angular:g}"]
+
     # Against the default for *this kind of job*: the CLI uses 3 for a photo
     # and 1 for a video, so a fixed comparison here would emit the flag when
     # it is not needed and, worse, omit it when it is.
@@ -397,8 +404,23 @@ def build_argv(
     if tiles != (PHOTO_DEPTH_TILES if photo else _DEFAULTS["depthTiles"]):
         argv += ["--depth-tiles", str(tiles)]
 
-    if opts.get("splitBaseline"):
-        argv += ["--split-baseline"]
+    # One number covers both halves of the control: which eye keeps the
+    # source, and how far off it the other sits. 0 leaves the left eye
+    # untouched, 1 the right, 0.5 splits evenly and is the default.
+    # `splitBaseline` is still honoured so presets saved before the slider
+    # existed keep working -- it also meant 0.5, so those presets now agree
+    # with the default and emit nothing.
+    # On by default, so only the off case has anything to say. 0 is what
+    # turns the split off; leaving the flag out asks for the frame-scaled
+    # radius, which is what "on" means.
+    if not opts.get("sharedDetail", _DEFAULTS["sharedDetail"]):
+        argv += ["--detail-sigma", "0"]
+
+    share = _num(opts.get("leftShare"), _DEFAULTS["leftShare"])
+    if opts.get("leftShare") is None and opts.get("splitBaseline"):
+        share = 0.5
+    if abs(share - _DEFAULTS["leftShare"]) > 1e-9:
+        argv += ["--left-share", f"{share:g}"]
 
     # Empty means the CLI's own per-job default -- V3 for video, Depth Pro for
     # a still. Passing nothing is what selects it, so the UI never has to know

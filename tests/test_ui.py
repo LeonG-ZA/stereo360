@@ -79,7 +79,47 @@ def test_non_default_settings_are_emitted():
     assert argv[argv.index("--face-size") + 1] == "960"
     assert argv[argv.index("--max-frames") + 1] == "30"
     assert argv[argv.index("--start-frame") + 1] == "15"
-    assert "--split-baseline" in argv and "--spatial-audio" in argv
+    # A preset saved before the share slider existed carries the old boolean.
+    # It meant an even split, which is now the default, so it emits nothing --
+    # and that is the right answer rather than a lost setting.
+    assert "--left-share" not in argv
+    assert "--spatial-audio" in argv
+
+
+def test_the_baseline_share_reaches_the_command_line():
+    """An even split is the default and must emit nothing, while every other
+    share must emit. A missing flag and an explicit default mean the same
+    thing to the CLI, but only one of them says the control was left alone.
+    An explicit share also has to beat the legacy boolean, so a preset
+    carrying both is not ambiguous."""
+    assert "--left-share" not in options.build_argv(dict(BASE))
+    assert "--left-share" not in options.build_argv(dict(BASE, leftShare=0.5))
+    for share, want in ((0.15, "0.15"), (0.0, "0"), (1.0, "1")):
+        argv = options.build_argv(dict(BASE, leftShare=share))
+        assert argv[argv.index("--left-share") + 1] == want
+    both = options.build_argv(dict(BASE, splitBaseline=True, leftShare=0.15))
+    assert both[both.index("--left-share") + 1] == "0.15"
+
+
+def test_the_detail_split_is_on_unless_switched_off():
+    """On by default, so the default emits nothing and only "off" speaks.
+
+    Leaving the flag out asks for a radius scaled to the frame, which is not
+    the same as passing 0 -- 0 turns the split off entirely."""
+    assert "--detail-sigma" not in options.build_argv(dict(BASE))
+    assert "--detail-sigma" not in options.build_argv(
+        dict(BASE, sharedDetail=True))
+    argv = options.build_argv(dict(BASE, sharedDetail=False))
+    assert argv[argv.index("--detail-sigma") + 1] == "0"
+
+
+def test_the_angular_correction_reaches_the_command_line():
+    """Off by default, so an untouched slider must not emit the flag at all --
+    a zero on the command line and no flag mean the same thing to the CLI, but
+    only one of them says the setting was left alone."""
+    assert "--face-angular-correction" not in options.build_argv(dict(BASE))
+    argv = options.build_argv(dict(BASE, faceAngularCorrection=0.55))
+    assert argv[argv.index("--face-angular-correction") + 1] == "0.55"
 
 
 def test_chunk_flags_only_for_the_temporal_backend():

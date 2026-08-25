@@ -53,7 +53,15 @@ ApplicationWindow {
     property string codec: ""        // "" = whatever the preset says
     property real strength: 1.0
     property real gradientLimit: 1.0
-    property bool splitBaseline: false
+    property real faceAngularCorrection: 0.0
+    // Two controls the user thinks in -- which eye stays sharp, and how
+    // much of the separation it carries -- and the single number the
+    // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
+    // an even split.
+    property bool sharedDetail: true
+    property bool sourceRight: false
+    property real baselineShare: 0.5
+    readonly property real leftShare: sourceRight ? 1.0 - baselineShare : baselineShare
     property bool spatialAudio: false
     property bool sourceSubsampling: false
     property bool faceSizeAuto: true
@@ -84,7 +92,9 @@ ApplicationWindow {
             "codec": codec, "outputMode": outputMode, "yaw": yaw,
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
-            "splitBaseline": splitBaseline, "spatialAudio": spatialAudio,
+            "faceAngularCorrection": faceAngularCorrection,
+            "leftShare": leftShare, "sharedDetail": sharedDetail,
+            "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
             "faceSizeAuto": faceSizeAuto, "faceSize": faceSize,
             "depthTiles": depthTiles, "depthBackend": depthBackend,
@@ -988,11 +998,56 @@ ApplicationWindow {
                             }
 
                             Row2 {
-                                label: "Split baseline"
-                                hint: "Warp both eyes half as far in opposite directions. Far fewer holes per eye."
+                                label: "Face angular correction"
+                                hint: "Straightens walls and floors that bow toward you. Depth Anything V3 only; 0 is off, 0.55-0.7 measured best. Costs about a fifth of the depth range, so pair it with a higher strength."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 1; stepSize: 0.05
+                                    value: win.faceAngularCorrection
+                                    onMoved: win.faceAngularCorrection = value
+                                }
+                                Text {
+                                    text: win.faceAngularCorrection.toFixed(2)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
+                                }
+                            }
+
+                            Row2 {
+                                label: "Detail on smooth depth"
+                                hint: "Warp fine detail on a smoothed depth instead of the real one, so it cannot shear where the depth map puts a boundary in the wrong place. Thin structures then arrive whole and the same way in both eyes, at the cost of sitting at a slightly wrong depth. Costs a second warp per eye."
                                 Switch {
-                                    checked: win.splitBaseline
-                                    onToggled: win.splitBaseline = checked
+                                    checked: win.sharedDetail
+                                    onToggled: win.sharedDetail = checked
+                                }
+                            }
+
+                            Row2 {
+                                label: "Sharp eye"
+                                hint: "Which eye keeps the original frame. Only applies below a 0.5 share - at 0.5 the separation is even and neither eye is the original. The warped eye hides what is behind an occluder on one side and has to invent it on the other, so which to pick depends on the scene."
+                                ComboBox {
+                                    Layout.fillWidth: true
+                                    model: ["Left", "Right"]
+                                    currentIndex: win.sourceRight ? 1 : 0
+                                    onActivated: win.sourceRight = (currentIndex === 1)
+                                }
+                            }
+
+                            Row2 {
+                                label: "Baseline shared"
+                                hint: "How much of the separation the sharp eye also carries. 0.5, the default, splits it evenly so a depth error is spread over both eyes rather than concentrated in one; 0 keeps one eye pristine and puts everything in the other. The 3D effect is the same either way - this chooses where the errors land. An even split measured equal or better on every tracked feature and pulls further ahead at wider baselines, at the cost of no eye being the untouched original."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 0.5; stepSize: 0.05
+                                    value: win.baselineShare
+                                    onMoved: win.baselineShare = value
+                                }
+                                Text {
+                                    text: win.baselineShare.toFixed(2)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
                                 }
                             }
 
