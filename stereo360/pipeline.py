@@ -90,9 +90,13 @@ def stereo_pair(
     """
     f = float(np.clip(left_share, 0.0, 1.0))
 
+    # Both eyes split the frame the same way -- only the baseline differs --
+    # so the split is computed once here rather than twice inside the warp.
+    bands = warp.detail_bands(frame, disp, detail_sigma, depth_sigma)
+
     def eye(s):
         return warp.right_eye_banded(frame, disp.copy(), s, detail_sigma,
-                                     depth_sigma, **kw)[0]
+                                     depth_sigma, bands=bands, **kw)[0]
 
     if f <= 0.0:
         return frame, eye(strength)

@@ -38,7 +38,8 @@ from __future__ import annotations
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Tuple
+from collections import namedtuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -192,6 +193,10 @@ _VIS_RATIO = 0.9
 # Crack closing pulls a pixel to its 3x3 neighbourhood minimum when it stands
 # this far above it. Module-level so it can be measured and disabled.
 _CRACK_MARGIN = 0.05
+
+# Distinguishes "no bands passed, work them out" from an explicit None, which
+# is `detail_bands` saying the split is off.
+_UNSET = object()
 
 
 def _eye_offset(dist, d: np.ndarray, baseline: float):
@@ -544,12 +549,49 @@ def detail_sigma_for(width: int) -> float:
     return DETAIL_SIGMA_AT_8K * float(width) / DETAIL_REFERENCE_WIDTH
 
 
+def _blur(img: np.ndarray, sigma: float) -> np.ndarray:
+    k = int(2 * round(3 * sigma) + 1)
+    return cv2.GaussianBlur(img, (k, k), sigma)
+
+
+#: What `right_eye_banded` splits a frame into, kept as one object so a caller
+#: rendering both eyes can compute it once. Fields are read-only to the warp:
+#: `base` and `detail` are only ever sampled, and `dn_pre` is only ever read by
+#: `fill_holes` -- but `smooth` is *not*, see the copy at its use site.
+_Bands = namedtuple("_Bands", "base detail smooth dn_pre")
+
+
+def detail_bands(left_rgb: np.ndarray, inv_depth: np.ndarray,
+                 detail_sigma: float | None = None,
+                 depth_sigma: float = 40.0) -> Optional["_Bands"]:
+    """The frame/depth split `right_eye_banded` warps, computed once.
+
+    Both eyes of a pair split the frame identically -- the only thing that
+    differs between them is the sign and size of the baseline -- so a caller
+    rendering both can do this once and hand the result to both calls. It
+    saves a blur of the RGB frame and a blur of the depth map per frame, and
+    the latter is a 241-tap kernel at 8K, so it is not a rounding error.
+
+    Returns None when the split is off, which means "use the ordinary warp".
+    """
+    if detail_sigma is None:
+        detail_sigma = detail_sigma_for(left_rgb.shape[1])
+    if detail_sigma <= 0:
+        return None
+    f = left_rgb.astype(np.float32)
+    base = _blur(f, detail_sigma)
+    return _Bands(base, f - base,
+                  _blur(inv_depth.astype(np.float32), depth_sigma),
+                  inv_depth.copy())
+
+
 def right_eye_banded(
     left_rgb: np.ndarray,
     inv_depth: np.ndarray,
     strength: float,
     detail_sigma: float | None = None,
     depth_sigma: float = 40.0,
+    bands: Optional["_Bands"] = _UNSET,
     **kw,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Warp coarse structure and fine detail on different depth fields.
@@ -578,27 +620,28 @@ def right_eye_banded(
     `detail_sigma` of None means "scale it to this frame", which is the
     default; an explicit 0 turns the split off and falls back to the ordinary
     warp.
-    """
-    if detail_sigma is None:
-        detail_sigma = detail_sigma_for(left_rgb.shape[1])
-    if detail_sigma <= 0:
-        return right_eye_from_disparity(left_rgb, inv_depth, strength, **kw)
 
-    def _blur(img, sigma):
-        k = int(2 * round(3 * sigma) + 1)
-        return cv2.GaussianBlur(img, (k, k), sigma)
+    `bands` takes a split already computed by `detail_bands`, for a caller
+    rendering both eyes of one frame; left alone, this works it out itself and
+    behaves exactly as before. An explicit None means the split is off.
+    """
+    if bands is _UNSET:
+        bands = detail_bands(left_rgb, inv_depth, detail_sigma, depth_sigma)
+    if bands is None:
+        return right_eye_from_disparity(left_rgb, inv_depth, strength, **kw)
+    base, detail, smooth, dn_pre = bands
 
     inpaint = kw.pop("inpaint", True)
     inpaint_mode = kw.get("inpaint_mode", "simple")
-    f = left_rgb.astype(np.float32)
-    base = _blur(f, detail_sigma)
-    detail = f - base
-    dn_pre = inv_depth.copy()
-    smooth = _blur(inv_depth.astype(np.float32), depth_sigma)
 
+    # Both warps consume the depth they are given -- normalisation, foreground
+    # erosion and the gradient clamp all write in place -- so each gets its own
+    # copy. That matters more than it used to: with `bands` shared across the
+    # two eyes of a pair, handing `smooth` over uncopied would leave the second
+    # eye warping a depth field the first had already eroded and clamped.
     b, hole = right_eye_from_disparity(base, inv_depth.copy(), strength,
                                        inpaint=False, **kw)
-    d, dhole = right_eye_from_disparity(detail, smooth, strength,
+    d, dhole = right_eye_from_disparity(detail, smooth.copy(), strength,
                                         inpaint=False, **kw)
     # A hole in the detail layer means "no detail known here", not black:
     # adding nothing leaves the base showing through, which is right.
