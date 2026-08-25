@@ -102,3 +102,75 @@ def test_forcing_the_gpu_on_a_machine_without_one_says_so(monkeypatch):
     with pytest.raises(RuntimeError, match="no CUDA or MPS device"):
         warp.gpu_device()
     warp._gpu_probe.clear()
+
+
+@requires_gpu
+def test_a_signed_detail_layer_survives_the_gpu_warp():
+    """The GPU warp must not assume its input is an 8-bit image.
+
+    `warp.right_eye_banded` sends two things through the warp: the blurred
+    base, which is an ordinary uint8 frame, and the *detail* layer, which is
+    the frame minus its own blur -- signed float centred on zero, with about
+    half its samples negative. Rounding and clamping that to uint8 deletes
+    every negative one, leaving a residual that can only ever add. The
+    recombined frame then reads bright and overexposed exactly where it has
+    texture, which is the whole point of the band split.
+
+    The numpy path gets this right for free (`np.zeros_like(left_rgb)`); the
+    torch path has to be asked. Measured with the clamp unconditional: the
+    warped layer came back uint8, 0% negative, mean +9.2 instead of ~0.
+    """
+    img, dn = _scene(256, 512)
+    dev = warp_torch.device_available()
+
+    # The real production split, not a hand-rolled stand-in.
+    bands = warp.detail_bands(img, dn, detail_sigma=3.0, depth_sigma=40.0)
+    detail = bands.detail
+    assert detail.dtype == np.float32
+    assert (detail < 0).mean() > 0.4, "test scene has no darkening detail"
+
+    out, _ = warp_torch.right_eye_from_disparity(
+        detail, dn.copy(), 1.0, warp._BASELINE_SCALE, warp._MIN_INV_DEPTH,
+        warp._VIS_RATIO, warp._CRACK_MARGIN, 2, 0.0, dev)
+
+    assert out.dtype == np.float32, (
+        f"signed input came back as {out.dtype}; the warp quantised it")
+    assert (out < 0).mean() > 0.4, (
+        f"only {100 * (out < 0).mean():.1f}% of the warped detail is negative; "
+        "the darkening half was clamped away")
+    assert abs(float(out.mean())) < 1.0, (
+        f"warped detail has mean {float(out.mean()):+.2f}, not ~0; it is "
+        "one-sided and will brighten whatever it is added to")
+
+
+@requires_gpu
+def test_the_banded_warp_does_not_brighten_on_the_gpu(monkeypatch):
+    """The band split must not shift exposure, on either path.
+
+    This is the symptom the check above catches at its source, asserted where
+    a viewer would actually see it: the same frame through `right_eye_banded`
+    on the CPU and on the GPU must land at the same brightness. With the
+    detail layer clamped, the GPU came out 9.8 levels brighter than the CPU
+    and 9.1 above the source frame.
+
+    A bias rather than a per-pixel bound, for the reason given in
+    `test_gpu_warp_matches_numpy`: the two paths sample on different sub-pixel
+    grids, so they differ by a fraction of a level everywhere and only a
+    systematic shift means anything.
+    """
+    img, dn = _scene(256, 512)
+
+    def banded():
+        warp._gpu_probe.clear()
+        return warp.right_eye_banded(img, dn.copy(), 1.0, 3.0, 40.0,
+                                     inpaint=False, normalize=False)[0]
+
+    monkeypatch.setenv("STEREO360_GPU_WARP", "0")
+    cpu = banded()
+    monkeypatch.setenv("STEREO360_GPU_WARP", "1")
+    gpu = banded()
+    warp._gpu_probe.clear()
+
+    bias = (cpu.astype(np.float64) - gpu.astype(np.float64)).mean()
+    assert abs(bias) < 0.5, (
+        f"GPU banded warp sits {-bias:+.2f} levels from the CPU one")
