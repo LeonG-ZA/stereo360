@@ -230,7 +230,16 @@ def right_eye_from_disparity(
     grid = torch.stack((gx, gy), dim=-1)[None]
     right = F.grid_sample(img, grid, mode="bilinear", padding_mode="border",
                           align_corners=False)[0]
-    right = right.permute(1, 2, 0).round_().clamp_(0, 255).to(torch.uint8)
+    # Match the input's dtype instead of assuming uint8. `warp.right_eye_banded`
+    # warps a *signed* detail layer through here -- the frame minus its own blur,
+    # centred on zero -- and rounding that to uint8 clamps away every negative
+    # value, i.e. the whole darkening half of the detail. What comes back is a
+    # one-sided residual that only ever adds, so the recombined frame reads
+    # bright and overexposed wherever it has texture. The numpy path gets this
+    # right for free via `np.zeros_like(left_rgb)`; here it has to be asked for.
+    right = right.permute(1, 2, 0)
+    if left_rgb.dtype == np.uint8:
+        right = right.round_().clamp_(0, 255).to(torch.uint8)
 
     # Left-eye visibility: the z-buffer resolved what the RIGHT eye sees, but
     # the colour can only come from the left, and beside a thin near structure
