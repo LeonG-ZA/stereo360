@@ -54,6 +54,7 @@ ApplicationWindow {
     property real strength: 1.0
     property real gradientLimit: 1.0
     property real faceAngularCorrection: 0.0
+    property real poleCompensation: 1.0
     // Two controls the user thinks in -- which eye stays sharp, and how
     // much of the separation it carries -- and the single number the
     // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
@@ -93,6 +94,7 @@ ApplicationWindow {
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
             "strength": strength, "gradientLimit": gradientLimit,
             "faceAngularCorrection": faceAngularCorrection,
+            "poleCompensation": poleCompensation,
             "leftShare": leftShare, "sharedDetail": sharedDetail,
             "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
@@ -1008,6 +1010,23 @@ ApplicationWindow {
                                 }
                                 Text {
                                     text: win.faceAngularCorrection.toFixed(2)
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
+                                }
+                            }
+
+                            Row2 {
+                                label: "Level the ground"
+                                hint: "The 360 stereo format separates the eyes along the horizontal, so it gives a point below the horizon less disparity than its distance deserves and you read it as further away. Flat ground becomes a funnel: right at the horizon, twice too deep at 60 degrees down, and collapsing underfoot -- which makes the middle distance look like a raised plateau. This cancels that. 2 holds the ground level to 60 degrees below the horizon, 3 to 70, 5 to 80; 1 is off. No depth model can fix this, because the error is in the projection rather than the depth."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 1; to: 5; stepSize: 0.5
+                                    value: win.poleCompensation
+                                    onMoved: win.poleCompensation = value
+                                }
+                                Text {
+                                    text: win.poleCompensation.toFixed(1)
                                     color: Theme.text
                                     font.pixelSize: Theme.fontM
                                     Layout.preferredWidth: 32

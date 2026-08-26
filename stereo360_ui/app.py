@@ -165,7 +165,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
                          "spatialAudioHint", "photoMode",
                          "strength", "gradientLimit",
-                         "faceAngularCorrection", "leftShare"):
+                         "faceAngularCorrection", "poleCompensation", "leftShare"):
                 print(f"PROP\t{name}\t{window.property(name)}")
             for entry in controller.encoders:
                 print(f"ENC\t{entry['name']}\t{entry['available']}"

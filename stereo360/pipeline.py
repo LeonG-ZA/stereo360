@@ -218,6 +218,7 @@ def right_eye_from_depth(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
 ) -> tuple:
     """M2 path: per-face depth estimation -> equirect inverse depth -> DIBR.
@@ -228,7 +229,8 @@ def right_eye_from_depth(
     disp = depth_map_for_frame(frame, face_size, backend, depth_tiles, faces,
                                face_overlap, angular_correction,
                                ground_weight=ground_weight,
-                               flatten_ground=flatten_ground)
+                               flatten_ground=flatten_ground,
+                               pole_compensation=pole_compensation)
     extra = {}
     if depth_range is not None:
         lo, hi = depth_range.update(disp)
@@ -382,6 +384,7 @@ def depth_map_for_frame(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
 ) -> np.ndarray:
     """Single-frame equirect inverse-depth map via the cubemap stage."""
@@ -403,6 +406,9 @@ def depth_map_for_frame(
         from .ground import flatten
 
         disp = flatten(disp, flatten_ground)
+    # Last, and after any flattening: `ground.flatten` fits a plane, and a
+    # compensated map is deliberately not one.
+    disp = projection.apply_pole_compensation(disp, pole_compensation)
     return disp
 
 
@@ -415,6 +421,7 @@ def depth_maps_for_chunk(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
 ) -> list:
     """M3 path: estimate equirect inverse depth for a chunk of consecutive
@@ -448,6 +455,9 @@ def depth_maps_for_chunk(
         from .ground import flatten
 
         maps = [flatten(m, flatten_ground) for m in maps]
+    if pole_compensation > 1.0:
+        maps = [projection.apply_pole_compensation(m, pole_compensation)
+                for m in maps]
     return maps
 
 
@@ -1075,6 +1085,7 @@ def convert(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
@@ -1170,7 +1181,8 @@ def convert(
                              gradient_limit, face_overlap,
                              angular_correction,
                              ground_weight=ground_weight,
-                             flatten_ground=flatten_ground)
+                             flatten_ground=flatten_ground,
+                             pole_compensation=pole_compensation)
         else:
             depth_range = DepthRange()
             stabiliser = (DepthStabiliser(temporal_depth)
@@ -1185,7 +1197,8 @@ def convert(
                         gradient_limit, source.faces, depth_range,
                         stabiliser, face_overlap, angular_correction,
                         ground_weight=ground_weight,
-                        flatten_ground=flatten_ground)
+                        flatten_ground=flatten_ground,
+                        pole_compensation=pole_compensation)
                 elif use_cubemap:
                     right = right_eye_passthrough(source.equirect, face_size)
                 else:
@@ -1312,6 +1325,7 @@ def preview_frame(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
@@ -1382,6 +1396,7 @@ def preview_frame(
             source.faces, face_overlap=face_overlap,
             angular_correction=angular_correction,
             ground_weight=ground_weight,
+            pole_compensation=pole_compensation,
             flatten_ground=flatten_ground)
     elif use_cubemap:
         right = right_eye_passthrough(source.equirect, face_size)
@@ -1525,6 +1540,7 @@ def _convert_chunked(
     face_overlap: float = projection.FACE_OVERLAP,
     angular_correction: float = projection.ANGULAR_CORRECTION,
     ground_weight: float = projection.GROUND_WEIGHT,
+    pole_compensation: float = projection.POLE_COMPENSATION,
     flatten_ground: float = 0.0,
 ) -> None:
     """M3 streaming: buffer chunk_size frames, estimate depth with temporal
@@ -1554,7 +1570,8 @@ def _convert_chunked(
                                     face_sets, face_overlap,
                                     angular_correction,
                              ground_weight=ground_weight,
-                             flatten_ground=flatten_ground)
+                             flatten_ground=flatten_ground,
+                             pole_compensation=pole_compensation)
         if prev_tail:
             head = _blend_overlap(prev_tail, maps[:len(prev_tail)])
             maps = head + maps[len(prev_tail):]

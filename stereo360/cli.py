@@ -294,9 +294,24 @@ def build_parser() -> argparse.ArgumentParser:
                         "error. Measured on outdoor.jpg, one face's ground "
                         "sat 20%% too near at every elevation, which reads as "
                         "flat tarmac raised toward you; 3 roughly halves it. "
-                        "Scene-dependent -- it does nothing indoors and hurts "
-                        "on some video frames. 1 = every sample counts alike, "
-                        "the old behaviour (default: 1)")
+                        "1 = every sample counts alike, the old behaviour "
+                        "(default: 1)")
+    p.add_argument("--pole-compensation", type=float, default=None, metavar="C",
+                   help="Cancel the depth distortion the 360 stereo format "
+                        "imposes below the horizon. ODS separates the eyes "
+                        "along the local horizontal, so it delivers cos(lat) "
+                        "less disparity than a point's distance deserves and "
+                        "a viewer places everything at R/cos(lat): a level "
+                        "floor 1.6 m down is seen at 1.85 m at 30 degrees "
+                        "below the horizon, 3.20 m at 60 and 18.4 m at 85, so "
+                        "the ground collapses underfoot and the middle "
+                        "distance then reads as a raised plateau. Scaling "
+                        "disparity by 1/cos(lat) cancels it exactly; this is "
+                        "the cap on that multiplier, since it diverges at the "
+                        "pole. 2 holds the floor level to 60 degrees down, 3 "
+                        "to 70, 5 to 80. It scales rather than replaces, so a "
+                        "kerb or a bollard keeps its own depth. Deliberate "
+                        "pre-distortion, so 1 = off (default: 1)")
     p.add_argument("--flatten-ground", type=float, default=0.0, metavar="F",
                    help="Pull the ground onto the flat plane it actually is. "
                         "For any plane, inverse depth is exactly linear in the "
@@ -572,6 +587,9 @@ def _run(args, reporter, cancel, backends, pipeline):
                           else args.face_angular_correction)
     ground_weight = (pipeline.projection.GROUND_WEIGHT
                      if args.ground_weight is None else args.ground_weight)
+    pole_compensation = (pipeline.projection.POLE_COMPENSATION
+                         if args.pole_compensation is None
+                         else args.pole_compensation)
 
     if pipeline.ffmpeg_io.is_image_path(args.input):
         _refuse_video_only_flags(args)
@@ -593,6 +611,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             face_overlap=face_overlap,
             angular_correction=angular_correction,
             ground_weight=ground_weight,
+            pole_compensation=pole_compensation,
             flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
@@ -629,6 +648,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             face_overlap=face_overlap,
             angular_correction=angular_correction,
             ground_weight=ground_weight,
+            pole_compensation=pole_compensation,
             flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
@@ -666,6 +686,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         face_overlap=face_overlap,
         angular_correction=angular_correction,
         ground_weight=ground_weight,
+        pole_compensation=pole_compensation,
         flatten_ground=args.flatten_ground,
         output_mode=args.output_mode,
         yaw=args.yaw,

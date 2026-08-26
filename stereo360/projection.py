@@ -889,17 +889,80 @@ ANGULAR_CORRECTION = 0.0
 #: solve (repetition is exactly a weighted median for the median-based
 #: estimators it uses) and moves what the fit listens to.
 #:
-#: A scene-dependent win rather than a general one, which is why 1.0 (every
-#: sample alike, the behaviour before this existed) is the default. Measured
-#: at 3: outdoor.jpg improves on both backends -- ground-plane tilt 7.4 to 6.5
-#: degrees on V3 and 14.3 to 13.3 on Depth Pro, with seam RMS 0.3026 to 0.2892
-#: and 0.4397 to 0.3608 -- while indoor.jpg is unmoved on V3, and Depth Pro on
-#: video frames gets *worse* (tilt 4.6 to 5.8), the stock fit already doing
-#: well there.
+#: 1.0 is the stock behaviour and the default. See findings.md.
 GROUND_WEIGHT = 1.0
 
 #: Directions below this y component count as ground for that weighting.
 GROUND_WEIGHT_DY = -0.15
+
+#: Cap on the ODS pole compensation. 1.0 is off, and the default.
+#:
+#: Omnidirectional stereo separates the eyes along the local horizontal, so the
+#: angular disparity it delivers for a point at latitude `lat` is short of what
+#: that point's distance deserves by exactly `cos(lat)` -- meridians converge,
+#: and at the pole there is no horizontal direction left to separate along
+#: (see `warp._eye_offset`). A viewer reading that disparity back therefore
+#: places everything at `R / cos(lat)`.
+#:
+#: On flat ground that is a funnel rather than a plane. Measured against the
+#: shipped warp geometry, a level floor 1.6 m below the camera is seen at
+#: 1.60 m at the horizon, 1.85 m at 30 degrees down, 2.26 m at 45, 3.20 m at
+#: 60 and 18.4 m at 85 -- so the ground collapses away underfoot while the
+#: middle distance stays roughly right, and the middle distance then reads as
+#: a raised plateau. No depth model can correct it: the error is in the
+#: projection, and it is the same whatever depth is fed in.
+#:
+#: Multiplying disparity by `1 / cos(lat)` cancels it exactly. That diverges at
+#: the pole, so this caps the multiplier: 2.0 holds the floor level to 60
+#: degrees below the horizon, 3.0 to 70, 5.0 to 80. Only the small disc
+#: directly underfoot still funnels, and that part is the singularity itself.
+#:
+#: This is deliberate pre-distortion. The pair stops encoding the scene's true
+#: geometry and starts encoding whatever survives ODS looking correct, which is
+#: a choice about the deliverable rather than a bug fix -- hence off by
+#: default. Disocclusion does not pay for it: measured on outdoor.jpg, hole
+#: area is 0.001% of the frame uncompensated and 0.000% at every cap tried,
+#: because the boost steepens a smooth gradient rather than making a new
+#: discontinuity.
+POLE_COMPENSATION = 1.0
+
+#: Degrees below the horizon over which the compensation ramps in, so the
+#: horizon itself does not get a step in depth.
+POLE_COMPENSATION_RAMP_DEG = 8.0
+
+
+def pole_compensation_gain(height: int, cap: float,
+                           ramp_deg: float = POLE_COMPENSATION_RAMP_DEG
+                           ) -> np.ndarray:
+    """Per-row disparity multiplier for `apply_pole_compensation`. (H, 1)
+
+    Depends only on the row geometry, never on pixel data, so it is the same
+    for every frame of a run.
+    """
+    lat = (np.linspace(np.pi / 2, -np.pi / 2, height, endpoint=False)
+           - (np.pi / height) / 2)
+    gain = np.minimum(1.0 / np.maximum(np.cos(lat), 1e-6), float(cap))
+    # Below the horizon only. Above it the same error exists, but correcting
+    # the sky and rooflines is a visibly larger change than the floor and is
+    # not what this is for; see POLE_COMPENSATION.
+    ramp = np.clip(-lat / np.radians(max(ramp_deg, 1e-6)), 0.0, 1.0)
+    return (1.0 + (gain - 1.0) * ramp).astype(np.float32)[:, None]
+
+
+def apply_pole_compensation(disp: np.ndarray, cap: float,
+                            ramp_deg: float = POLE_COMPENSATION_RAMP_DEG
+                            ) -> np.ndarray:
+    """Scale an equirect inverse-depth map so ODS renders the floor level.
+
+    Scales rather than replaces, so a kerb, a bollard or the rig underfoot
+    keeps its depth *relative* to the ground it stands on. Replacing the lower
+    hemisphere with a fitted plane flattens the floor better and takes every
+    upright object with it.
+    """
+    if cap is None or cap <= 1.0:
+        return disp
+    return (disp * pole_compensation_gain(disp.shape[0], cap, ramp_deg)
+            ).astype(np.float32)
 
 #: Ground samples a face pair must share before the weighting is applied at
 #: all. Below it the pair is fitted unweighted -- the +Y face shares no ground

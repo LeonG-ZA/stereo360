@@ -287,6 +287,7 @@ _DEFAULTS = {
     "strength": 1.0,
     "gradientLimit": 1.0,
     "faceAngularCorrection": 0.0,
+    "poleCompensation": 1.0,
     "leftShare": 0.5,
     "sharedDetail": True,
     "depthTiles": 1,
@@ -396,6 +397,10 @@ def build_argv(
     angular = _num(opts.get("faceAngularCorrection"), 0.0)
     if abs(angular - _DEFAULTS["faceAngularCorrection"]) > 1e-9:
         argv += ["--face-angular-correction", f"{angular:g}"]
+
+    pole = _num(opts.get("poleCompensation"), 1.0)
+    if abs(pole - _DEFAULTS["poleCompensation"]) > 1e-9:
+        argv += ["--pole-compensation", f"{pole:g}"]
 
     # Against the default for *this kind of job*: the CLI uses 3 for a photo
     # and 1 for a video, so a fixed comparison here would emit the flag when

@@ -1557,3 +1557,15 @@ def test_only_the_backend_events_become_status(qapp):
 
     assert staged == ["backend line"]
     assert logged == ["backend line", "ordinary line"]
+
+
+def test_pole_compensation_is_omitted_at_its_default():
+    """1 is off, and off is what the CLI already does, so the command stays
+    short. Same rule as every other control here."""
+    assert "--pole-compensation" not in options.build_argv(
+        dict(BASE, poleCompensation=1.0))
+
+
+def test_pole_compensation_reaches_the_command():
+    argv = options.build_argv(dict(BASE, poleCompensation=3.0))
+    assert argv[argv.index("--pole-compensation") + 1] == "3"
