@@ -62,6 +62,15 @@ _BAND_BYTES_PER_PX = 64
 # Upper bound on threads regardless of the machine. Pass 1's scatter is
 # serialised behind a lock, so the gain flattens well before the core count
 # does while the memory keeps climbing.
+#
+# Measured on 16 cores at 8K, and 8 is not leaving anything on the table:
+# 4 -> 2.27 s, 8 -> 2.09 s, 12 -> 2.13 s, 16 -> 2.08 s, with byte-identical
+# output at every count. The flatness is not the lock -- pass 1 is the
+# *cheapest* of the three passes (0.23 s of 2.21 s). It is memory bandwidth,
+# which also explains why the payload dtype barely registers: the same warp
+# over uint8x3 and float32x3, a 4x difference in bytes touched, measured
+# 2.11 s against 2.22 s. The cost is the geometry, not the pixels, so raising
+# this or narrowing the pixel type are both dead ends.
 _MAX_WORKERS = 8
 
 _WORKERS = max(1, min(int(os.environ.get("STEREO360_WORKERS", "0")) or
@@ -549,7 +558,41 @@ def detail_sigma_for(width: int) -> float:
     return DETAIL_SIGMA_AT_8K * float(width) / DETAIL_REFERENCE_WIDTH
 
 
+#: Residual sigma to aim for after downsampling in `_blur`. Small enough that
+#: the remaining kernel is cheap, large enough that the downsample is not
+#: itself doing most of the smoothing.
+_BLUR_TARGET_SIGMA = 4.0
+
+
 def _blur(img: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian low-pass, via a pyramid when the kernel would be large.
+
+    A separable Gaussian is linear in the kernel width, and these kernels are
+    not small: the detail split wants sigma 12 at 8K, a 73-tap kernel, and the
+    depth smoothing wants sigma 40, a 241-tap one. Over 29.5M pixels that
+    measured 1.8 s and 1.4 s.
+
+    Both are low-passes, which is exactly the case where downsampling first is
+    nearly free of consequence -- the frequencies being discarded are the ones
+    the blur exists to discard. Shrinking so the remaining sigma is about
+    `_BLUR_TARGET_SIGMA`, blurring there and scaling back is 19x and 54x
+    faster respectively.
+
+    Verified on the render rather than on the blur: against the direct
+    kernel, a rendered eye differs on 0.015% of pixels by more than one level
+    and on 0.000% by more than four, worst case 7. `detail_bands` as a whole
+    goes 3.32 s to 0.30 s. `INTER_AREA` on the way down matters -- it is a box
+    prefilter, so it antialiases rather than point-sampling.
+    """
+    fdn = int(max(1, min(8, round(sigma / _BLUR_TARGET_SIGMA))))
+    h, w = img.shape[:2]
+    if fdn > 1 and min(h // fdn, w // fdn) >= 16:
+        small = cv2.resize(img, (w // fdn, h // fdn),
+                           interpolation=cv2.INTER_AREA)
+        s2 = sigma / fdn
+        k2 = int(2 * round(3 * s2) + 1)
+        small = cv2.GaussianBlur(small, (k2, k2), s2)
+        return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
     k = int(2 * round(3 * sigma) + 1)
     return cv2.GaussianBlur(img, (k, k), sigma)
 
