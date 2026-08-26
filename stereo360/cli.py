@@ -284,6 +284,19 @@ def build_parser() -> argparse.ArgumentParser:
                         "It also lowers the depth range about 20%%, so pair it "
                         "with --strength 1.2 to keep the same parallax. "
                         "Measured on V3 only. (default: 0, off)")
+    p.add_argument("--ground-weight", type=float, default=None, metavar="W",
+                   help="How much more a ground sample counts when the six "
+                        "depth faces are fitted onto a common scale. The fit "
+                        "matches each face pair on the median of everything "
+                        "they share, so on a face filled by a building that "
+                        "median is the building: the one scale available to "
+                        "the face suits the building and the ground keeps its "
+                        "error. Measured on outdoor.jpg, one face's ground "
+                        "sat 20%% too near at every elevation, which reads as "
+                        "flat tarmac raised toward you; 3 roughly halves it. "
+                        "Scene-dependent -- it does nothing indoors and hurts "
+                        "on some video frames. 1 = every sample counts alike, "
+                        "the old behaviour (default: 1)")
     p.add_argument("--flatten-ground", type=float, default=0.0, metavar="F",
                    help="Pull the ground onto the flat plane it actually is. "
                         "For any plane, inverse depth is exactly linear in the "
@@ -557,6 +570,8 @@ def _run(args, reporter, cancel, backends, pipeline):
     angular_correction = (pipeline.projection.ANGULAR_CORRECTION
                           if args.face_angular_correction is None
                           else args.face_angular_correction)
+    ground_weight = (pipeline.projection.GROUND_WEIGHT
+                     if args.ground_weight is None else args.ground_weight)
 
     if pipeline.ffmpeg_io.is_image_path(args.input):
         _refuse_video_only_flags(args)
@@ -577,6 +592,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             input_projection=args.input_projection,
             face_overlap=face_overlap,
             angular_correction=angular_correction,
+            ground_weight=ground_weight,
             flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
@@ -612,6 +628,7 @@ def _run(args, reporter, cancel, backends, pipeline):
             input_projection=args.input_projection,
             face_overlap=face_overlap,
             angular_correction=angular_correction,
+            ground_weight=ground_weight,
             flatten_ground=args.flatten_ground,
             output_mode=args.output_mode,
             yaw=args.yaw,
@@ -648,6 +665,7 @@ def _run(args, reporter, cancel, backends, pipeline):
         temporal_depth=args.temporal_depth,
         face_overlap=face_overlap,
         angular_correction=angular_correction,
+        ground_weight=ground_weight,
         flatten_ground=args.flatten_ground,
         output_mode=args.output_mode,
         yaw=args.yaw,

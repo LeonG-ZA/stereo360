@@ -877,6 +877,35 @@ def face_fov_degrees(overlap: float = FACE_OVERLAP) -> float:
 #: width and should not be assumed to transfer to another backend.
 ANGULAR_CORRECTION = 0.0
 
+#: How much more a ground sample counts than any other when
+#: `align_overlapping_faces` fits one scale per face.
+#:
+#: The fit matches each face pair on the median of everything the two share.
+#: Where a face is dominated by a building, that median *is* the building, so
+#: the single affine available to the face is chosen to suit it and the ground
+#: keeps whatever error it had -- measured on outdoor.jpg, the -X face's ground
+#: sits 20% too near at every elevation, which reads as a flat lot raised
+#: toward the viewer. Counting ground samples more heavily costs nothing in the
+#: solve (repetition is exactly a weighted median for the median-based
+#: estimators it uses) and moves what the fit listens to.
+#:
+#: A scene-dependent win rather than a general one, which is why 1.0 (every
+#: sample alike, the behaviour before this existed) is the default. Measured
+#: at 3: outdoor.jpg improves on both backends -- ground-plane tilt 7.4 to 6.5
+#: degrees on V3 and 14.3 to 13.3 on Depth Pro, with seam RMS 0.3026 to 0.2892
+#: and 0.4397 to 0.3608 -- while indoor.jpg is unmoved on V3, and Depth Pro on
+#: video frames gets *worse* (tilt 4.6 to 5.8), the stock fit already doing
+#: well there.
+GROUND_WEIGHT = 1.0
+
+#: Directions below this y component count as ground for that weighting.
+GROUND_WEIGHT_DY = -0.15
+
+#: Ground samples a face pair must share before the weighting is applied at
+#: all. Below it the pair is fitted unweighted -- the +Y face shares no ground
+#: with anything, and a handful of samples cannot pin a scale.
+GROUND_WEIGHT_MIN = 48
+
 _angular_cache: Dict[tuple, np.ndarray] = {}
 
 
@@ -1184,6 +1213,7 @@ def align_overlapping_faces(
     overlap: float = FACE_OVERLAP,
     samples: int = 96,
     max_scale: float = 4.0,
+    ground_weight: float = GROUND_WEIGHT,
 ) -> Dict[str, np.ndarray]:
     """Bring six overlapping relative-depth faces onto a common scale.
 
@@ -1200,6 +1230,10 @@ def align_overlapping_faces(
     depend on how many pixels the face happens to have. Roughly a third of a
     grid of 96 lands in the shared band, so each face pair contributes several
     hundred samples at any face size, for a fit that costs milliseconds.
+
+    `ground_weight` above 1.0 makes samples looking at the ground count that
+    many times over, which is what a weighted median means to the estimators
+    downstream. See `GROUND_WEIGHT`.
     """
     face_size = depth_faces[FACES[0]].shape[0]
     lim = 1.0 + overlap
@@ -1240,6 +1274,16 @@ def align_overlapping_faces(
             good = (di > eps) & (dj > eps)
             if good.sum() < 16:
                 continue
-            pairs.append((i, j, di[good], dj[good].astype(np.float64)))
+            di_g = di[good]
+            dj_g = dj[good].astype(np.float64)
+            if ground_weight > 1.0:
+                is_ground = (d[sel][:, 1] < GROUND_WEIGHT_DY)[good]
+                # Left unweighted when the pair shares too little ground to
+                # pin a scale from it; +Y shares none with anything.
+                if is_ground.sum() >= GROUND_WEIGHT_MIN:
+                    reps = np.where(is_ground, int(round(ground_weight)), 1)
+                    di_g = np.repeat(di_g, reps)
+                    dj_g = np.repeat(dj_g, reps)
+            pairs.append((i, j, di_g, dj_g))
 
     return _fit_and_apply(pairs, depth_faces, max_scale)
