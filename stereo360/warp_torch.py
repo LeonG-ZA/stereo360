@@ -133,8 +133,13 @@ def right_eye_from_disparity(
     fg_erode: int,
     gradient_limit: float,
     device: str,
+    keep_on_device: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """(right_rgb, hole_mask) computed on `device`. Numpy in, numpy out."""
+    """(right_rgb, hole_mask) computed on `device`. Numpy in, numpy out.
+
+    `keep_on_device` returns the pair as torch tensors instead, for a caller
+    with more device work to do.
+    """
     import torch
     import torch.nn.functional as F
 
@@ -253,5 +258,12 @@ def right_eye_from_disparity(
 
     hole = (miss | occluded)
     right[hole] = 0
+    if keep_on_device:
+        # For a caller that has more device work to do -- `right_eye_banded`
+        # recombines base and detail, and downloading two float32 eyes to add
+        # them on the processor is 144 ms a frame at 8K against 17 ms for the
+        # uint8 result. The hole mask stays a bool tensor; the caller converts
+        # only what it actually needs on the host.
+        return right, hole
     return (right.cpu().numpy(),
             (hole.to(torch.uint8) * 255).cpu().numpy())
