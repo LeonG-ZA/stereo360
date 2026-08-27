@@ -126,7 +126,7 @@ def test_the_cli_defers_its_default_without_letting_it_drift():
         ["in.mp4", "-o", "o.mp4",
          "--face-angular-correction", "0.55"]).face_angular_correction == 0.55
 
-    resolve = inspect.getsource(cli._run)
+    resolve = inspect.getsource(cli._render)
     assert "projection.ANGULAR_CORRECTION" in resolve
     assert "args.face_angular_correction is None" in resolve
     # Every entry point has to receive it, not just the video one.

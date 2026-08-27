@@ -185,7 +185,7 @@ def test_cli_defers_the_overlap_default_without_letting_it_drift():
     assert str(projection.FACE_OVERLAP) in action.help
     assert f"{projection.face_fov_degrees():.0f} degrees" in action.help
 
-    resolve = inspect.getsource(cli._run)
+    resolve = inspect.getsource(cli._render)
     assert "projection.FACE_OVERLAP" in resolve
     assert "args.face_overlap is None" in resolve
 

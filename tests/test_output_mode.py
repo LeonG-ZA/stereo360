@@ -163,7 +163,7 @@ def test_the_cli_exposes_both_modes():
     action = next(a for a in parser._actions if a.dest == "output_mode")
     assert set(action.choices) == set(pipeline.OUTPUT_MODES)
     assert action.default == pipeline.DEFAULT_OUTPUT_MODE
-    src = inspect_source(cli._run)
+    src = inspect_source(cli._render)
     assert src.count("output_mode=args.output_mode") == _render_paths(src), \
         "every render path must receive it"
 
@@ -265,7 +265,7 @@ def test_the_cli_exposes_yaw_and_passes_it_to_both():
     assert parser.parse_args(["i.mp4", "-o", "o.mp4"]).yaw == 0.0
     assert parser.parse_args(["i.mp4", "-o", "o.mp4",
                               "--yaw", "-37.5"]).yaw == -37.5
-    src = inspect_source(cli._run)
+    src = inspect_source(cli._render)
     assert src.count("yaw=args.yaw") == _render_paths(src)
 
 
