@@ -31,6 +31,18 @@ BACKENDS = ("auto", "depth-anything-v3", "depth-pro", "depth-anything",
 VIDEO_BACKEND = "depth-anything-v3"
 PHOTO_BACKEND = "depth-pro"
 
+#: Where a default falls back to when it cannot run *usefully* here. Not
+#: "auto": `autodetect.detect` chooses between torch and an exported ONNX
+#: model, and on a machine with neither it lands on Depth Anything V2 on the
+#: CPU -- which shares the very dependency and the very lack of a GPU that
+#: disqualified the default. V3 is the one GPU path that needs no torch and no
+#: export: onnxruntime-directml covers AMD and Intel, and it fetches its own
+#: 105 MB model.
+FALLBACK_BACKEND = "depth-anything-v3"
+
+#: Backends that run through torch, and so are only as fast as torch's device.
+_TORCH_BACKENDS = ("depth-pro", "depth-anything", "video-depth-anything")
+
 
 class Availability(NamedTuple):
     """Whether a backend can actually run here, and what to do if not."""
@@ -101,8 +113,9 @@ def probe_backends(onnx_model: str = DEFAULT_ONNX_MODEL) -> List[Availability]:
 
     out.append(Availability(
         "depth-pro", torch_ok,
-        "Sharpest thin structures; the stills default. Downloads 3.6 GB on "
-        "first use" if torch_ok
+        "Sharpest thin structures; the stills default. Downloads 1.9 GB on "
+        "first use, and wants a GPU: ~3.7 GB of VRAM, against 9.4 GB of RAM "
+        "and half an hour a frame on a processor" if torch_ok
         else "Needs torch and transformers (requirements.txt)"))
 
     out.append(Availability(
@@ -135,6 +148,56 @@ def probe_backends(onnx_model: str = DEFAULT_ONNX_MODEL) -> List[Availability]:
     return out
 
 
+def torch_backend_problem() -> Optional[str]:
+    """Why a torch depth backend would not finish here, or None if it would.
+
+    Distinct from `probe_backends`, which asks whether the packages exist.
+    Both failures this catches are ones presence cannot see:
+
+    *Torch imports but has no GPU.* `pick_device` resolves to CUDA, then MPS,
+    then the CPU, and there is no fourth option -- an AMD card on Windows has
+    no ROCm build, and torch-directml is deliberately unused. Depth Pro is
+    budgeted at roughly 2 s a frame on a GPU and runs six times for one photo,
+    once per cube face, each face resized to 1536x1536 by its own processor
+    regardless of `--face-size`. On the CPU that is not slow, it is a
+    different order of magnitude, and it looks exactly like a hang.
+
+    *Torch and transformers are both installed but disagree.* torch-directml
+    pins torch==2.4.1, so installing it downgrades torch; a transformers new
+    enough to want `DTensor` then fails at import. `find_spec` sees two
+    healthy packages and reports the backend available.
+
+    Imports for real, which is the point, so this is only called once a torch
+    backend is actually about to be chosen -- never on the video path, whose
+    default reaches onnxruntime instead.
+    """
+    try:
+        import torch
+    except Exception as e:                       # noqa: BLE001
+        return f"torch does not import ({type(e).__name__}: {e})"
+    try:
+        # The names the backends actually construct, not the bare package.
+        # transformers resolves its exports lazily, so `import transformers`
+        # succeeds even when the module behind a name cannot load -- which is
+        # exactly the torch-version failure this is here to catch.
+        from transformers import (AutoImageProcessor,  # noqa: F401
+                                  AutoModelForDepthEstimation)
+    except Exception as e:                       # noqa: BLE001
+        return (f"transformers does not import against torch "
+                f"{getattr(torch, '__version__', '?')} "
+                f"({type(e).__name__}: {e})")
+    try:
+        if torch.cuda.is_available():
+            return None
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return None
+    except Exception:                            # noqa: BLE001
+        pass
+    return (f"torch {getattr(torch, '__version__', '?')} has no GPU device, "
+            f"so it would run on the CPU")
+
+
 def resolve_depth_backend(requested: Optional[str], is_image: bool,
                           reporter: Optional[Reporter] = None) -> str:
     """Which backend to use, given what was asked for and what came in.
@@ -144,21 +207,38 @@ def resolve_depth_backend(requested: Optional[str], is_image: bool,
     still honoured. Same sentinel as `resolve_depth_tiles`, and for the same
     reason: with a real default the two cases are indistinguishable afterwards.
 
-    Falls back to "auto" when the preferred model cannot run here, because
-    these two defaults carry dependencies the others do not -- onnxruntime for
-    one, 3.6 GB of weights for the other -- and a machine without them should
-    still convert something rather than stop.
+    Falls back when the preferred model cannot run here, because these two
+    defaults carry dependencies the others do not -- onnxruntime for one,
+    1.9 GB of weights for the other -- and a machine without them should still
+    convert something rather than stop.
+
+    Two checks, because "installed" and "usable" are not the same thing.
+    `probe_backends` asks whether the packages are present, which is all it
+    can afford to ask -- it runs behind a dropdown and must not import torch.
+    `torch_backend_problem` then actually imports, and asks whether the thing
+    would *finish*. A stills default that starts and then runs for half an
+    hour is worse than one that says so and picks something else.
     """
     if requested:
         return requested
     want = PHOTO_BACKEND if is_image else VIDEO_BACKEND
+    rep = reporter or Reporter()
     for a in probe_backends():
         if a.name == want and not a.available:
-            (reporter or Reporter()).warning(
+            rep.warning(
                 f"Default depth backend '{want}' unavailable here "
-                f"({a.detail}); falling back to auto",
-                backend=want, detail=a.detail)
-            return "auto"
+                f"({a.detail}); falling back to {FALLBACK_BACKEND}",
+                backend=want, detail=a.detail, fallback=FALLBACK_BACKEND)
+            return FALLBACK_BACKEND
+    if want in _TORCH_BACKENDS:
+        problem = torch_backend_problem()
+        if problem is not None:
+            rep.warning(
+                f"Default depth backend '{want}' would run but not finish "
+                f"here ({problem}); falling back to {FALLBACK_BACKEND}. "
+                f"Pass --depth-backend {want} to insist.",
+                backend=want, detail=problem, fallback=FALLBACK_BACKEND)
+            return FALLBACK_BACKEND
     return want
 
 

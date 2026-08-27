@@ -1526,7 +1526,7 @@ def test_the_controller_explains_a_preview_that_cannot_be_shown(qapp):
 
 
 def test_model_preparation_reaches_the_status_line(qapp):
-    """The 3.6 GB stills model downloads before frame one exists, and the
+    """The 1.9 GB stills model downloads before frame one exists, and the
     progress bar is driven by frames. Without this the window says
     "Starting..." with an empty detail for the whole download, which is
     indistinguishable from a hang."""
@@ -1535,10 +1535,10 @@ def test_model_preparation_reaches_the_status_line(qapp):
     ctrl._set_status("Starting…")
 
     ctrl._runner.staged.emit("Loading Depth Pro 'apple/DepthPro-hf' on device "
-                             "'auto' (downloads ~3.6 GB on first use)...")
+                             "'auto' (downloads ~1.9 GB on first use)...")
 
     assert ctrl.status == "Starting…", "the heading was already right"
-    assert "3.6 GB" in ctrl.detail
+    assert "1.9 GB" in ctrl.detail
 
 
 def test_only_the_backend_events_become_status(qapp):

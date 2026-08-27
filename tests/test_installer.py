@@ -538,13 +538,13 @@ def test_the_warm_up_caches_the_model_the_app_actually_defaults_to():
 
 
 def test_depth_pro_is_not_pre_fetched_but_is_announced():
-    """3.6 GB is too much to put on someone who may only convert video. That
+    """1.9 GB is too much to put on someone who may only convert video. That
     makes the first still conversion slow, so the install says so."""
     text = payload()
-    assert "3.6 GB" in text
+    assert "1.9 GB" in text
     warm = text[text.index("Write-Step 'Fetching the depth model'"):]
     warm = warm[:warm.index("Write-Step 'Creating shortcuts'")]
-    assert "DepthPro" not in warm, "pre-fetching 3.6 GB on every install"
+    assert "DepthPro" not in warm, "pre-fetching 1.9 GB on every install"
 
 
 def test_the_manifest_records_what_is_installed_not_what_was_downloaded():

@@ -159,11 +159,16 @@ def test_probe_backends_cli_emits_json():
 # ------------------------------------------- the per-job-kind default backend
 
 
-def test_the_default_backend_depends_on_the_kind_of_job():
+def test_the_default_backend_depends_on_the_kind_of_job(monkeypatch):
     """A video wants a model small and fast enough to run thousands of times;
     a still wants the best single frame available. One default cannot be both,
     which is why this is resolved from the input rather than from a constant."""
     from stereo360 import backends
+
+    # Healthy machine: the torch preflight has nothing to report, so the
+    # mapping is the only thing under test. Without this the assertions
+    # below pass or fail on whether the test machine owns a GPU.
+    monkeypatch.setattr(backends, "torch_backend_problem", lambda: None)
 
     assert backends.resolve_depth_backend(None, is_image=False) \
         == backends.VIDEO_BACKEND
@@ -184,7 +189,7 @@ def test_an_explicit_backend_survives_the_default():
 
 def test_an_unavailable_default_falls_back_rather_than_failing(monkeypatch):
     """These two defaults carry dependencies the others do not -- onnxruntime
-    for one, 3.6 GB of weights for the other. A machine without them should
+    for one, 1.9 GB of weights for the other. A machine without them should
     still convert something."""
     from stereo360 import backends
 
@@ -199,7 +204,8 @@ def test_an_unavailable_default_falls_back_rather_than_failing(monkeypatch):
         def warning(self, msg, **kw):
             rec.append(msg)
 
-    assert backends.resolve_depth_backend(None, True, Rec()) == "auto"
+    assert backends.resolve_depth_backend(None, True, Rec()) \
+        == backends.FALLBACK_BACKEND
     assert rec and "unavailable" in rec[0]
 
 
@@ -220,3 +226,70 @@ def test_cli_choices_match_backends():
     assert list(action.choices) == list(backends.BACKENDS)
     # None, not "auto": the sentinel is what makes the per-job default work.
     assert action.default is None
+
+
+def test_a_default_that_starts_but_would_not_finish_falls_back(monkeypatch):
+    """Presence is not usability. Depth Pro on a machine with no torch GPU
+    imports fine and then runs six 1536x1536 forward passes on the CPU for one
+    photo, which reads as a hang rather than as a slow render. Whether the
+    packages are installed is what `probe_backends` can see; whether the thing
+    would finish is not."""
+    from stereo360 import backends
+
+    monkeypatch.setattr(backends, "probe_backends",
+                        lambda *a, **kw: [backends.Availability(n, True, "ok")
+                                          for n in backends.BACKENDS])
+    monkeypatch.setattr(backends, "torch_backend_problem",
+                        lambda: "torch 2.4.1+cpu has no GPU device")
+    rec = []
+
+    class Rec(backends.Reporter):
+        def warning(self, msg, **kw):
+            rec.append(msg)
+
+    assert backends.resolve_depth_backend(None, True, Rec()) \
+        == backends.FALLBACK_BACKEND
+    assert rec and "not finish" in rec[0]
+    # The warning has to name the escape hatch, or the only way back to the
+    # better model is reading the source.
+    assert "--depth-backend depth-pro" in rec[0]
+
+
+def test_asking_for_a_torch_backend_outright_is_not_second_guessed(monkeypatch):
+    """The preflight downgrades a *default*, never a choice. Depth Pro on the
+    CPU is a legitimate thing to want for a single still, and refusing it would
+    put the better model out of reach on exactly the machines that have no
+    other way to run it."""
+    from stereo360 import backends
+
+    monkeypatch.setattr(backends, "torch_backend_problem", lambda: "no GPU")
+    assert backends.resolve_depth_backend("depth-pro", True) == "depth-pro"
+
+
+def test_the_video_default_never_imports_torch(monkeypatch):
+    """The video default reaches onnxruntime and has no opinion about torch.
+    Importing torch to check on it would put seconds and a GB of resident
+    memory in front of every video job to answer a question it never asks."""
+    from stereo360 import backends
+
+    def boom():
+        raise AssertionError("torch preflight ran on the video path")
+
+    monkeypatch.setattr(backends, "probe_backends",
+                        lambda *a, **kw: [backends.Availability(n, True, "ok")
+                                          for n in backends.BACKENDS])
+    monkeypatch.setattr(backends, "torch_backend_problem", boom)
+    assert backends.resolve_depth_backend(None, False) \
+        == backends.VIDEO_BACKEND
+
+
+def test_the_fallback_is_reachable_without_torch_or_an_export():
+    """Not "auto", which is the tempting answer and the wrong one:
+    `autodetect.detect` chooses between torch and an exported ONNX model, so on
+    a machine with neither it lands on Depth Anything V2 on the CPU -- the same
+    absent GPU and the same torch that disqualified the default."""
+    from stereo360 import backends
+
+    assert backends.FALLBACK_BACKEND in backends.BACKENDS
+    assert backends.FALLBACK_BACKEND not in backends._TORCH_BACKENDS
+    assert backends.FALLBACK_BACKEND != "auto"

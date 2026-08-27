@@ -378,7 +378,7 @@ ApplicationWindow {
     function backendDetail(name) {
         if (name === "")
             return photoMode
-                ? "Depth Pro: the sharpest thin structures measured. Downloads 3.6 GB on first use."
+                ? "Depth Pro: the sharpest thin structures measured. Downloads 1.9 GB on first use, and wants a GPU — on a processor it measured 9.4 GB of RAM and half an hour for one photo."
                 : "Depth Anything V3: the flattest walls and floors measured, and fast enough on a CPU. Downloads 105 MB on first use."
         var e = backendEntry(name)
         return e === null ? "" : e.detail

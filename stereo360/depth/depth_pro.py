@@ -8,7 +8,7 @@ wall edge, which is the artifact that started the whole investigation. Judged
 in a headset it came first; judged by the numbers it comes second. See
 "Choosing a depth model" in findings.md.
 
-The cost is a 3.6 GB download and roughly 2 s per frame on a GPU, which is why
+The cost is a 1.9 GB download and roughly 2 s per frame on a GPU, which is why
 this is the *stills* default and not the video one. Six faces of one photo is
 a fine trade; eight thousand frames is not.
 
@@ -28,8 +28,11 @@ from .base import DepthBackend
 DEFAULT_MODEL = "apple/DepthPro-hf"
 
 #: Roughly what the weights cost on first use, for a message worth printing
-#: before a user waits on it rather than after.
-DOWNLOAD_MB = 3600
+#: before a user waits on it rather than after. Measured from the repo rather
+#: than remembered: apple/DepthPro-hf is one 1904 MB model.safetensors and a
+#: handful of small files. It read 3600 for a long time, which is close to the
+#: model's peak *VRAM* (3.7 GB measured) and looks like the two were conflated.
+DOWNLOAD_MB = 1900
 
 
 class DepthProBackend(DepthBackend):
@@ -37,7 +40,7 @@ class DepthProBackend(DepthBackend):
 
     One image per forward pass. Depth Pro runs a multi-scale patch pyramid
     internally and is already wide enough to keep a GPU busy, so batching
-    faces buys nothing and costs activation memory a 3.6 GB model can ill
+    faces buys nothing and costs activation memory a 1.9 GB model can ill
     afford.
     """
 

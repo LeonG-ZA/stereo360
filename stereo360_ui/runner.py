@@ -38,7 +38,7 @@ class Runner(QObject):
     #:
     #: Everything up to the first frame used to be one silent gap labelled
     #: "Starting...", and the gap grew teeth when the default stills model
-    #: became a 3.6 GB download: a first run looks identical to a hang for as
+    #: became a 1.9 GB download: a first run looks identical to a hang for as
     #: long as that takes. These events already say exactly what is happening
     #: -- they just only reached the log, which is collapsed by default.
     staged = Signal(str)
