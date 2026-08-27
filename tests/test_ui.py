@@ -649,6 +649,49 @@ def test_controller_probes_available_backends(qapp):
                for e in entries.values())
 
 
+def test_probing_backends_does_not_narrate_what_is_missing(qapp):
+    """A healthy install should not open with a list of its own shortcomings.
+
+    Most people never want the ONNX export or a clone of the Video Depth
+    Anything repo, so naming both as unavailable before anyone has looked at
+    the depth settings reads as something being wrong. The dropdown already
+    carries the reason under each entry it disables.
+    """
+    ctrl = Controller()
+    lines = []
+    ctrl.logged.connect(lambda lvl, txt: lines.append(txt))
+    seen = []
+    ctrl.backendsChanged.connect(lambda: seen.append(True))
+    ctrl.probeBackends()
+
+    assert _pump(qapp, lambda: bool(seen), timeout=180), "probe never returned"
+    assert not [t for t in lines if "unavailable" in t.lower()], lines
+
+
+def test_an_unusable_backend_explains_itself_when_it_is_picked(qapp):
+    """Choosing a disabled entry snaps the selection back, and silently doing
+    nothing is the one outcome that needs explaining."""
+    ctrl = Controller()
+    ctrl._backends = [
+        {"name": "onnx", "available": False,
+         "detail": "No exported model at models/depth_anything_v2_small.onnx"},
+        {"name": "depth-pro", "available": True, "detail": "fine"},
+    ]
+    lines = []
+    ctrl.logged.connect(lambda lvl, txt: lines.append((lvl, txt)))
+
+    ctrl.explainBackend("onnx")
+    assert len(lines) == 1
+    level, text = lines[0]
+    assert level == "warning"
+    assert "onnx" in text and "No exported model" in text
+
+    ctrl.explainBackend("depth-pro")
+    assert len(lines) == 1, "an available backend has nothing to explain"
+    ctrl.explainBackend("not-a-backend")
+    assert len(lines) == 1, "an unknown name should not invent a reason"
+
+
 # -------------------------------------------------------------- encoders
 
 

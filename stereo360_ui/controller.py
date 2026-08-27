@@ -260,10 +260,30 @@ class Controller(QObject):
         except (ValueError, KeyError, TypeError):
             return
         self.backendsChanged.emit()
+
+    @Slot(str)
+    def explainBackend(self, name: str) -> None:
+        """Say why a backend cannot be chosen, at the moment it is chosen.
+
+        This used to be a line per unavailable backend written into the log at
+        startup, before anyone had asked about depth at all. It read as a list
+        of things that were wrong with the machine, and it was the first thing
+        in the window on a perfectly healthy install -- most people never
+        wanted the ONNX export or a clone of the Video Depth Anything repo.
+        The dropdown already carries the reason under each entry it has
+        disabled, so the startup lines said it a second time, sooner, and with
+        less context.
+
+        Saying it on the click keeps the one case where the log earns its
+        place: the entry is disabled, so choosing it does nothing, and
+        silently doing nothing is the one outcome that needs explaining.
+        """
         for entry in self._backends:
-            if not entry.get("available"):
-                self.logged.emit("info", f"{entry['name']} unavailable: "
-                                         f"{entry['detail']}")
+            if entry.get("name") == name and not entry.get("available"):
+                self.logged.emit(
+                    "warning",
+                    f"{name} is not available here: {entry['detail']}")
+                return
 
     @Slot(str)
     def probeInput(self, path: str) -> None:

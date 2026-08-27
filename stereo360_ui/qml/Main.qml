@@ -1132,6 +1132,13 @@ ApplicationWindow {
                                     onActivated: {
                                         var c = win.depthChoices[currentIndex]
                                         if (!win.backendUsable(c.backend)) {
+                                            // Put the reason in the log here,
+                                            // rather than listing every
+                                            // unavailable backend at startup:
+                                            // the selection is about to snap
+                                            // back, and that is what wants
+                                            // explaining.
+                                            app.explainBackend(c.backend)
                                             currentIndex = win.depthChoiceIndex(
                                                 win.depthBackend, win.depthModel)
                                             return
