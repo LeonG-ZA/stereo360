@@ -56,6 +56,14 @@ class Reporter:
     def advance(self, n: int = 1) -> None:
         """`n` more frames have been written to the encoder."""
 
+    def preview(self, path: str, frame: int, **fields: Any) -> None:
+        """A frame of the render has been written to `path` to be looked at.
+
+        Its own event rather than an `info` line: it happens repeatedly during
+        a render and carries a path rather than a sentence, so a consumer wants
+        to act on it silently and a console wants to say nothing at all.
+        """
+
     def finish(self, **fields: Any) -> None:
         """The frame-by-frame phase has ended, cancelled or not."""
 
@@ -113,7 +121,7 @@ class JsonReporter(Reporter):
     Every line is flushed for the same reason: a UI that only learns about
     progress when the pipe buffer fills is not a progress display.
 
-    Event `type`s: info, warning, start, progress, done, error.
+    Event `type`s: info, warning, start, progress, preview, done, error.
     """
 
     def __init__(self, stream: Optional[TextIO] = None,
@@ -137,6 +145,11 @@ class JsonReporter(Reporter):
 
     def warning(self, message: str, **fields: Any) -> None:
         self._emit("warning", message=message, **fields)
+
+    def preview(self, path: str, frame: int, **fields: Any) -> None:
+        # Flushed like every other line: a preview a consumer learns about
+        # once the pipe buffer fills is not a live preview.
+        self._emit("preview", path=path, frame=frame, **fields)
 
     def error(self, message: str, **fields: Any) -> None:
         self._emit("error", message=message, **fields)

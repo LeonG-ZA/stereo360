@@ -55,6 +55,8 @@ ApplicationWindow {
     property real gradientLimit: 1.0
     property real faceAngularCorrection: 0.0
     property real poleCompensation: 1.0
+    property bool livePreview: false
+    property real livePreviewEvery: 2.0
     // Two controls the user thinks in -- which eye stays sharp, and how
     // much of the separation it carries -- and the single number the
     // CLI takes. 0 leaves the left eye untouched, 1 the right, 0.5 is
@@ -95,6 +97,8 @@ ApplicationWindow {
             "strength": strength, "gradientLimit": gradientLimit,
             "faceAngularCorrection": faceAngularCorrection,
             "poleCompensation": poleCompensation,
+            "livePreview": livePreview,
+            "livePreviewEvery": livePreviewEvery,
             "leftShare": leftShare, "sharedDetail": sharedDetail,
             "spatialAudio": spatialAudio,
             "sourceSubsampling": sourceSubsampling,
@@ -1116,6 +1120,36 @@ ApplicationWindow {
                         Card {
                             title: "Depth"
                             subtitle: "independent of the encoding preset"
+
+                            Row2 {
+                                label: "Live preview"
+                                visible: !win.photoMode
+                                hint: win.livePreview
+                                      ? "Shows the frame being written, at most every " + win.livePreviewEvery.toFixed(0) + "s. Measured at 8K it costs about 5 ms a frame against 1700 ms to render one, and the interval is checked once per frame — so a render slower than the interval previews every frame and never writes the same picture twice."
+                                      : "Off. The preview panel stays empty until the render finishes. Turning this on shows the frame being written as it goes, for about 5 ms a frame at 8K."
+                                Switch {
+                                    checked: win.livePreview
+                                    onToggled: win.livePreview = checked
+                                }
+                            }
+
+                            Row2 {
+                                label: "Preview every"
+                                visible: !win.photoMode && win.livePreview
+                                hint: "Seconds between previews. Elapsed time rather than a frame count: 30 frames is one preview a second on a small clip and one every 51 seconds at 8K, which is backwards — the long render is the one worth watching."
+                                Slider {
+                                    Layout.fillWidth: true
+                                    from: 1; to: 15; stepSize: 1
+                                    value: win.livePreviewEvery
+                                    onMoved: win.livePreviewEvery = value
+                                }
+                                Text {
+                                    text: win.livePreviewEvery.toFixed(0) + "s"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 32
+                                }
+                            }
 
                             Row2 {
                                 label: "Depth model"

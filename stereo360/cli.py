@@ -395,6 +395,24 @@ def build_parser() -> argparse.ArgumentParser:
                         "on, so it has to appear before any depth work has "
                         "been done -- it decodes one frame and touches no "
                         "model.")
+    p.add_argument("--live-preview", metavar="PATH", default=None,
+                   help="While rendering, keep a small JPEG of the frame just "
+                        "written at PATH, for something to display. Off unless "
+                        "asked for: a render should not pay for a window that "
+                        "may not be open. Measured at 8K it costs 4.6 ms to "
+                        "downscale and 0.5 ms to encode against 1700 ms to "
+                        "render the frame, and it is throttled on top of that "
+                        "(see --live-preview-every)")
+    p.add_argument("--live-preview-every", type=float, default=None,
+                   metavar="SECONDS",
+                   help="How often --live-preview may write, in seconds "
+                        "(default: 2). Elapsed time rather than a frame count, "
+                        "because a count means something different at every "
+                        "resolution -- 30 frames is one preview a second on a "
+                        "small clip and one every 51 seconds at 8K, which is "
+                        "backwards. The interval is tested once per frame, so "
+                        "frames slower than it preview every frame and never "
+                        "write the same picture twice")
     p.add_argument("--progress-json", action="store_true",
                    help="Emit machine-readable NDJSON events on stdout (one "
                         "JSON object per line: info, warning, start, "
@@ -692,6 +710,10 @@ def _run(args, reporter, cancel, backends, pipeline):
         output_mode=args.output_mode,
         yaw=args.yaw,
         output_width=args.output_width,
+        live_preview=args.live_preview,
+        live_preview_every=(pipeline.DEFAULT_PREVIEW_EVERY
+                            if args.live_preview_every is None
+                            else args.live_preview_every),
         reporter=reporter,
         cancel=cancel,
     )

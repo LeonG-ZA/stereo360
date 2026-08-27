@@ -42,6 +42,12 @@ class Runner(QObject):
     #: long as that takes. These events already say exactly what is happening
     #: -- they just only reached the log, which is collapsed by default.
     staged = Signal(str)
+
+    #: A frame of the render has landed at this path. Carries the frame
+    #: number too, so a consumer can make the URL unique -- QML caches an
+    #: Image by source, and a file that changes under an unchanged URL does
+    #: not repaint.
+    previewed = Signal(str, int)
     #: ok, cancelled, output path
     finished = Signal(bool, bool, str)
 
@@ -146,6 +152,10 @@ class Runner(QObject):
             # reporter carries structured fields next to the prose.
             if event.get("backend"):
                 self.staged.emit(message)
+        elif kind == "preview":
+            path = str(event.get("path") or "")
+            if path:
+                self.previewed.emit(path, int(event.get("frame") or 0))
         elif kind == "start":
             self._output = str(event.get("output") or "")
             total = event.get("total")

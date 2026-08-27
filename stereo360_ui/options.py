@@ -12,6 +12,7 @@ how someone graduates from the UI to the CLI.
 from __future__ import annotations
 
 import os
+import tempfile
 
 from typing import Any, Dict, List, Optional
 
@@ -174,6 +175,12 @@ _VDA_MODELS = ("small", "large")
 #: Where the CLI looks for an exported ONNX model unless told otherwise.
 DEFAULT_ONNX_MODEL = "models/depth_anything_v2_small.onnx"
 
+#: Where a live render preview is kept. One file, rewritten in place: the
+#: interface makes its URL unique per frame rather than the path, so nothing
+#: accumulates on disk over a long render.
+LIVE_PREVIEW_PATH = os.path.join(tempfile.gettempdir(),
+                                 "stereo360_live_preview.jpg")
+
 #: Pipeline seconds per frame at 8K, used only to describe the presets above.
 _PIPELINE_SPF = 0.80
 
@@ -288,6 +295,8 @@ _DEFAULTS = {
     "gradientLimit": 1.0,
     "faceAngularCorrection": 0.0,
     "poleCompensation": 1.0,
+    "livePreview": False,
+    "livePreviewEvery": 2.0,
     "leftShare": 0.5,
     "sharedDetail": True,
     "depthTiles": 1,
@@ -401,6 +410,15 @@ def build_argv(
     pole = _num(opts.get("poleCompensation"), 1.0)
     if abs(pole - _DEFAULTS["poleCompensation"]) > 1e-9:
         argv += ["--pole-compensation", f"{pole:g}"]
+
+    # Only for a video, and only when asked. A still renders one frame, so a
+    # live preview of it is the output arriving slightly early -- and the
+    # preview panel already shows that when the render finishes.
+    if opts.get("livePreview") and not photo and not is_preview:
+        argv += ["--live-preview", LIVE_PREVIEW_PATH]
+        every = _num(opts.get("livePreviewEvery"), 2.0)
+        if abs(every - _DEFAULTS["livePreviewEvery"]) > 1e-9:
+            argv += ["--live-preview-every", f"{every:g}"]
 
     # Against the default for *this kind of job*: the CLI uses 3 for a photo
     # and 1 for a video, so a fixed comparison here would emit the flag when

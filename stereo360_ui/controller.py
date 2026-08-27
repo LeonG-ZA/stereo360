@@ -52,6 +52,7 @@ class Controller(QObject):
         self._runner.progressed.connect(self._on_progress)
         self._runner.logged.connect(self._on_log)
         self._runner.staged.connect(self._on_stage)
+        self._runner.previewed.connect(self._on_live_preview)
         self._runner.finished.connect(self._on_finished)
 
         self._busy = False
@@ -260,6 +261,17 @@ class Controller(QObject):
         except (ValueError, KeyError, TypeError):
             return
         self.backendsChanged.emit()
+
+    def _on_live_preview(self, path: str, frame: int) -> None:
+        """Point the preview panel at the frame just rendered.
+
+        The frame number goes in the URL as a query string. QML caches an
+        Image by its source, so a file rewritten under an unchanged URL shows
+        the first frame for the whole render; the path stays one file on disk
+        and only the URL changes.
+        """
+        self._preview = f"{QUrl.fromLocalFile(path).toString()}?f={frame}"
+        self.previewChanged.emit()
 
     @Slot(str)
     def explainBackend(self, name: str) -> None:

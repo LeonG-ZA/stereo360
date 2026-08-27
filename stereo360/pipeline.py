@@ -9,6 +9,7 @@ right eye is synthesized via DIBR warping with inpainting (M2).
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable, NamedTuple, Optional
 
 import numpy as np
@@ -1064,6 +1065,19 @@ class ConvertResult(NamedTuple):
     cancelled: bool
 
 
+#: Longest edge of a live preview. 640 measured 4.6 ms to downscale from 8K
+#: and 41 kB as a JPEG; 960 costs the same to scale and 139 kB to store.
+PREVIEW_MAX_PX = 640
+
+#: JPEG quality for it. A preview is looked at, not kept.
+PREVIEW_QUALITY = 80
+
+#: Seconds between live previews when one is asked for. Steady feedback at
+#: any resolution: 0.15% of an 8K frame, and self-limiting on a fast render
+#: because it skips frames rather than doing more work.
+DEFAULT_PREVIEW_EVERY = 2.0
+
+
 class _Sink:
     """Everything that happens per output frame, in one place.
 
@@ -1076,7 +1090,9 @@ class _Sink:
                  cancel: Optional[Callable[[], bool]],
                  output_mode: str = DEFAULT_OUTPUT_MODE,
                  yaw: float = 0.0,
-                 eye_size: Optional[tuple] = None) -> None:
+                 eye_size: Optional[tuple] = None,
+                 preview_path: Optional[str] = None,
+                 preview_every: float = DEFAULT_PREVIEW_EVERY) -> None:
         self._encoder = encoder
         self._reporter = reporter
         self._cancel = cancel
@@ -1084,6 +1100,10 @@ class _Sink:
         self._yaw = yaw
         #: (w, h) to resize each eye to, or None to leave it alone.
         self._eye_size = eye_size
+        #: Where to drop a small copy of the frame being written, or None.
+        self._preview_path = preview_path
+        self._preview_every = float(preview_every)
+        self._preview_at = 0.0
         self.written = 0
 
     def check(self) -> None:
@@ -1111,10 +1131,66 @@ class _Sink:
                               interpolation=cv2.INTER_AREA)
             right = cv2.resize(right, self._eye_size,
                                interpolation=cv2.INTER_AREA)
-        self._encoder.write(
-            stack_eyes(left, right, self._output_mode, self._yaw))
+        packed = stack_eyes(left, right, self._output_mode, self._yaw)
+        self._live_preview(packed)
+        self._encoder.write(packed)
         self.written += 1
         self._reporter.advance(1)
+
+    def _live_preview(self, packed: np.ndarray) -> None:
+        """Drop a small copy of this frame for something to look at. Off by
+        default -- a render should not pay for a window that may not be open.
+
+        Throttled on elapsed time rather than a frame count, because a frame
+        count means something different at every resolution: 30 frames is one
+        preview a second on a small clip and one every 51 seconds at 8K, which
+        is backwards -- the long render is the one that needs showing.
+
+        The throttle is *tested here*, at the frame boundary, and that is what
+        keeps it honest when frames are slower than the interval. A timer
+        firing every 2 s against a 7 s frame would write the same picture three
+        times; asking once per frame cannot, so a slow render simply previews
+        every frame and a fast one skips.
+
+        Measured at 8K: 4.6 ms to downscale and 0.5 ms to encode, against
+        1700 ms to render the frame. JPEG rather than PNG deliberately -- PNG
+        measured 5.6 ms for a picture nobody keeps.
+        """
+        if not self._preview_path:
+            return
+        now = time.monotonic()
+        # `written == 0` always passes, so the panel fills on the first frame
+        # rather than staying empty for the length of the interval.
+        if self.written and now - self._preview_at < self._preview_every:
+            return
+        self._preview_at = now
+        import cv2
+
+        h, w = packed.shape[:2]
+        scale = PREVIEW_MAX_PX / float(max(h, w))
+        small = (cv2.resize(packed, (max(1, int(w * scale)),
+                                     max(1, int(h * scale))),
+                            interpolation=cv2.INTER_AREA)
+                 if scale < 1.0 else packed)
+        # Encoded rather than written by name: `imwrite` picks its format from
+        # the extension, so writing the temporary as `.part` asks it for a
+        # "part" encoder and it refuses. Encoding to bytes says JPEG outright
+        # and leaves the caller free to name the file whatever it likes.
+        ok, buf = cv2.imencode(".jpg", small[..., ::-1],
+                               [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_QUALITY])
+        if not ok:
+            return
+        try:
+            # Written beside the target and moved into place, so a reader
+            # never opens a half-written file and shows a torn frame.
+            tmp = self._preview_path + ".part"
+            with open(tmp, "wb") as fh:
+                fh.write(buf.tobytes())
+            os.replace(tmp, self._preview_path)
+        except OSError:
+            # A preview is a convenience; losing one must not end a render.
+            return
+        self._reporter.preview(self._preview_path, self.written)
 
 
 def convert(
@@ -1155,6 +1231,8 @@ def convert(
     output_width: Optional[int] = None,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
+    live_preview: Optional[str] = None,
+    live_preview_every: float = DEFAULT_PREVIEW_EVERY,
 ) -> ConvertResult:
     """Convert `input_path` to a top-bottom stereo 360 MP4 at `output_path`.
 
@@ -1228,7 +1306,9 @@ def convert(
     )
     frames = read_source(input_path, info, source_projection, w, h,
                          max_frames, start_frame)
-    sink = _Sink(encoder, reporter, cancel, output_mode, yaw, eye_size)
+    sink = _Sink(encoder, reporter, cancel, output_mode, yaw, eye_size,
+                 preview_path=live_preview,
+                 preview_every=live_preview_every)
     cancelled = False
 
     reporter.start(total, width=out_w, height=out_h, fps=info.fps,

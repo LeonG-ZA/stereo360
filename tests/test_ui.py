@@ -692,6 +692,44 @@ def test_an_unusable_backend_explains_itself_when_it_is_picked(qapp):
     assert len(lines) == 1, "an unknown name should not invent a reason"
 
 
+def test_live_preview_is_off_unless_asked_for():
+    """A render should not pay for a window that may not be open."""
+    assert "--live-preview" not in options.build_argv(dict(BASE))
+    assert options._DEFAULTS["livePreview"] is False
+
+
+def test_live_preview_passes_a_path_and_an_interval():
+    argv = options.build_argv(dict(BASE, livePreview=True))
+    assert argv[argv.index("--live-preview") + 1] == options.LIVE_PREVIEW_PATH
+    # The default interval is the CLI's own, so it is not spelled out.
+    assert "--live-preview-every" not in argv
+    argv = options.build_argv(dict(BASE, livePreview=True, livePreviewEvery=5))
+    assert argv[argv.index("--live-preview-every") + 1] == "5"
+
+
+def test_a_still_never_asks_for_a_live_preview():
+    """One frame in, one frame out -- a live preview of it is just the output
+    arriving slightly early, and the panel already shows that at the end."""
+    argv = options.build_argv(dict(BASE, input="in.jpg", output="out.jpg",
+                                   livePreview=True))
+    assert "--live-preview" not in argv
+
+
+def test_the_preview_url_changes_per_frame(qapp):
+    """One file on disk, rewritten in place. QML caches an Image by its
+    source, so a file that changes under an unchanged URL shows the first
+    frame for the whole render."""
+    ctrl = Controller()
+    seen = []
+    ctrl.previewChanged.connect(lambda: seen.append(ctrl.previewSource))
+    ctrl._on_live_preview("/tmp/live.jpg", 0)
+    ctrl._on_live_preview("/tmp/live.jpg", 7)
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1], "the URL must differ or the panel will not repaint"
+    assert all("live.jpg" in u for u in seen), seen
+
+
 # -------------------------------------------------------------- encoders
 
 
