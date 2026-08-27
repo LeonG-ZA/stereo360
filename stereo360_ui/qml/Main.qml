@@ -393,25 +393,6 @@ ApplicationWindow {
           + " frames"
         : ""
 
-    // The recommended entry first and unlabelled by model name, because which
-    // model it means depends on the job. The rest keep their CLI names: the
-    // dropdown is also how someone works out what to pass on the command line.
-    readonly property var backendChoices: [
-        {key: "", text: "Best for this job (recommended)"},
-        {key: "depth-anything-v3", text: "depth-anything-v3"},
-        {key: "depth-pro", text: "depth-pro"},
-        {key: "auto", text: "auto — fastest runtime here"},
-        {key: "depth-anything", text: "depth-anything"},
-        {key: "video-depth-anything", text: "video-depth-anything"},
-        {key: "onnx", text: "onnx"},
-    ]
-    function backendIndex(key) {
-        for (var i = 0; i < backendChoices.length; ++i)
-            if (backendChoices[i].key === key)
-                return i
-        return 0
-    }
-
     // Built from the probe: "from preset" first, then whatever this machine
     // reported, hardware entries marked as the speed trade they are.
     readonly property var codecChoices: {
@@ -439,40 +420,99 @@ ApplicationWindow {
         return Math.max(0, qualityKeys.indexOf(key))
     }
 
-    // The temporal backend ships small and large checkpoints only. Rather
-    // than accept a Base selection and quietly run Small -- which is what it
-    // did, so the dropdown said one thing and the render did another -- the
-    // choice is simply not offered for that backend.
-    readonly property var modelChoices: depthBackend === "video-depth-anything"
-        ? [{key: "small", label: "Small — fastest"},
-           {key: "large", label: "Large — largest, slowest"}]
-        : depthBackend === "depth-anything-v3"
-        ? [{key: "small", label: "Small — the default, and the best measured"},
-           {key: "base",  label: "Base — flatter floors, four times the size"},
-           {key: "large", label: "Large — worse on chair gaps; here for completeness"}]
-        : [{key: "small", label: "Small — fastest"},
-           {key: "base",  label: "Base — best quality per second"},
-           {key: "large", label: "Large — largest, slowest"}]
+    // Backend and variant as one list, because separately they were a puzzle:
+    // which variants existed depended on the backend, two of the backends had
+    // no variant at all so the second row vanished, and the shared variant
+    // selection carried across a backend change and had to be clamped back.
+    // Spelling the valid pairs out removes all three problems -- every entry
+    // is a thing you can actually run, and there is nothing to keep in sync.
+    readonly property var depthVariants: ({
+        "depth-anything-v3": [["small", "Small"], ["base", "Base"],
+                              ["large", "Large"]],
+        "depth-pro": [],
+        "auto": [["small", "Small"], ["base", "Base"], ["large", "Large"]],
+        "depth-anything": [["small", "Small"], ["base", "Base"],
+                           ["large", "Large"]],
+        // Ships small and large only; Base would fail at load.
+        "video-depth-anything": [["small", "Small"], ["large", "Large"]],
+        "onnx": []
+    })
 
-    function modelIndex(key) {
-        for (var i = 0; i < modelChoices.length; ++i)
-            if (modelChoices[i].key === key)
-                return i
-        return 0
+    // `depth-anything` is V2 -- it was named before there was a V3 to tell it
+    // apart from, and it is a CLI value, so it cannot simply be renamed here
+    // without the dropdown ceasing to say what you would type. The generation
+    // goes in the label instead, alongside the flag rather than replacing it.
+    function depthLabel(backend) {
+        return backend === "depth-anything" ? "depth-anything  (v2)" : backend
     }
 
-    // Belt and braces behind the filtered list above, and deliberately not
-    // expressed via modelChoices: a property changed handler can run before
-    // the bindings that depend on the same property have re-evaluated, so
-    // asking modelChoices here read the *previous* backend's list. Both
-    // directions are checked explicitly instead, which is order-independent.
+    readonly property var depthChoices: {
+        var out = [{backend: "", model: "",
+                    text: "Best for this job (recommended)"}]
+        var order = ["depth-anything-v3", "depth-pro", "auto",
+                     "depth-anything", "video-depth-anything", "onnx"]
+        for (var i = 0; i < order.length; ++i) {
+            var b = order[i]
+            var vs = depthVariants[b]
+            if (vs.length === 0) {
+                out.push({backend: b, model: "", text: depthLabel(b)})
+            } else {
+                for (var j = 0; j < vs.length; ++j)
+                    out.push({backend: b, model: vs[j][0],
+                              text: depthLabel(b) + "  ·  " + vs[j][1]})
+            }
+        }
+        return out
+    }
+
+    function depthChoiceIndex(backend, model) {
+        var fallback = 0
+        for (var i = 0; i < depthChoices.length; ++i) {
+            var c = depthChoices[i]
+            if (c.backend !== backend)
+                continue
+            if (c.model === "" || c.model === model)
+                return i
+            if (fallback === 0)
+                fallback = i      // right backend, variant not in its list
+        }
+        return fallback
+    }
+
+    // The detail line for a pair: the backend's own text, plus what the
+    // variant costs where that is the thing worth knowing.
+    function depthChoiceDetail(backend, model) {
+        if (backend === "depth-anything-v3")
+            return model === "base"
+                ? "Marginally flatter floors than Small, four times the download, and no better anywhere else. 413 MB."
+                : model === "large"
+                  ? "Measured worse than Small on the chair gaps. Offered for completeness. 1.4 GB."
+                  : "The default, and capacity does not help here: Large measured worse on the chair gaps for 13× the download. 105 MB."
+        if (backend === "depth-anything" || backend === "auto"
+                || backend === "video-depth-anything")
+            return model === "large"
+                ? "Twice Base's extra cost and measured no better on 8K footage. Downloads ~1.3 GB on first use."
+                : model === "small"
+                  ? "The sharpest of the V2 family, and the noisiest — that noise is what makes thin structures shift between frames. About 9% faster overall than Base."
+                  : "The best of the V2 family: lowest depth noise and 40% less flicker than Small on 8K footage. Not the tool's default any more — that is Depth Anything V3 for video and Depth Pro for stills. Downloads ~400 MB on first use."
+        return backendDetail(backend)
+    }
+
+    // Checked in both directions rather than derived from the choice list: a
+    // property changed handler can run before the bindings that depend on the
+    // same property have re-evaluated, so reading the list here would see the
+    // previous backend's. Explicit is order-independent.
     function _clampModel() {
+        // Still a validity rule: the temporal backend has no Base checkpoint,
+        // so a stored or defaulted Base would fail at load. The single list
+        // never offers that pair, but a value can arrive from elsewhere.
+        //
+        // The V3 clamp that used to sit here is gone. It existed because the
+        // variant selection was shared across backends and Base could carry
+        // into V3 unasked; now every entry names its own variant, so choosing
+        // V3 Base is a deliberate act and forcing it back to Small would just
+        // ignore the user.
         if (depthBackend === "video-depth-anything" && depthModel === "base")
-            depthModel = "small"
-        // V3's best variant is Small, not Base. Without this, selecting the V3
-        // backend while the shared Base selection is in force would silently
-        // fetch 413 MB and render the variant that measured worse.
-        if (depthBackend === "depth-anything-v3" && depthModel === "base")
             depthModel = "small"
     }
     onDepthBackendChanged: _clampModel()
@@ -1078,22 +1118,30 @@ ApplicationWindow {
                             subtitle: "independent of the encoding preset"
 
                             Row2 {
-                                label: "Backend"
-                                hint: win.backendDetail(win.depthBackend)
+                                label: "Depth model"
+                                hint: win.depthChoiceDetail(win.depthBackend,
+                                                            win.depthModel)
                                 ComboBox {
-                                    id: backendBox
+                                    id: depthBox
                                     Layout.fillWidth: true
                                     textRole: "text"
-                                    valueRole: "key"
-                                    model: win.backendChoices
-                                    currentIndex: win.backendIndex(
-                                        win.depthBackend)
+                                    Layout.minimumWidth: 260
+                                    model: win.depthChoices
+                                    currentIndex: win.depthChoiceIndex(
+                                        win.depthBackend, win.depthModel)
                                     onActivated: {
-                                        if (win.backendUsable(currentValue))
-                                            win.depthBackend = currentValue
-                                        else
-                                            currentIndex = win.backendIndex(
-                                                win.depthBackend)
+                                        var c = win.depthChoices[currentIndex]
+                                        if (!win.backendUsable(c.backend)) {
+                                            currentIndex = win.depthChoiceIndex(
+                                                win.depthBackend, win.depthModel)
+                                            return
+                                        }
+                                        win.depthBackend = c.backend
+                                        // Variant left alone for the entries
+                                        // that have none, so switching to
+                                        // Depth Pro and back does not lose it.
+                                        if (c.model !== "")
+                                            win.depthModel = c.model
                                     }
 
                                     // Unavailable backends stay listed but
@@ -1101,10 +1149,10 @@ ApplicationWindow {
                                     // leave no clue they exist; letting them
                                     // be chosen just moves the failure later.
                                     delegate: ItemDelegate {
-                                        width: backendBox.width
-                                        enabled: win.backendUsable(modelData.key)
+                                        width: depthBox.width
+                                        enabled: win.backendUsable(modelData.backend)
                                         highlighted:
-                                            backendBox.highlightedIndex === index
+                                            depthBox.highlightedIndex === index
                                         contentItem: ColumnLayout {
                                             spacing: 0
                                             Text {
@@ -1118,7 +1166,7 @@ ApplicationWindow {
                                             Text {
                                                 visible: !enabled
                                                 text: win.backendDetail(
-                                                    modelData.key)
+                                                    modelData.backend)
                                                 color: Theme.warn
                                                 font.pixelSize: Theme.fontS
                                                 elide: Text.ElideRight
@@ -1126,50 +1174,23 @@ ApplicationWindow {
                                             }
                                         }
                                     }
-                                }
-                            }
-
-                            // What "model" means depends on the backend, so
-                            // only the row that applies is shown. That makes
-                            // the relationship self-teaching: the ONNX path
-                            // appears once the ONNX backend is selected, which
-                            // is the only configuration that reads it.
-                            Row2 {
-                                label: "Model"
-                                // Hidden for the backends that have no variant
-                                // worth choosing: ONNX takes a graph path
-                                // instead, Depth Pro ships one checkpoint, and
-                                // the recommended entry picks its own.
-                                visible: win.depthBackend !== "onnx"
-                                         && win.depthBackend !== "depth-pro"
-                                         && win.depthBackend !== ""
-                                hint: win.depthBackend === "depth-anything-v3"
-                                      ? (win.depthModel === "small"
-                                         ? "The default, and capacity does not help here: Large measured worse on the chair gaps for 13× the download. 105 MB."
-                                         : win.depthModel === "base"
-                                           ? "Marginally flatter floors than Small, four times the download, and no better anywhere else. 413 MB."
-                                           : "Measured worse than Small on the chair gaps. Offered for completeness. 1.4 GB.")
-                                      : win.depthModel === "base"
-                                      ? "The default. Measured best on 8K footage: lowest depth noise and 40% less flicker than Small. Downloads ~400 MB on first use."
-                                      : win.depthModel === "large"
-                                        ? "Twice Base's extra cost and measured no better on 8K footage. Downloads ~1.3 GB on first use."
-                                        : "The sharpest, and the noisiest — that noise is what makes thin structures shift between frames. About 9% faster overall than Base."
-                                ComboBox {
-                                    Layout.fillWidth: true
-                                    textRole: "label"
-                                    valueRole: "key"
-                                    currentIndex: win.modelIndex(win.depthModel)
-                                    model: win.modelChoices
-                                    onActivated: win.depthModel = currentValue
 
                                     // Same reason as the quality preset: the
                                     // control severs its own binding when
                                     // activated, so re-apply it explicitly.
                                     Connections {
                                         target: win
+                                        function onDepthBackendChanged() {
+                                            depthBox.currentIndex =
+                                                win.depthChoiceIndex(
+                                                    win.depthBackend,
+                                                    win.depthModel)
+                                        }
                                         function onDepthModelChanged() {
-                                            parent.currentIndex =
-                                                win.modelIndex(win.depthModel)
+                                            depthBox.currentIndex =
+                                                win.depthChoiceIndex(
+                                                    win.depthBackend,
+                                                    win.depthModel)
                                         }
                                     }
                                 }

@@ -475,15 +475,19 @@ def test_onnx_path_ignored_for_torch_backends():
     assert "--onnx-model" not in argv
 
 
-@pytest.mark.parametrize("backend,model_row,onnx_row", [
-    ("auto", True, False),
-    ("depth-anything", True, False),
-    ("video-depth-anything", True, False),
-    ("onnx", False, True),
+@pytest.mark.parametrize("backend,onnx_row", [
+    ("auto", False),
+    ("depth-anything", False),
+    ("video-depth-anything", False),
+    ("depth-pro", False),
+    ("depth-anything-v3", False),
+    ("onnx", True),
 ])
-def test_model_rows_follow_the_backend(backend, model_row, onnx_row):
-    """Only the row that applies is shown, which is what teaches the user that
-    a custom ONNX model needs the ONNX backend selected."""
+def test_the_onnx_path_row_follows_the_backend(backend, onnx_row):
+    """Backend and variant are one control now, so there is no separate model
+    row to appear and disappear. The ONNX path still is its own row, and still
+    only when it applies -- which is what teaches the user that a custom graph
+    needs the ONNX backend selected."""
     import subprocess
     import sys
 
@@ -500,7 +504,8 @@ def test_model_rows_follow_the_backend(backend, model_row, onnx_row):
         (parts[1], parts[2] == "True")
         for parts in (line.split("\t") for line in proc.stdout.splitlines())
         if parts[0] == "ROW")
-    assert rows["Model"] is model_row
+    assert "Model" not in rows, "the separate Model row should be gone"
+    assert rows["Depth model"] is True, "the combined control is always shown"
     assert rows["ONNX model"] is onnx_row
 
 
@@ -1382,22 +1387,24 @@ def test_photo_mode_hides_what_cannot_apply(tmp_path):
 
 def test_photo_mode_keeps_what_does_apply(tmp_path):
     props, rows = _dump(f"inputPath={_still(tmp_path)}")
-    for label in ("Format", "Strength", "Gradient limit", "Backend",
+    for label in ("Format", "Strength", "Gradient limit", "Depth model",
                   "Depth tiles", "Device"):
         assert rows[label] is True, f"{label} should still be shown"
 
 
-def test_the_model_row_appears_only_where_there_is_a_model_to_choose(tmp_path):
-    """Recommended and Depth Pro have no variant worth offering -- one picks
-    its own, the other ships a single checkpoint. A dropdown that changes
-    nothing is worse than no dropdown, because it implies it changes
-    something."""
+def test_one_control_covers_every_backend(tmp_path):
+    """Backend and variant used to be two rows, and the second vanished for
+    the backends with nothing to choose -- Recommended picks its own, Depth
+    Pro ships one checkpoint. One list of concrete pairs has no such gap, so
+    the control is there whatever is selected and never offers a dropdown
+    that changes nothing."""
     still = _still(tmp_path)
-    for backend, shown in (("", False), ("depth-pro", False),
-                           ("depth-anything-v3", True),
-                           ("depth-anything", True)):
+    for backend in ("", "depth-pro", "depth-anything-v3", "depth-anything",
+                    "video-depth-anything", "onnx"):
         _, rows = _dump(f"inputPath={still}", f"depthBackend={backend}")
-        assert rows["Model"] is shown, f"{backend!r} -> Model {rows['Model']}"
+        assert rows["Depth model"] is True, f"{backend!r} lost the control"
+        assert "Model" not in rows, f"{backend!r} still has the old Model row"
+        assert "Backend" not in rows, f"{backend!r} still has the old Backend row"
 
 
 def test_a_video_still_shows_the_video_controls(tmp_path):
