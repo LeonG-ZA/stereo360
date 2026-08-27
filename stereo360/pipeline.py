@@ -45,6 +45,15 @@ def _eyes_warped(left_share: float) -> int:
     return 1 if (f <= 0.0 or f >= 1.0) else 2
 
 
+def _eye_strengths(f: float, strength: float) -> tuple:
+    """The baselines `stereo_pair` will actually warp at, for this share."""
+    if f <= 0.0:
+        return (strength,)
+    if f >= 1.0:
+        return (-strength,)
+    return (-f * strength, (1.0 - f) * strength)
+
+
 def stereo_pair(
     frame: np.ndarray,
     disp: np.ndarray,
@@ -104,12 +113,49 @@ def stereo_pair(
     # *raw* depth the fill stage reads, and normalising first would hand the
     # fill a different field. `normalize_inv_depth` consumes its argument, so
     # both fields are copied rather than scaled in place under the caller.
-    if kw.get("normalize", True):
+    hoisted = kw.get("normalize", True)
+    if hoisted:
         disp = warp.normalize_inv_depth(disp.copy())
         if bands is not None:
             bands = bands._replace(
                 smooth=warp.normalize_inv_depth(bands.smooth.copy()))
         kw = dict(kw, normalize=False)
+
+    # The foreground erosion and the gradient clamp are the same story: both
+    # depend only on the depth field, and the warp does them per call, so a
+    # frame runs each four times over two distinct fields. On the numpy warp
+    # they are 29% of the pair at 8K (0.65 s eroding, 0.82 s clamping), which
+    # makes this worth more on a machine without a CUDA torch -- Windows on an
+    # AMD or Intel GPU, where depth is on DirectML and the warp is on the
+    # processor -- than on the GPU path, where they are already on the device.
+    #
+    # Deliberately not done when the warp is on the GPU: there they run inside
+    # `warp_torch`, and pre-applying the numpy versions instead would be
+    # trusting two implementations to agree bit for bit, which is a different
+    # claim from the one this makes.
+    #
+    # The clamp's threshold is a function of |baseline|, so the two eyes only
+    # share it when they share a baseline magnitude -- true at the default
+    # even split, not at every share. And only with the detail split on: with
+    # it off the inner warp inpaints, and `dn_pre` is then read from the
+    # depth *before* erosion, which pre-eroding would quietly replace.
+    fg_erode = kw.get("fg_erode", 2)
+    grad = kw.get("gradient_limit", 0.0)
+    mags = {round(abs(s), 12) for s in _eye_strengths(f, strength)}
+    if (hoisted and bands is not None and warp.gpu_device() is None
+            and len(mags) == 1 and (fg_erode > 0 or grad > 0.0)):
+        width = disp.shape[1]
+        baseline = mags.pop() * warp._BASELINE_SCALE
+        for field in (disp, bands.smooth):
+            if fg_erode > 0:
+                warp._erode_foreground(field, fg_erode)
+            # After the erosion, which re-sharpens boundaries and would
+            # otherwise undo the clamp -- the order the warp itself uses.
+            if grad > 0.0 and baseline != 0.0:
+                critical = (2.0 * np.pi) / (abs(baseline) * width)
+                warp.limit_disparity_gradient(field, grad * critical,
+                                              grad * critical * 2.0)
+        kw = dict(kw, fg_erode=0, gradient_limit=0.0)
 
     def eye(s):
         return warp.right_eye_banded(frame, disp.copy(), s, detail_sigma,
