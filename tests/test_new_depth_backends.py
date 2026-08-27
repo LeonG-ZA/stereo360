@@ -1,7 +1,7 @@
 """The two backends that became the defaults, without downloading either.
 
 Everything here drives the real batching, reciprocal and resize code through
-a stand-in inference session. The models themselves are 105 MB and 3.6 GB, so
+a stand-in inference session. The models themselves are 105 MB and 1.9 GB, so
 a test that fetched them would be a test nobody runs.
 """
 
@@ -114,10 +114,17 @@ def test_estimate_is_estimate_chunk_of_one():
 
 
 def test_depth_pro_is_declared_as_the_download_it_is():
-    """3.6 GB arriving unannounced mid-render is the failure this guards."""
+    """1.9 GB arriving unannounced mid-render is the failure this guards.
+
+    Bounded on both sides rather than just "large". The figure read 3600 for
+    a long time, which is not the download at all -- apple/DepthPro-hf is one
+    1904 MB safetensors file -- but is close to the model's peak VRAM, so the
+    two had been conflated. An upper bound is what would have caught that.
+    """
     from stereo360.depth import depth_pro
 
-    assert depth_pro.DOWNLOAD_MB > 3000
+    assert 1500 < depth_pro.DOWNLOAD_MB < 2500, (
+        f"{depth_pro.DOWNLOAD_MB} MB does not match the 1904 MB the repo holds")
     assert depth_pro.DEFAULT_MODEL == "apple/DepthPro-hf"
 
 

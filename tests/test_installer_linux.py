@@ -217,10 +217,10 @@ def test_the_warm_up_caches_the_model_the_app_actually_defaults_to():
 
 def test_depth_pro_is_not_pre_fetched_but_is_announced():
     text = INSTALLER.read_text(encoding="ascii")
-    assert "3.6 GB" in text
+    assert "1.9 GB" in text
     warm = text[text.index('step "Fetching the depth model"'):]
     warm = warm[:warm.index('step "Creating launchers')]
-    assert "DepthPro" not in warm, "pre-fetching 3.6 GB on every install"
+    assert "DepthPro" not in warm, "pre-fetching 1.9 GB on every install"
 
 
 # ------------------------------------------- which ONNX Runtime, and on what

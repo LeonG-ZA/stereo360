@@ -948,7 +948,7 @@ if [ $? -ne 0 ]; then
     warn "could not pre-fetch the model; it will download on first use"
 else
     good "Depth Anything V3 small cached (the video default)"
-    detail "Depth Pro, for stills, downloads on first use -- about 3.6 GB"
+    detail "Depth Pro, for stills, downloads on first use -- about 1.9 GB"
 fi
 
 # ---- launchers ------------------------------------------------------------

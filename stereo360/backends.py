@@ -113,8 +113,9 @@ def probe_backends(onnx_model: str = DEFAULT_ONNX_MODEL) -> List[Availability]:
 
     out.append(Availability(
         "depth-pro", torch_ok,
-        "Sharpest thin structures; the stills default. Downloads 3.6 GB on "
-        "first use" if torch_ok
+        "Sharpest thin structures; the stills default. Downloads 1.9 GB on "
+        "first use, and wants a GPU: ~3.7 GB of VRAM, against 9.4 GB of RAM "
+        "and half an hour a frame on a processor" if torch_ok
         else "Needs torch and transformers (requirements.txt)"))
 
     out.append(Availability(
@@ -208,7 +209,7 @@ def resolve_depth_backend(requested: Optional[str], is_image: bool,
 
     Falls back when the preferred model cannot run here, because these two
     defaults carry dependencies the others do not -- onnxruntime for one,
-    3.6 GB of weights for the other -- and a machine without them should still
+    1.9 GB of weights for the other -- and a machine without them should still
     convert something rather than stop.
 
     Two checks, because "installed" and "usable" are not the same thing.

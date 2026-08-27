@@ -189,7 +189,7 @@ def test_an_explicit_backend_survives_the_default():
 
 def test_an_unavailable_default_falls_back_rather_than_failing(monkeypatch):
     """These two defaults carry dependencies the others do not -- onnxruntime
-    for one, 3.6 GB of weights for the other. A machine without them should
+    for one, 1.9 GB of weights for the other. A machine without them should
     still convert something."""
     from stereo360 import backends
 

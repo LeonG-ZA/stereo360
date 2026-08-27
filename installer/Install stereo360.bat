@@ -882,7 +882,7 @@ $env:PATH = "$ffDest;$env:PATH"
 # model nothing would load. V3 small is 105 MB and is what a video render
 # reaches for.
 #
-# Depth Pro, the stills default, is deliberately not pre-fetched: 3.6 GB is too
+# Depth Pro, the stills default, is deliberately not pre-fetched: 1.9 GB is too
 # much to put on someone who may only ever convert video, and the tool
 # announces the download before it starts. Skipping it is the reason a first
 # still conversion is slow, which is a trade rather than an oversight.
@@ -900,7 +900,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Warn 'could not pre-fetch the model; it will download on first use'
 } else {
     Write-Good 'Depth Anything V3 small cached (the video default)'
-    Write-Detail 'Depth Pro, for stills, downloads on first use -- about 3.6 GB'
+    Write-Detail 'Depth Pro, for stills, downloads on first use -- about 1.9 GB'
 }
 Remove-Item $warm -ErrorAction SilentlyContinue
 
