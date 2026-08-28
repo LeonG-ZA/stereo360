@@ -52,12 +52,25 @@ def decisions(**params) -> dict:
     return out
 
 
-def test_the_installer_is_one_file():
+def test_the_windows_installer_needs_no_companion_file():
     """One file, because two invited being separated -- someone downloads the
-    .bat and not the .ps1, or moves only the one they were told to click."""
+    .bat and not the .ps1, or moves only the one they were told to click.
+
+    The Linux installer sits beside it and does not break that: it is a
+    separate entry point for another platform, not the second half of this
+    one. What must never appear is a file the .bat depends on, which is why
+    the .ps1 check is the assertion carrying the meaning -- the payload lives
+    inside the .bat and is unpacked from it.
+
+    The listing is pinned too, so a new file here is a decision rather than an
+    accident. This asserted a single-file directory until the Linux installer
+    arrived in 34c3ddb and left it failing on main.
+    """
     assert INSTALLER.exists()
     assert sorted(p.name for p in INSTALLER.parent.iterdir()) == \
-        ["Install stereo360.bat"]
+        ["Install stereo360.bat", "install-stereo360.sh"]
+    assert not list(INSTALLER.parent.glob("*.ps1")), \
+        "the PowerShell must stay inside the .bat, not beside it"
 
 
 def test_the_payload_is_readable_rather_than_encoded():
