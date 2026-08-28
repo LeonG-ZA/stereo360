@@ -635,9 +635,32 @@ def batch_inputs(source: str, ffmpeg_io) -> list:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            out.append(line if os.path.isabs(line)
-                       else os.path.join(base, line))
+            out.append(_batch_path(line, base))
     return out
+
+
+def _batch_path(line: str, base: str) -> str:
+    """One line of a batch list, as a path.
+
+    Surrounding quotes are stripped, because a list is written by pasting and
+    the usual way to get a path onto the clipboard on Windows -- Explorer's
+    "Copy as path", and shift-right-click's "Copy as path" -- wraps it in
+    double quotes. Left in place they broke the run twice over: the leading
+    quote makes `isabs` false, so an absolute path was joined onto the list's
+    own directory, and the trailing one lands inside the extension, so
+    `.JPG"` is not a known still and every photograph was routed to the video
+    path. What the user saw was ffmpeg being asked to demux a JPEG and
+    reporting it might be corrupt (issue #9).
+
+    Only a matched pair is removed, the way a shell would. A file whose name
+    genuinely begins and ends with a quote is legal on Linux and impossible on
+    Windows, and is not worth breaking the paste-a-path case for.
+    """
+    import os
+
+    if len(line) >= 2 and line[0] == line[-1] and line[0] in ("\"", "'"):
+        line = line[1:-1].strip()
+    return line if os.path.isabs(line) else os.path.join(base, line)
 
 
 def batch_output(src: str, out_dir: str, output_mode: str, suffix, vr_naming,
@@ -725,6 +748,13 @@ def _run_batch(args, reporter, cancel, backends, pipeline):
         if args.skip_existing and os.path.exists(dst):
             print(f"{head}  skipped, {os.path.basename(dst)} exists")
             skipped += 1
+            continue
+        if not os.path.exists(src):
+            # Otherwise this reaches ffmpeg, which reports a file it never
+            # opened as possibly corrupt -- the confusing half of issue #9.
+            print(f"{head}  FAILED: no such file: {src}")
+            failed += 1
+            failures.append(src)
             continue
         args.input, args.output = src, dst
         args.depth_backend, args.depth_tiles = asked

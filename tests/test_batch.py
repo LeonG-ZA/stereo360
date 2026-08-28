@@ -54,6 +54,55 @@ def test_an_absolute_path_in_a_list_is_left_alone(tmp_path):
         str(tmp_path / "elsewhere" / "a.mp4")]
 
 
+def test_a_pasted_path_keeps_its_quotes_out_of_the_filename(tmp_path):
+    """Issue #9. A list is written by pasting, and the usual way to get a path
+    onto the clipboard on Windows -- Explorer's "Copy as path" -- wraps it in
+    double quotes.
+
+    Left in, they broke it twice: the leading quote makes `isabs` false, so an
+    absolute path was joined onto the list's own directory, and the trailing
+    one lands inside the extension, so `.JPG"` is not a known still and every
+    photograph was routed to the video path. The user saw ffmpeg being asked
+    to demux a JPEG and reporting it might be corrupt.
+    """
+    photo = tmp_path / "CAM_0002_HDR.JPG"
+    photo.write_bytes(b"")
+    lst = tmp_path / "list.txt"
+    lst.write_text('"%s"' % photo + "\n")
+
+    got = cli.batch_inputs(str(lst), ffmpeg_io)
+
+    assert got == [str(photo)]
+    assert ffmpeg_io.is_image_path(got[0]), \
+        "a quote in the extension sends a still down the video path"
+    assert os.path.isfile(got[0])
+
+
+def test_single_quotes_come_off_too(tmp_path):
+    """Same paste, a shell that quotes the other way."""
+    photo = tmp_path / "a.JPG"
+    photo.write_bytes(b"")
+    lst = tmp_path / "list.txt"
+    lst.write_text("'%s'" % photo + "\n")
+    assert cli.batch_inputs(str(lst), ffmpeg_io) == [str(photo)]
+
+
+def test_only_a_matched_pair_is_stripped(tmp_path):
+    """A lone quote is part of the name, not a wrapper -- stripping it would
+    invent a path that was never written."""
+    lst = tmp_path / "list.txt"
+    lst.write_text('"a.mp4' + "\n")
+    assert cli.batch_inputs(str(lst), ffmpeg_io) == [str(tmp_path / '"a.mp4')]
+
+
+def test_a_quoted_relative_path_is_still_relative_to_the_list(tmp_path):
+    """The quotes come off first, so the isabs decision sees the real path."""
+    (tmp_path / "a.mp4").write_bytes(b"")
+    lst = tmp_path / "list.txt"
+    lst.write_text('"a.mp4"' + "\n")
+    assert cli.batch_inputs(str(lst), ffmpeg_io) == [str(tmp_path / "a.mp4")]
+
+
 def test_a_directory_takes_the_media_in_it_and_nothing_else(tmp_path):
     for name in ("b.mp4", "a.mov", "still.jpg", "notes.txt", "list.txt"):
         (tmp_path / name).write_bytes(b"")
