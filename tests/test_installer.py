@@ -52,12 +52,25 @@ def decisions(**params) -> dict:
     return out
 
 
-def test_the_installer_is_one_file():
+def test_the_windows_installer_needs_no_companion_file():
     """One file, because two invited being separated -- someone downloads the
-    .bat and not the .ps1, or moves only the one they were told to click."""
+    .bat and not the .ps1, or moves only the one they were told to click.
+
+    The Linux installer sits beside it and does not break that: it is a
+    separate entry point for another platform, not the second half of this
+    one. What must never appear is a file the .bat depends on, which is why
+    the .ps1 check is the assertion carrying the meaning -- the payload lives
+    inside the .bat and is unpacked from it.
+
+    The listing is pinned too, so a new file here is a decision rather than an
+    accident. This asserted a single-file directory until the Linux installer
+    arrived in 34c3ddb and left it failing on main.
+    """
     assert INSTALLER.exists()
     assert sorted(p.name for p in INSTALLER.parent.iterdir()) == \
-        ["Install stereo360.bat"]
+        ["Install stereo360.bat", "install-stereo360.sh"]
+    assert not list(INSTALLER.parent.glob("*.ps1")), \
+        "the PowerShell must stay inside the .bat, not beside it"
 
 
 def test_the_payload_is_readable_rather_than_encoded():
@@ -564,3 +577,37 @@ def test_an_existing_install_is_read_from_the_manifest_first():
     install it describes."""
     text = payload()
     assert "if ($m.appVersion) { $version = $m.appVersion }" in text
+
+def test_the_cuda_install_replaces_a_torch_that_is_already_there():
+    """It shipped without this and fell all the way back to the CPU.
+
+    Core dependencies used to be installed first, requirements.txt asks for
+    `torch>=2.2`, so a CPU wheel landed before the accelerator step -- and
+    that step's pip install reported "requirement already satisfied" and kept
+    it. The ordering is fixed, but the ordering alone does not close it: an
+    upgrade deliberately keeps the private Python and everything pip installed
+    under it, so the second run meets the same already-satisfied torch.
+    """
+    text = payload()
+    # anchored on the step headers: "'directml' {" also appears in an earlier
+    # switch, so slicing between the branch labels picks up nothing.
+    start = text.index('Write-Step "Installing the accelerator')
+    end = text.index("Write-Step 'Checking the accelerator actually runs'")
+    cuda = text[start:end]
+    cuda = cuda[cuda.index("'cuda' {"):cuda.index("'directml' {")]
+    assert "--force-reinstall" in cuda,         "the CUDA install can be a no-op over an existing torch"
+    assert "Test-CudaReally" in cuda,         "no pre-check, so every upgrade re-downloads 2.5 GB"
+
+
+def test_a_failed_cuda_falls_back_to_directml_not_the_cpu():
+    """Reaching the fallback means an NVIDIA card was found and CUDA would not
+    run on it. The card is still a Direct3D 12 device, and the installer's own
+    measurement on an RTX 5070 Ti is 1.91 s on the CPU provider against 0.15 s
+    on DirectML. Falling back to 'cpu' also skipped the ONNX provider check
+    and wrote 'cpu' into the manifest while DirectML sat there working."""
+    text = payload()
+    start = text.index("Write-Step 'Checking the accelerator actually runs'")
+    block = text[start:start + 3000]
+    fallback = block[block.index("if (-not $check.ok)"):]
+    assert "$acc.kind = 'directml'" in fallback
+    assert "$acc.kind = 'cpu'" not in fallback
