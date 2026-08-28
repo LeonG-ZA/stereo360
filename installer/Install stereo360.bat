@@ -739,7 +739,31 @@ Write-Good "stereo360 in $dest"
 Write-Step "Installing the accelerator ($($acc.kind))"
 switch ($acc.kind) {
     'cuda' {
-        Invoke-Pip $py @('install', '--no-warn-script-location', '--index-url', $acc.index, 'torch', 'torchvision') 'PyTorch'
+        # --force-reinstall, and a pre-check so it is not paid needlessly.
+        #
+        # Without the force, this line silently does nothing whenever a torch
+        # is already installed: pip reports "requirement already satisfied"
+        # and keeps it, whatever build it is. That is not hypothetical. It
+        # shipped: core dependencies used to be installed before this step,
+        # requirements.txt asks for `torch>=2.2`, so the CPU wheel landed
+        # first and this line no-opped. Test-CudaReally then correctly failed
+        # and the install fell all the way back to the CPU -- on a machine
+        # with an RTX 5070 Ti that had been detected perfectly. It is the same
+        # trap the README documents for manual installs, reached from the
+        # other side, and the ordering fix alone does not close it: an upgrade
+        # keeps the private Python and everything pip installed under it, so
+        # the second run meets exactly the same already-satisfied torch.
+        #
+        # The pre-check keeps the 2.5 GB off an upgrade that does not need it,
+        # which is what the ordering originally protected.
+        $pre = Test-CudaReally $py
+        if ($pre.ok) {
+            Write-Good "PyTorch already runs on this GPU -- keeping it"
+            Write-Detail $pre.detail
+        } else {
+            Invoke-Pip $py @('install', '--no-warn-script-location', '--force-reinstall',
+                             '--index-url', $acc.index, 'torch', 'torchvision') 'PyTorch'
+        }
         # DirectML on an NVIDIA card, which looks wrong and is not.
         #
         # The two defaults use different runtimes: Depth Pro is torch, and gets
@@ -794,9 +818,27 @@ if ($acc.kind -eq 'cuda') {
             $check = Test-CudaReally $py
         }
         if (-not $check.ok) {
-            Write-Warn 'falling back to CPU. Depth will be roughly ten times slower.'
+            # DirectML, not the CPU. Getting here means an NVIDIA card was
+            # detected and CUDA could not be made to run on it -- but the card
+            # is still a Direct3D 12 device, and DirectML does not care whose
+            # GPU it is. Measured on an RTX 5070 Ti, six cubemap faces in one
+            # call: 1.91 s on the CPU provider against 0.15 s on DirectML.
+            # Falling back to 'cpu' threw that away, and worse, it skipped the
+            # ONNX provider check below and wrote 'cpu' into the manifest and
+            # the banner while onnxruntime-directml sat there working -- so
+            # the machine ran depth on the GPU and reported that it did not.
+            #
+            # torch still ends up CPU-only, so the torch backends and the GPU
+            # warp are genuinely lost. That is what the warning says.
+            Write-Warn 'CUDA could not be made to run here. Falling back to'
+            Write-Warn 'DirectML, which reaches this GPU through Direct3D 12.'
+            Write-Warn 'Depth stays on the GPU; the warp and Depth Pro do not.'
             Invoke-Pip $py @('install', '--no-warn-script-location', '--force-reinstall', 'torch', 'torchvision') 'PyTorch (CPU)'
-            $acc.kind = 'cpu'
+            # onnxruntime-directml and onnx arrived with the cuda branch;
+            # onnxscript is the exporter's, and the DirectML model is built
+            # from it a few steps below.
+            Invoke-Pip $py @('install', '--no-warn-script-location', 'onnxscript') 'ONNX exporter'
+            $acc.kind = 'directml'
         } else {
             Write-Good $check.detail
         }
