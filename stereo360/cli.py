@@ -783,7 +783,41 @@ def _run(args, reporter, cancel, backends, pipeline, built_cache=None):
     )
     if built_cache is not None:
         built_cache[cache_key] = built
+    if not args.passthrough:
+        _report_warp_device(reporter)
     return _render(args, reporter, cancel, pipeline, built)
+
+
+def _report_warp_device(reporter) -> None:
+    """Say where the *warp* runs, not only where depth runs.
+
+    The depth banner describes half a frame. The warp is most of the other
+    half -- roughly 70% once depth is on the GPU -- it makes its own device
+    decision, from torch alone, and it used to make it in silence. So an
+    install with a GPU depth runtime beside a CPU-only torch printed
+    "GPU accelerated: Depth Anything V3 on provider 'DmlExecutionProvider'"
+    and was believed, while the majority of every frame ran on the processor.
+
+    That is precisely the failure `autodetect.banner` exists to prevent, and
+    it was only ever prevented for depth. Reported here rather than inside the
+    warp because it must be said once, before the first frame, next to the
+    line it qualifies -- not once per frame, and not after the wait.
+    """
+    from . import warp
+
+    # Deliberately not guarded: STEREO360_GPU_WARP=1 with no device raises,
+    # and failing here beats failing hours into a render.
+    device = warp.gpu_device()
+    if device:
+        reporter.info(f"GPU accelerated: warp on {device}",
+                      stage="warp", device=device)
+    else:
+        reporter.warning(
+            "**WARNING** warp not being GPU accelerated: torch reports no "
+            "CUDA or MPS device, so the warp runs on the CPU. It is roughly "
+            "70% of each frame. Depth may still be on the GPU -- the line "
+            "above describes depth only. Please read the README file.",
+            stage="warp", device="cpu")
 
 
 def _render(args, reporter, cancel, pipeline, built):
