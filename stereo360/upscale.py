@@ -133,6 +133,11 @@ def models(install: Install) -> List[Model]:
     binary fetches them, which was confirmed by running Medium Halo without
     ever opening the Topaz application.
     """
+    return _read_models(install, _UPSCALE_TYPE)
+
+
+def _read_models(install: Install, model_type: int) -> List[Model]:
+    """Every enabled model of one `modelType`, newest version of each."""
     best: Dict[str, Model] = {}
     try:
         names = os.listdir(install.models)
@@ -146,7 +151,7 @@ def models(install: Install) -> List[Model]:
                 d = json.load(fh)
         except (OSError, ValueError):
             continue
-        if not isinstance(d, dict) or d.get("modelType") != _UPSCALE_TYPE:
+        if not isinstance(d, dict) or d.get("modelType") != model_type:
             continue
         if not d.get("enabled", 1):
             continue
@@ -244,3 +249,203 @@ def describe(width: int = 0) -> dict:
         "offered": offered_for(width) if width else True,
         "ffmpeg": install.ffmpeg,
     }
+
+
+#: Artemis Medium Quality. Chosen after looking at seven renders in a headset,
+#: not from the scorecard -- it reads as the most natural on grass and foliage,
+#: which is what an outdoor 360 frame is mostly made of. Note that it is one of
+#: the less temporally settled models (122% of the real footage's own
+#: frame-to-frame movement, against 104% for Artemis High Quality); if a render
+#: shimmers in motion, `ahq` is the first thing to try.
+DEFAULT_UPSCALE = "amq"
+
+#: Chronos. Apollo is the other family; both are `tvai_fi` models.
+DEFAULT_INTERPOLATE = "chr"
+
+#: How many copies of a still to hand the filter. It refuses to emit anything
+#: for an image input -- a lone PNG and a PNG looped twelve times both consume
+#: their frames and produce nothing, and an explicit `format=yuv420p` in the
+#: chain does not help, so it is the demuxer rather than the pixel format. The
+#: same still wrapped as a short video works, and the last frame is taken.
+WRAP_FRAMES = 12
+
+#: Preferred intermediate encoders, in order. The pre-pass writes a whole 8K
+#: intermediate that the converter then reads, so this wants to be fast and
+#: near-transparent rather than perfect: NVENC at a high quality is both, and
+#: ffv1 is the fallback where there is no NVIDIA card. Topaz's ffmpeg has no
+#: libx264 at all, which is why the obvious choice is absent.
+#: yuv420p is not incidental. Left to itself the chain hands back RGB, and the
+#: converter passes a source's colour tags through to its own encoder, where
+#: libx264 refuses `colorspace gbr` and the whole run dies at the last step --
+#: after the upscale has been paid for. It also matches what the final output
+#: is encoded as, so nothing is gained by carrying more here.
+_ENCODERS = (
+    ("hevc_nvenc", ("-rc", "constqp", "-qp", "16", "-preset", "p5",
+                    "-pix_fmt", "yuv420p")),
+    ("ffv1", ("-level", "3", "-pix_fmt", "yuv420p")),
+)
+
+
+def resolve(install: Install, wanted: str, kind: str = "up") -> Optional[Model]:
+    """A model from a short name ('amq') or an exact code ('amq-13')."""
+    want = (wanted or "").strip().lower()
+    if not want:
+        return None
+    pool = models(install) if kind == "up" else interpolators(install)
+    for m in pool:
+        if m.code.lower() == want:
+            return m
+    for m in pool:
+        if m.short.lower() == want:
+            return m
+    return None
+
+
+def interpolators(install: Install) -> List[Model]:
+    """Frame interpolation models -- `tvai_fi` rather than `tvai_up`.
+
+    Worth having for VR beyond what it is worth for a monitor: 30 fps judders
+    noticeably in a headset, where your head keeps moving even when the
+    footage does not, and there is no shutter to hide it.
+    """
+    return _read_models(install, model_type=2)
+
+
+def _encoder(install: Install) -> List[str]:
+    try:
+        out = subprocess.run([install.ffmpeg, "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=60,
+                             errors="replace").stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for name, opts in _ENCODERS:
+        if name in out:
+            return ["-c:v", name, *opts]
+    return ["-c:v", "ffv1", "-pix_fmt", "yuv420p"]
+
+
+def chain(up: Optional[Model] = None, scale: float = 2.0,
+          fi: Optional[Model] = None, fps: Optional[float] = None,
+          device: int = 0) -> str:
+    """The -vf for one Topaz pass.
+
+    Upscale before interpolation, deliberately. Both orders work; this one is
+    much cheaper, because the upscaler only sees the frames that were really
+    shot rather than the doubled set -- and the upscaler is the expensive half
+    (0.79 s a frame at 4K to 8K, against interpolation's fraction of that).
+    """
+    parts = []
+    if up is not None:
+        parts.append(f"tvai_up=model={up.code}:scale={scale:g}"
+                     f":device={device}:vram=1:instances=1")
+    if fi is not None:
+        rate = f":fps={fps:g}" if fps else ""
+        parts.append(f"tvai_fi=model={fi.code}:device={device}"
+                     f":vram=1:instances=1{rate}")
+    return ",".join(parts)
+
+
+_FRAME_RE = re.compile(r"frame=\s*(\d+)")
+
+
+class UpscaleError(RuntimeError):
+    """Topaz was asked to do something and could not."""
+
+
+def run(install: Install, src: str, dst: str, *,
+        up: Optional[Model] = None, scale: float = 2.0,
+        fi: Optional[Model] = None, fps: Optional[float] = None,
+        total: Optional[int] = None, reporter=None, cancel=None,
+        extra_in: Optional[List[str]] = None,
+        out_args: Optional[List[str]] = None) -> None:
+    """One Topaz pass over `src`, writing `dst`. Raises `UpscaleError`.
+
+    Runs before anything else in the pipeline touches the footage, and that
+    ordering is not negotiable: these models *invent* detail, so upscaling the
+    two eyes separately would invent different detail for each and hand the
+    viewer binocular rivalry rather than sharpness. Mono in, mono out, and the
+    stereo pass afterwards sees one consistent picture.
+    """
+    vf = chain(up, scale, fi, fps)
+    if not vf:
+        raise UpscaleError("nothing to do: no upscale or interpolation model")
+    cmd = [install.ffmpeg, "-hide_banner", "-nostdin", "-y",
+           *(extra_in or []), "-i", src, "-vf", vf,
+           *(out_args if out_args is not None else _encoder(install)), dst]
+    if reporter is not None:
+        reporter.start(total, stage="upscale")
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            env=install.env(), cwd=os.path.dirname(install.ffmpeg),
+            text=True, errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except OSError as e:
+        raise UpscaleError(f"could not start Topaz: {e}") from e
+
+    seen, tail = 0, []
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        tail.append(line.rstrip())
+        del tail[:-15]
+        low = line.lower()
+        if any(s in low for s in _AUTH_LOGIN):
+            proc.kill()
+            proc.wait(timeout=10)
+            raise UpscaleError(
+                "Topaz Video AI needs signing in again -- open it and sign in")
+        m = _FRAME_RE.search(line)
+        if m and reporter is not None:
+            n = int(m.group(1))
+            if n > seen:
+                reporter.advance(n - seen)
+                seen = n
+        if cancel is not None and cancel():
+            proc.kill()
+            proc.wait(timeout=10)
+            raise UpscaleError("cancelled")
+    code = proc.wait()
+    # A "%" means an image sequence, where the name is a pattern rather than a
+    # file and there is nothing to stat.
+    missing = "%" not in dst and not os.path.exists(dst)
+    if code != 0 or missing:
+        raise UpscaleError(f"Topaz exited {code}:\n" + "\n".join(tail[-6:]))
+    if reporter is not None:
+        reporter.finish(stage="upscale")
+
+
+def run_still(install: Install, src: str, dst: str, *,
+              up: Optional[Model] = None, scale: float = 2.0,
+              ffmpeg: str = "ffmpeg", reporter=None, cancel=None) -> None:
+    """The same, for a single image, via a short video it can accept.
+
+    The wrap exists because the filter will not emit anything for an image
+    input; see `WRAP_FRAMES`. The system ffmpeg builds it rather than Topaz's,
+    which has no libx264 -- and this pipeline already requires ffmpeg on PATH.
+    """
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="stereo360-upscale-")
+    wrapped = os.path.join(tmp, "in.mp4")
+    out_dir = os.path.join(tmp, "out")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        wrap = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y",
+                "-loop", "1", "-i", src, "-frames:v", str(WRAP_FRAMES),
+                "-r", "30", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", wrapped]
+        if subprocess.run(wrap, capture_output=True, text=True).returncode:
+            raise UpscaleError("could not prepare the still for Topaz")
+        run(install, wrapped, os.path.join(out_dir, "%03d.png"),
+            up=up, scale=scale, total=WRAP_FRAMES, reporter=reporter,
+            cancel=cancel, out_args=["-pix_fmt", "rgb24"])
+        frames = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
+        if not frames:
+            raise UpscaleError("Topaz produced no frames for this still")
+        # The last one: the models carry state across frames, so the final
+        # copy of a repeated still is the settled answer.
+        os.replace(os.path.join(out_dir, frames[-1]), dst)
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)

@@ -363,6 +363,32 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolution-dependent -- hevc_amf takes 3840x3840 and "
                         "refuses 7680x7680 -- so pass the *output* size, which "
                         "for top-bottom stereo is the source height doubled.")
+    p.add_argument("--upscale", nargs="?", const="amq", default=None,
+                   metavar="MODEL",
+                   help="Upscale the source before converting it, through "
+                        "Topaz Video AI if this machine has it. Off unless "
+                        "asked for, and the option does nothing on a machine "
+                        "without Topaz beyond saying so. MODEL is a Topaz "
+                        "short name or exact code -- amq, ahq, prob, ghq, "
+                        "amq-13 -- and defaults to amq, Artemis Medium "
+                        "Quality. Run --probe-upscalers to list what is "
+                        "installed. Only worth it below 8K: a 4K equirect "
+                        "carries 10.7 pixels per degree against a Quest 3's "
+                        "~25, and 2x lands near native.")
+    p.add_argument("--upscale-scale", type=float, default=2.0, metavar="F",
+                   help="How much to upscale by (default: 2, which takes 4K "
+                        "to 8K)")
+    p.add_argument("--interpolate", nargs="?", const="chr", default=None,
+                   metavar="MODEL",
+                   help="Raise the frame rate before converting, through the "
+                        "same Topaz install. MODEL defaults to chr, Chronos. "
+                        "Worth more in a headset than on a monitor: 30 fps "
+                        "judders when your head keeps moving and there is no "
+                        "shutter to hide it. Note it multiplies the frames "
+                        "the stereo pass then has to convert.")
+    p.add_argument("--interpolate-fps", type=float, default=0.0, metavar="F",
+                   help="Frame rate to interpolate to (default: 0, meaning "
+                        "leave it to Topaz, which doubles)")
     p.add_argument("--probe-upscalers", action="store_true",
                    help="Print whether Topaz Video AI is installed here, "
                         "whether it is signed in, and which upscaling models "
@@ -796,8 +822,95 @@ def _run_batch(args, reporter, cancel, backends, pipeline):
     return 1 if failed else 0
 
 
+def _topaz_prepass(args, reporter, cancel, pipeline, is_image):
+    """Upscale and/or interpolate the source first, returning what to convert.
+
+    Returns (path, temporary) -- the path to feed the converter, and whether
+    it needs deleting afterwards. Returns the original input untouched when
+    nothing was asked for, so the ordinary path costs one attribute lookup.
+
+    Before the stereo pass, never after, and never per eye. These models
+    invent detail rather than recovering it, so running one on each eye would
+    invent *different* detail for each and hand the viewer binocular rivalry
+    instead of sharpness. Mono in, mono out, one consistent picture to convert.
+    """
+    if not getattr(args, "upscale", None) and not getattr(args, "interpolate", None):
+        return args.input, False
+
+    import os
+
+    from . import upscale as _u
+
+    install = _u.find()
+    if install is None:
+        raise SystemExit(
+            "--upscale/--interpolate need Topaz Video AI, which is not "
+            "installed here. Everything else works without it.")
+    auth = _u.auth_state(install)
+    if auth == "login":
+        raise SystemExit(
+            "Topaz Video AI is installed but not signed in. Please open it "
+            "and sign in, then run this again.")
+
+    up = fi = None
+    if args.upscale:
+        up = _u.resolve(install, args.upscale, "up")
+        if up is None:
+            raise SystemExit(f"No Topaz upscaling model called {args.upscale!r}. "
+                             f"Run --probe-upscalers to see what is installed.")
+        try:
+            w = pipeline.ffmpeg_io.probe(args.input).width
+        except Exception:                                   # noqa: BLE001
+            w = 0            # unreadable here is the converter's problem
+        if w and not _u.offered_for(w):
+            raise SystemExit(
+                f"This source is already {w} wide, so upscaling it would land "
+                f"past 8K for no gain a headset can show. Convert it as it is.")
+    if args.interpolate:
+        fi = _u.resolve(install, args.interpolate, "fi")
+        if fi is None:
+            raise SystemExit(
+                f"No Topaz interpolation model called {args.interpolate!r}.")
+
+    what = " and ".join(x for x in (up and up.name, fi and fi.name) if x)
+    reporter.info(f"Topaz pre-pass: {what}", stage="upscale",
+                  model=(up or fi).code)
+
+    base = os.path.splitext(args.output or args.input)[0]
+    if is_image:
+        dst = base + ".upscaled.png"
+        _u.run_still(install, args.input, dst, up=up,
+                     scale=args.upscale_scale, reporter=reporter,
+                     cancel=cancel)
+    else:
+        dst = base + ".upscaled.mkv"
+        _u.run(install, args.input, dst, up=up, scale=args.upscale_scale,
+               fi=fi, fps=(args.interpolate_fps or None), reporter=reporter,
+               cancel=cancel)
+    return dst, True
+
+
 def _run(args, reporter, cancel, backends, pipeline, built_cache=None):
     is_image = pipeline.ffmpeg_io.is_image_path(args.input)
+    original_input, prepared = args.input, False
+    try:
+        args.input, prepared = _topaz_prepass(args, reporter, cancel,
+                                              pipeline, is_image)
+        return _run_converted(args, reporter, cancel, backends, pipeline,
+                              built_cache, is_image)
+    finally:
+        if prepared:
+            import os
+
+            try:
+                os.remove(args.input)
+            except OSError:
+                pass
+            args.input = original_input
+
+
+def _run_converted(args, reporter, cancel, backends, pipeline, built_cache,
+                   is_image):
     args.depth_tiles = resolve_depth_tiles(args.depth_tiles, is_image)
     args.depth_backend = backends.resolve_depth_backend(
         args.depth_backend, is_image, reporter)

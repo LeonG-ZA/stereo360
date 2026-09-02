@@ -200,3 +200,88 @@ def test_the_probe_needs_no_input_file():
         capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stderr
     json.loads(proc.stdout)
+
+
+# ------------------------------------------------------------- the filter chain
+
+def _fake_install(tmp_path, *specs):
+    for short, name, mtype, ver in specs:
+        _model_json(tmp_path / f"{short}-{ver}.json", short, name,
+                    model_type=mtype)
+    return upscale.Install("ffmpeg.exe", str(tmp_path))
+
+
+def test_upscaling_comes_before_interpolation(tmp_path):
+    """Both orders work and this one is much cheaper: the upscaler only sees
+    the frames that were really shot rather than the doubled set, and it is
+    the expensive half."""
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13), ("chr", "Chronos", 2, 2))
+    vf = upscale.chain(upscale.resolve(inst, "amq"), 2.0,
+                       upscale.resolve(inst, "chr", "fi"), 60)
+    assert vf.index("tvai_up") < vf.index("tvai_fi")
+    assert "model=amq-13" in vf and "scale=2" in vf
+    assert "model=chr-2" in vf and "fps=60" in vf
+
+
+def test_either_half_can_stand_alone(tmp_path):
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13), ("chr", "Chronos", 2, 2))
+    assert upscale.chain(up=upscale.resolve(inst, "amq")).startswith("tvai_up")
+    assert upscale.chain(fi=upscale.resolve(inst, "chr", "fi")).startswith("tvai_fi")
+    assert upscale.chain() == ""
+
+
+def test_a_model_resolves_by_short_name_or_exact_code(tmp_path):
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13))
+    assert upscale.resolve(inst, "amq").code == "amq-13"
+    assert upscale.resolve(inst, "amq-13").code == "amq-13"
+    assert upscale.resolve(inst, "AMQ").code == "amq-13"
+    assert upscale.resolve(inst, "nope") is None
+
+
+def test_upscalers_and_interpolators_are_kept_apart(tmp_path):
+    """`tvai_up` will not run an interpolation model. Offering one there
+    produces a run that fails after the engine has loaded."""
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13), ("chr", "Chronos", 2, 2))
+    assert [m.short for m in upscale.models(inst)] == ["amq"]
+    assert [m.short for m in upscale.interpolators(inst)] == ["chr"]
+    assert upscale.resolve(inst, "chr", "up") is None
+    assert upscale.resolve(inst, "amq", "fi") is None
+
+
+def test_the_default_upscaler_is_artemis_medium_quality():
+    assert upscale.DEFAULT_UPSCALE == "amq"
+
+
+# ------------------------------------------------------------------ the runner
+
+def test_a_signed_out_topaz_is_reported_as_that_not_as_a_crash(tmp_path,
+                                                               monkeypatch):
+    """The run has already started by the time this is known, so it has to be
+    turned back into the sentence a person can act on."""
+    class _Proc:
+        def __init__(self):
+            self.stderr = iter(["INFO: Refresh failed. Watermark will be enabled\n"])
+        def kill(self): pass
+        def wait(self, timeout=None): return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(upscale, "_encoder", lambda i: ["-c:v", "ffv1"])
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13))
+    with pytest.raises(upscale.UpscaleError, match="sign"):
+        upscale.run(inst, "in.mp4", "out.mkv", up=upscale.resolve(inst, "amq"))
+
+
+def test_asking_for_nothing_is_an_error_rather_than_a_silent_copy(tmp_path):
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13))
+    with pytest.raises(upscale.UpscaleError):
+        upscale.run(inst, "in.mp4", "out.mkv")
+
+
+def test_the_intermediate_is_yuv420p(tmp_path, monkeypatch):
+    """Left to itself the chain hands back RGB, and the converter then passes
+    `colorspace gbr` to libx264, which refuses it -- killing the run at the
+    last step, after the upscale has been paid for."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: type(
+        "R", (), {"stdout": "hevc_nvenc ffv1", "returncode": 0})())
+    args = upscale._encoder(upscale.Install("ffmpeg.exe", str(tmp_path)))
+    assert "yuv420p" in args
