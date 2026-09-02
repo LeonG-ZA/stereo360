@@ -363,6 +363,18 @@ def build_parser() -> argparse.ArgumentParser:
                         "resolution-dependent -- hevc_amf takes 3840x3840 and "
                         "refuses 7680x7680 -- so pass the *output* size, which "
                         "for top-bottom stereo is the source height doubled.")
+    p.add_argument("--probe-upscalers", action="store_true",
+                   help="Print whether Topaz Video AI is installed here, "
+                        "whether it is signed in, and which upscaling models "
+                        "it offers, as JSON, and exit. Intended for a GUI, "
+                        "which should show none of this when 'available' is "
+                        "false and say 'Please sign in to Topaz Video AI' when "
+                        "'needs_login' is true. Pass --probe-width to have it "
+                        "answer whether a source that wide is worth offering "
+                        "it for -- above 8K it is not.")
+    p.add_argument("--probe-width", type=int, default=0, metavar="W",
+                   help="Source width for --probe-upscalers to judge against "
+                        "(default: 0, meaning do not judge)")
     p.add_argument("--probe-backends", action="store_true",
                    help="Print which depth backends can actually run here as "
                         "JSON, with a reason for each that cannot, and exit. "
@@ -1019,6 +1031,21 @@ def main(argv=None) -> int:
         print(json.dumps({"width": size[0], "height": size[1],
                           "recommended": _e.recommended(infos),
                           "encoders": [i.as_dict() for i in infos]}))
+        return 0
+    if args.probe_upscalers:
+        import json
+
+        from . import upscale as _u
+
+        # Deliberately never raises: a machine without Topaz, or with a broken
+        # one, has to get a usable "no" rather than a traceback, because a GUI
+        # calls this at startup on every machine.
+        try:
+            print(json.dumps(_u.describe(args.probe_width)))
+        except Exception as e:                              # noqa: BLE001
+            print(json.dumps({"available": False, "auth": "unknown",
+                              "models": [], "offered": False,
+                              "reason": f"{type(e).__name__}: {e}"}))
         return 0
     if args.probe_backends:
         import json
