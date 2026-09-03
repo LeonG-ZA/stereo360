@@ -26,13 +26,37 @@ the one that matters in a headset, where invented detail that fails to hold
 still reads as crawling. Artemis HQ and Medium Halo sit at 104% and 102%; the
 rest add a quarter more movement than reality has.
 
-Three facts about driving it that cost an afternoon to find, recorded so they
+Tested against **Topaz Video AI 7** only -- the last perpetual, offline
+version before Topaz moved to the "Topaz Video" subscription. Everything here
+was written against that: the install paths, the `tvai_up` and `tvai_fi`
+filter names and their options, the model descriptions in ProgramData with
+their `modelType`/`preflight`/`gui.name` fields, and the wording of the
+authentication lines this reads out of the log. Internally that build reports
+1.9.43, which `login.exe` also carries as its file version.
+
+Any of those could have moved in the subscription version. If it has, the
+failure should be the good kind -- `find()` returns None and the feature
+simply is not offered -- but nothing here has been run against it, and the
+model-description parsing is the part most likely to need a second shape.
+
+Both passes run on **equirectangular** frames, before the pipeline's cubemap
+stage, which exists only inside depth estimation. That is right for upscaling:
+Topaz tiles at 672x576 with 48 px overlap, so it never sees a whole frame and
+the projection's global distortion is largely invisible to it. It is more of a
+compromise for interpolation, which estimates motion: an object crossing the
++/-180 degree seam has no continuation on the other side, because the tiling
+does not wrap. Padding the frame with a wrapped strip before the pass and
+cropping after would close that, and is not done yet.
+
+Four facts about driving it that cost an afternoon to find, recorded so they
 do not have to be found again:
 
-  * the filter needs a *video* stream. A single PNG, and a PNG looped twelve
-    times, both consume their frames and emit nothing. The same still wrapped
-    as a 12-frame yuv420p video upscales fine, which is what `wrap_still` is
-    for.
+  * the filter needs a *video* stream, and a run-up within it. A single PNG,
+    a PNG looped twelve times, and an explicit `format=yuv420p` in the chain
+    all emit nothing, so it is the demuxer rather than the pixel format -- but
+    a one-frame *video* fails too. See `wrap_frames`.
+  * the intermediate has to be yuv420p or the converter's own encoder refuses
+    the colour tags that come back; see `_ENCODERS`.
   * Topaz's bundled ffmpeg has no libx264. Its encoder list is its own.
   * the authentication verdict is printed about a second in, while the whole
     run takes ~28 s of engine build. `auth_state` reads until the verdict and
@@ -107,6 +131,8 @@ class Model:
     min_scale: float = 1.0
     max_scale: float = 4.0
     order: int = 999   # Topaz's own ordering, so the list reads as it does there
+    preflight: int = 0   # frames it wants before it will emit anything
+    postflight: int = 0
 
 
 def find(app_dirs=_APP_DIRS, model_dirs=_MODEL_DIRS) -> Optional[Install]:
@@ -168,7 +194,9 @@ def _read_models(install: Install, model_type: int) -> List[Model]:
                 desc=str(gui.get("desc") or ""),
                 min_scale=float(gui.get("minScale") or 1.0),
                 max_scale=float(gui.get("maxScale") or 4.0),
-                order=int(gui.get("displayPri") or 999))
+                order=int(gui.get("displayPri") or 999),
+                preflight=int(d.get("preflight") or 0),
+                postflight=int(d.get("postflight") or 0))
     return sorted(best.values(), key=lambda m: (m.order, m.name.lower()))
 
 
@@ -262,12 +290,35 @@ DEFAULT_UPSCALE = "amq"
 #: Chronos. Apollo is the other family; both are `tvai_fi` models.
 DEFAULT_INTERPOLATE = "chr"
 
-#: How many copies of a still to hand the filter. It refuses to emit anything
-#: for an image input -- a lone PNG and a PNG looped twelve times both consume
-#: their frames and produce nothing, and an explicit `format=yuv420p` in the
-#: chain does not help, so it is the demuxer rather than the pixel format. The
-#: same still wrapped as a short video works, and the last frame is taken.
-WRAP_FRAMES = 12
+#: Fewest frames a wrapped still is ever given, whatever the model claims.
+#: Measured, feeding Artemis Medium Quality copies of one frame:
+#:
+#:     1 -> 0 out    2 -> 0 out    3 -> 0 out    4 -> 4 out    6 -> 6 out
+#:
+#: so a one-frame video does not work either -- the filter needs a run-up, not
+#: merely a video container. Gaia High Quality manages on 3. The requirement
+#: is per model and the models declare it, so `wrap_frames` asks them and this
+#: is only the floor.
+MIN_WRAP_FRAMES = 4
+
+#: Cap, so a model with an odd declaration cannot turn one still into a long
+#: render. Every model seen needs six or fewer.
+MAX_WRAP_FRAMES = 16
+
+
+def wrap_frames(model: Optional[Model]) -> int:
+    """How many copies of a still to hand the filter.
+
+    `preflight` is what a model says it wants before emitting, `postflight`
+    what it holds back at the end; one more than the sum clears both. That
+    gives 6 for Artemis and 5 for Gaia, against the 12 this used to send --
+    each of those frames is a full-size upscale, so the guess was costing
+    about half the time a still took.
+    """
+    if model is None:
+        return MIN_WRAP_FRAMES
+    want = model.preflight + model.postflight + 1
+    return max(MIN_WRAP_FRAMES, min(want, MAX_WRAP_FRAMES))
 
 #: Preferred intermediate encoders, in order. The pre-pass writes a whole 8K
 #: intermediate that the converter then reads, so this wants to be fast and
@@ -430,14 +481,15 @@ def run_still(install: Install, src: str, dst: str, *,
     out_dir = os.path.join(tmp, "out")
     os.makedirs(out_dir, exist_ok=True)
     try:
+        n = wrap_frames(up)
         wrap = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y",
-                "-loop", "1", "-i", src, "-frames:v", str(WRAP_FRAMES),
+                "-loop", "1", "-i", src, "-frames:v", str(n),
                 "-r", "30", "-pix_fmt", "yuv420p",
                 "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", wrapped]
         if subprocess.run(wrap, capture_output=True, text=True).returncode:
             raise UpscaleError("could not prepare the still for Topaz")
         run(install, wrapped, os.path.join(out_dir, "%03d.png"),
-            up=up, scale=scale, total=WRAP_FRAMES, reporter=reporter,
+            up=up, scale=scale, total=n, reporter=reporter,
             cancel=cancel, out_args=["-pix_fmt", "rgb24"])
         frames = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
         if not frames:

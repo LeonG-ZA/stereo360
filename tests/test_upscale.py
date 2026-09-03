@@ -285,3 +285,46 @@ def test_the_intermediate_is_yuv420p(tmp_path, monkeypatch):
         "R", (), {"stdout": "hevc_nvenc ffv1", "returncode": 0})())
     args = upscale._encoder(upscale.Install("ffmpeg.exe", str(tmp_path)))
     assert "yuv420p" in args
+
+
+# ------------------------------------------------------- how long a still wrap is
+
+def test_a_one_frame_video_is_not_enough(tmp_path):
+    """Measured, feeding Artemis Medium Quality copies of one frame: 1, 2 and
+    3 all produce nothing and 4 produces four. So wrapping a still is not
+    merely about getting it into a video container -- the filter wants a
+    run-up, and asking for one frame would silently produce no output at all.
+    """
+    inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13))
+    assert upscale.wrap_frames(upscale.resolve(inst, "amq")) >= 4
+    assert upscale.MIN_WRAP_FRAMES >= 4
+
+
+def test_the_wrap_length_comes_from_the_model(tmp_path, monkeypatch):
+    """Artemis declares preflight 5 and Gaia 2+2, so they need 6 and 5 -- not
+    the flat 12 this used to send, where every extra frame is a full-size
+    upscale."""
+    (tmp_path / "amq-13.json").write_text(json.dumps({
+        "shortName": "amq", "displayName": "MQ", "modelType": 1,
+        "preflight": 5, "postflight": 0, "gui": {"name": "Artemis - MQ"}}),
+        encoding="utf-8")
+    (tmp_path / "ghq-5.json").write_text(json.dumps({
+        "shortName": "ghq", "displayName": "HQ", "modelType": 1,
+        "preflight": 2, "postflight": 2, "gui": {"name": "Gaia - HQ"}}),
+        encoding="utf-8")
+    inst = upscale.Install("ffmpeg.exe", str(tmp_path))
+    assert upscale.wrap_frames(upscale.resolve(inst, "amq")) == 6
+    assert upscale.wrap_frames(upscale.resolve(inst, "ghq")) == 5
+
+
+def test_an_odd_declaration_cannot_turn_a_still_into_a_render(tmp_path):
+    (tmp_path / "mad-1.json").write_text(json.dumps({
+        "shortName": "mad", "displayName": "Mad", "modelType": 1,
+        "preflight": 9000, "gui": {"name": "Mad"}}), encoding="utf-8")
+    inst = upscale.Install("ffmpeg.exe", str(tmp_path))
+    assert upscale.wrap_frames(upscale.resolve(inst, "mad")) \
+        == upscale.MAX_WRAP_FRAMES
+
+
+def test_no_model_still_gets_a_usable_length():
+    assert upscale.wrap_frames(None) == upscale.MIN_WRAP_FRAMES
