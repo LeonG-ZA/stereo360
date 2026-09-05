@@ -31,7 +31,10 @@ class Runner(QObject):
 
     started = Signal()
     #: frame, total, elapsed seconds, frames/sec, eta seconds (-1 = unknown)
-    progressed = Signal(int, int, float, float, float)
+    #: frame, total, elapsed, fps, eta, stage -- `stage` is "" for the render
+    #: itself and names the phase for a pre-pass, which the interface has to
+    #: be able to tell apart.
+    progressed = Signal(int, int, float, float, float, str)
     #: level ('info' | 'warning' | 'error'), text
     logged = Signal(str, str)
     #: What the run is doing before any frame exists, as a sentence to show.
@@ -141,7 +144,8 @@ class Runner(QObject):
                 int(event.get("total") or 0),
                 float(event.get("elapsed") or 0.0),
                 float(event.get("fps") or 0.0),
-                float(eta) if eta is not None else -1.0)
+                float(eta) if eta is not None else -1.0,
+                str(event.get("stage") or ""))
         elif kind in ("info", "warning", "error"):
             message = str(event.get("message", ""))
             self.logged.emit(kind, message)
@@ -157,12 +161,23 @@ class Runner(QObject):
             if path:
                 self.previewed.emit(path, int(event.get("frame") or 0))
         elif kind == "start":
-            self._output = str(event.get("output") or "")
+            # A stage-tagged phase is preparation, not the render: it names no
+            # output, and treating its "start" as the render's would forget
+            # where the finished file is going to be.
+            stage = str(event.get("stage") or "")
             total = event.get("total")
-            if total:
-                self.logged.emit("info", f"{total} frames to render.")
+            if stage:
+                if total:
+                    self.logged.emit(
+                        "info", f"{total} frames to prepare before rendering.")
+            else:
+                self._output = str(event.get("output") or "")
+                if total:
+                    self.logged.emit("info", f"{total} frames to render.")
         elif kind == "done":
-            self._output = str(event.get("output") or self._output)
+            # Same again: a pre-pass finishing is not the job finishing.
+            if not event.get("stage"):
+                self._output = str(event.get("output") or self._output)
 
     # ------------------------------------------------------------ teardown
 

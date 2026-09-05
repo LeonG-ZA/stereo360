@@ -265,7 +265,8 @@ def test_a_signed_out_topaz_is_reported_as_that_not_as_a_crash(tmp_path,
         def wait(self, timeout=None): return 0
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _Proc())
-    monkeypatch.setattr(upscale, "_encoder", lambda i: ["-c:v", "ffv1"])
+    monkeypatch.setattr(upscale, "_encoder",
+                        lambda *a, **k: ["-c:v", "ffv1"])
     inst = _fake_install(tmp_path, ("amq", "MQ", 1, 13))
     with pytest.raises(upscale.UpscaleError, match="sign"):
         upscale.run(inst, "in.mp4", "out.mkv", up=upscale.resolve(inst, "amq"))
@@ -281,10 +282,17 @@ def test_the_intermediate_is_yuv420p(tmp_path, monkeypatch):
     """Left to itself the chain hands back RGB, and the converter then passes
     `colorspace gbr` to libx264, which refuses it -- killing the run at the
     last step, after the upscale has been paid for."""
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: type(
-        "R", (), {"stdout": "hevc_nvenc ffv1", "returncode": 0})())
-    args = upscale._encoder(upscale.Install("ffmpeg.exe", str(tmp_path)))
-    assert "yuv420p" in args
+    from stereo360 import intermediate
+
+    # Topaz hands back RGB and the converter's encoder then refuses the gbr
+    # colour tags, so whatever else the working file keeps, it has to be YUV.
+    monkeypatch.setattr(intermediate, "supported",
+                        lambda ffmpeg, name: frozenset(
+                            {"yuv420p", "yuv444p", "gbrp"}))
+    for asked in ("gbrp", "rgb24", None):
+        args, note = intermediate.encoder_args("ffmpeg.exe", pix_fmt=asked)
+        assert "yuv420p" in args, f"{asked} should land on YUV"
+        assert "gbr" not in note
 
 
 # ------------------------------------------------------- how long a still wrap is
@@ -328,3 +336,221 @@ def test_an_odd_declaration_cannot_turn_a_still_into_a_render(tmp_path):
 
 def test_no_model_still_gets_a_usable_length():
     assert upscale.wrap_frames(None) == upscale.MIN_WRAP_FRAMES
+
+
+# ------------------------------------------------- what Topaz's ffmpeg reads
+#
+# Its bundled build lists an `av1` decoder that is a hardware-accelerated
+# shell: asked for AV1 in software it answers "Function not implemented" and
+# then dies with an access violation. The user sees a wall of ffmpeg noise
+# ending in a complaint about a filter option, which is the last thing that
+# happened rather than the thing that went wrong.
+
+
+@pytest.mark.parametrize("codec", ["h264", "hevc", "HEVC", "prores", "vp9"])
+def test_a_codec_it_can_read_needs_no_help(codec):
+    """The common path costs nothing: no probe, no decoder flag."""
+    assert upscale.input_args(None, "anything.mp4", codec) == []
+
+
+def test_an_unknown_codec_is_settled_before_the_job_starts():
+    """Not knowing is not the same as knowing it works -- but an unreadable
+    source has to be found by asking, not assumed either way."""
+    assert "av1" not in upscale._SOFTWARE_CODECS
+
+
+def test_no_codec_at_all_is_left_alone():
+    """A probe that failed should not turn into a refusal to run."""
+    assert upscale.input_args(None, "anything.mp4", None) == []
+
+
+needs_topaz = pytest.mark.skipif(upscale.find() is None,
+                                 reason="Topaz Video AI is not installed here")
+
+
+@needs_topaz
+def test_av1_gets_a_decoder_that_works(tmp_path):
+    """On a machine whose ffmpeg has no software AV1 decoder, the hardware one
+    is found and used rather than crashed into."""
+    src = tmp_path / "av1.mp4"
+    made = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc2=size=320x160:rate=30", "-frames:v", "4",
+         "-c:v", "libsvtav1", str(src)], capture_output=True)
+    if made.returncode != 0 or not src.exists():
+        pytest.skip("this ffmpeg cannot encode AV1 to test against")
+
+    install = upscale.find()
+    args = upscale.input_args(install, str(src), "av1")
+    # Either the software decoder turned out to work here, or a hardware one
+    # was chosen. What matters is that whatever came back actually decodes.
+    assert upscale._can_decode(install, str(src), args)
+
+
+def test_a_decode_failure_says_what_it_was():
+    """The message has to name the cause and the way out, because the ffmpeg
+    log ends by complaining about a filter option and buries the decoder."""
+    for line in ("Error submitting packet to decoder: Function not implemented",
+                 "Decode error rate 1 exceeds maximum 0.666667"):
+        assert any(s in line.lower() for s in upscale._DECODE_FAILED)
+
+
+# --------------------------------------------------------- the rate it reaches
+
+
+def test_topaz_interpolation_always_names_a_rate():
+    """tvai_fi defaults its own fps to 0, which means "leave the rate alone".
+    A Chronos pass with no rate therefore ran the model over every frame and
+    handed back a video at exactly the rate it came in at -- the switch was on
+    and nothing happened."""
+    fi = upscale.Model(code="chf-3", short="chf", name="Chronos Fast")
+    assert "fps=" not in upscale.chain(fi=fi)          # the low-level default
+    assert ":fps=60" in upscale.chain(fi=fi, fps=60)
+
+
+def test_the_default_rate_is_double_the_source():
+    from stereo360 import cli
+
+    class _Info:
+        fps = 29.97
+
+    class _Args:
+        interpolate_fps = 0.0
+
+    fi = upscale.Model(code="chf-3", short="chf", name="Chronos Fast")
+    assert cli._target_fps(_Args(), _Info(), fi) == pytest.approx(59.94)
+
+    asked = _Args()
+    asked.interpolate_fps = 48.0
+    assert cli._target_fps(asked, _Info(), fi) == 48.0
+
+    assert cli._target_fps(_Args(), _Info(), None) is None, "no pass, no rate"
+    assert cli._target_fps(_Args(), None, fi) is None, "unread source, no guess"
+
+
+# ------------------------------------------------------ one entry per name
+
+
+def test_two_models_under_one_name_are_shown_once(tmp_path):
+    """Topaz ships chf-3 and ifi-1 both named "Chronos Fast". Two identical
+    lines in a dropdown read as a bug, and picking between them is a coin
+    toss -- so the one Topaz itself labels wins."""
+    (tmp_path / "chf-3.json").write_text(json.dumps({
+        "shortName": "chf", "displayName": "Chronos Fast", "modelType": 2,
+        "gui": {"name": "Chronos Fast", "displayPri": 489}}), encoding="utf-8")
+    (tmp_path / "ifi-1.json").write_text(json.dumps({
+        "shortName": "ifi", "modelType": 2,
+        "gui": {"name": "Chronos Fast", "displayPri": 489}}), encoding="utf-8")
+
+    got = upscale.interpolators(upscale.Install("ffmpeg.exe", str(tmp_path)))
+    assert [m.short for m in got] == ["chf"]
+
+
+def test_models_that_only_share_a_display_name_both_survive(tmp_path):
+    """Aion and Aion Bottom both declare displayName "Aion" and are different
+    models. The name shown is the gui name, so that is what has to be unique."""
+    for code, short, gui in (("aion-1", "aion", "Aion"),
+                             ("aiob-1", "aiob", "Aion Bottom")):
+        (tmp_path / f"{code}.json").write_text(json.dumps({
+            "shortName": short, "displayName": "Aion", "modelType": 2,
+            "gui": {"name": gui, "displayPri": 490}}), encoding="utf-8")
+
+    got = upscale.interpolators(upscale.Install("ffmpeg.exe", str(tmp_path)))
+    assert sorted(m.short for m in got) == ["aiob", "aion"]
+
+
+def test_the_newer_version_wins_when_neither_is_labelled(tmp_path):
+    for code in ("zzz-1", "zzz-4"):
+        (tmp_path / f"{code}.json").write_text(json.dumps({
+            "shortName": code, "modelType": 2,
+            "gui": {"name": "Same Name", "displayPri": 1}}), encoding="utf-8")
+
+    got = upscale.interpolators(upscale.Install("ffmpeg.exe", str(tmp_path)))
+    assert [m.code for m in got] == ["zzz-4"]
+
+
+# ------------------------------------------------------------ the frame range
+
+
+def test_the_range_is_cut_before_the_models_not_after():
+    """`-frames:v` at the tail kills Topaz mid-stream -- it exits 0xC0000374,
+    a corrupted heap, with nothing written. Trimming the input instead lets it
+    reach the end of the stream the way it expects to."""
+    assert upscale.trimmed("tvai_fi=x") == "tvai_fi=x", "no range, no filter"
+    assert upscale.trimmed("tvai_fi=x", 0, 31) == \
+        "trim=end_frame=31,setpts=PTS-STARTPTS,tvai_fi=x"
+    assert upscale.trimmed("tvai_fi=x", 10, 15) == \
+        "trim=start_frame=10:end_frame=15,setpts=PTS-STARTPTS,tvai_fi=x"
+    # Before the models, so nothing is enhanced that nobody asked for.
+    assert upscale.trimmed("tvai_up=y", 2).index("trim=") < \
+        upscale.trimmed("tvai_up=y", 2).index("tvai_up")
+
+
+@pytest.mark.parametrize("start,count,ratio,expected", [
+    # Sixty frames from the start, doubling: read 31 source frames, which make
+    # 61, and the renderer keeps 60.
+    (0, 60, 2.0, (0, 31, 0, 61)),
+    # Output 21 falls between source 10 and 11, so the pass starts at 10 and
+    # its first frame is output 20 -- one to drop.
+    (21, 8, 2.0, (10, 15, 1, 9)),
+    # No interpolation: output frames are source frames.
+    (0, 60, 1.0, (0, 60, 0, 60)),
+    (100, 60, 1.0, (100, 160, 0, 60)),
+    # No limit stays no limit.
+    (0, None, 2.0, (0, None, 0, None)),
+])
+def test_the_prepass_window_turns_output_frames_into_source_frames(
+        start, count, ratio, expected):
+    """Without this the pass ran over the whole file and the renderer applied
+    the range afterwards -- so a sixty-frame test render of an 8K video
+    interpolated the entire thing first."""
+    from stereo360 import cli
+
+    assert cli._prepass_window(start, count, ratio) == expected
+
+
+def test_the_window_never_asks_for_fewer_frames_than_wanted():
+    """Rounding has to go outwards: one frame short is a range that stops
+    before it was told to."""
+    from stereo360 import cli
+
+    for ratio in (1.0, 1.5, 2.0, 2.5, 4.0):
+        for start in (0, 1, 7, 100):
+            for count in (1, 2, 9, 60):
+                skip, end, drop, produced = cli._prepass_window(
+                    start, count, ratio)
+                assert produced - drop >= count, (ratio, start, count)
+                assert end > skip
+
+
+def test_a_batch_gets_its_frame_range_back(tmp_path, monkeypatch):
+    """The pre-pass re-states the range against the intermediate it writes.
+    A batch runs every file through one `args`, so the second would inherit
+    the first file's rewritten start -- the same trap `depth_backend` is
+    already kept and restored for."""
+    import argparse
+
+    from stereo360 import cli
+
+    args = argparse.Namespace(input=str(tmp_path / "in.mp4"),
+                              output=str(tmp_path / "out.mp4"),
+                              start_frame=21, max_frames=8,
+                              upscale=None, interpolate=None)
+
+    class _Pipeline:
+        class ffmpeg_io:
+            @staticmethod
+            def is_image_path(path):
+                return False
+
+    def _boom(*a, **k):
+        raise SystemExit("stopped after the pre-pass")
+
+    monkeypatch.setattr(cli, "_run_converted", _boom)
+    monkeypatch.setattr(cli, "_topaz_prepass",
+                        lambda *a, **k: (setattr(args, "start_frame", 1)
+                                         or args.input))
+    with pytest.raises(SystemExit):
+        cli._run(args, None, None, None, _Pipeline())
+
+    assert (args.start_frame, args.max_frames) == (21, 8)

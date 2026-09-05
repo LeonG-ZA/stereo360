@@ -133,6 +133,7 @@ class JsonReporter(Reporter):
         self._t0 = time.monotonic()
         self._last = 0.0
         self._emitted = False
+        self._stage: Optional[str] = None
 
     def _emit(self, type_: str, **fields: Any) -> None:
         fields["type"] = type_
@@ -160,6 +161,12 @@ class JsonReporter(Reporter):
         self._t0 = time.monotonic()
         self._last = 0.0
         self._emitted = False
+        # Carried onto every progress event of this phase. Without it the
+        # frames of a pre-pass are indistinguishable from the frames of the
+        # render, and on an 8K source the pre-pass is the longer of the two --
+        # so the interface says "rendering" for twenty minutes while nothing
+        # of the sort is happening.
+        self._stage = fields.get("stage")
         self._emit("start", total=total, **fields)
 
     def advance(self, n: int = 1) -> None:
@@ -184,11 +191,15 @@ class JsonReporter(Reporter):
                if self._total and rate > 0 else None)
         self._emit("progress", frame=self._done, total=self._total,
                    elapsed=round(elapsed, 3), fps=round(rate, 3),
-                   eta=round(eta, 1) if eta is not None else None)
+                   eta=round(eta, 1) if eta is not None else None,
+                   **({"stage": self._stage} if self._stage else {}))
 
     def finish(self, **fields: Any) -> None:
         # setdefault, not a keyword: the caller's own frame count wins if it
         # has one, and passing `frames=` must not collide with ours.
         fields.setdefault("frames", self._done)
         fields.setdefault("elapsed", round(time.monotonic() - self._t0, 3))
+        if self._stage:
+            fields.setdefault("stage", self._stage)
+        self._stage = None
         self._emit("done", **fields)

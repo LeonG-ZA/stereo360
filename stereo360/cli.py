@@ -371,24 +371,45 @@ def build_parser() -> argparse.ArgumentParser:
                         "without Topaz beyond saying so. MODEL is a Topaz "
                         "short name or exact code -- amq, ahq, prob, ghq, "
                         "amq-13 -- and defaults to amq, Artemis Medium "
-                        "Quality. Run --probe-upscalers to list what is "
+                        "Quality. Two free ones need no Topaz at all: "
+                        "'fsrcnnx', a shader that runs in ffmpeg on any GPU "
+                        "and is the steadiest upscaler measured, though it "
+                        "sharpens rather than invents; and 'esrgan', for "
+                        "photos only, being the least steady on video. Fetch "
+                        "either with scripts/fetch_fsrcnnx.py or "
+                        "scripts/fetch_esrgan.py. "
+                        "Run --probe-upscalers to list what is "
                         "installed. Only worth it below 8K: a 4K equirect "
                         "carries 10.7 pixels per degree against a Quest 3's "
                         "~25, and 2x lands near native.")
+    p.add_argument("--fsrcnnx-shader", default=None, metavar="PATH",
+                   help="Path to the FSRCNNX shader (default: "
+                        "models/FSRCNNX_x2_8-0-4-1.glsl)")
+    p.add_argument("--esrgan-model", default=None, metavar="PATH",
+                   help="Path to the Real-ESRGAN ONNX graph (default: "
+                        "models/realesr-general-x4v3.onnx)")
     p.add_argument("--upscale-scale", type=float, default=2.0, metavar="F",
                    help="How much to upscale by (default: 2, which takes 4K "
                         "to 8K)")
-    p.add_argument("--interpolate", nargs="?", const="chr", default=None,
+    p.add_argument("--interpolate", nargs="?", const="auto", default=None,
                    metavar="MODEL",
-                   help="Raise the frame rate before converting, through the "
-                        "same Topaz install. MODEL defaults to chr, Chronos. "
+                   help="Raise the frame rate before converting. MODEL is a "
+                        "Topaz interpolation model (chr, apo, aion), or "
+                        "'rife' for the free one, which runs through "
+                        "onnxruntime and needs no Topaz -- fetch it once with "
+                        "scripts/fetch_rife.py. The default, 'auto', takes "
+                        "Chronos when Topaz is installed and RIFE otherwise. "
                         "Worth more in a headset than on a monitor: 30 fps "
                         "judders when your head keeps moving and there is no "
-                        "shutter to hide it. Note it multiplies the frames "
-                        "the stereo pass then has to convert.")
+                        "shutter to hide it. Only for sources at 30 fps or "
+                        "below, and note it multiplies the frames the stereo "
+                        "pass then has to convert.")
     p.add_argument("--interpolate-fps", type=float, default=0.0, metavar="F",
                    help="Frame rate to interpolate to (default: 0, meaning "
-                        "leave it to Topaz, which doubles)")
+                        "double the source rate)")
+    p.add_argument("--rife-model", default=None, metavar="PATH",
+                   help="Path to the RIFE ONNX graph (default: "
+                        "models/rife_v4.25.onnx)")
     p.add_argument("--probe-upscalers", action="store_true",
                    help="Print whether Topaz Video AI is installed here, "
                         "whether it is signed in, and which upscaling models "
@@ -401,6 +422,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--probe-width", type=int, default=0, metavar="W",
                    help="Source width for --probe-upscalers to judge against "
                         "(default: 0, meaning do not judge)")
+    p.add_argument("--probe-fps", type=float, default=0.0, metavar="F",
+                   help="Source frame rate for --probe-upscalers to judge "
+                        "against (default: 0, meaning do not judge). Above "
+                        "30 there is nothing for interpolation to fix.")
     p.add_argument("--probe-backends", action="store_true",
                    help="Print which depth backends can actually run here as "
                         "JSON, with a reason for each that cannot, and exit. "
@@ -822,91 +847,342 @@ def _run_batch(args, reporter, cancel, backends, pipeline):
     return 1 if failed else 0
 
 
-def _topaz_prepass(args, reporter, cancel, pipeline, is_image):
+def _prepass_window(start_out, count, ratio):
+    """Which source frames a Topaz pass needs, and what comes back.
+
+    Returns (skip, end, drop, produced): the source frames to start and stop
+    at, the output frames the renderer should then discard from the front, and
+    how many output frames the pass will make -- which is what its progress
+    bar counts up to.
+
+    A frame range counts *output* frames -- it is what someone means when they
+    ask for sixty frames -- and an interpolating pass makes more of them than
+    it reads, so the range has to be turned back into source frames. What
+    comes back is then off by however far the requested start sits from a real
+    frame: at 2x, output 21 falls between source 10 and 11, so the pass starts
+    at 10 and the first output frame it makes is number 20.
+    """
+    import math
+
+    skip = int(math.floor(start_out / ratio))
+    drop = start_out - int(round(skip * ratio))
+    if count is None:
+        return skip, None, drop, None
+    want = drop + count
+    # From S source frames a pass at `ratio` makes floor((S-1) * ratio) + 1,
+    # so invert that -- and round outwards, since one frame too few is a range
+    # that stops short.
+    take_src = int(math.ceil((want - 1) / ratio)) + 1
+    produced = int(math.floor((take_src - 1) * ratio)) + 1
+    return skip, skip + take_src, drop, produced
+
+
+def _target_fps(args, info, fi):
+    """The frame rate a Topaz interpolation pass should reach, or None.
+
+    None only when there is no interpolation to do, or the source rate could
+    not be read -- in which case Topaz keeps its own default rather than being
+    handed a guess.
+    """
+    if fi is None:
+        return None
+    if args.interpolate_fps:
+        return float(args.interpolate_fps)
+    return float(info.fps) * 2 if info is not None and info.fps else None
+
+
+#: Marks a file as this tool's working copy rather than anybody's output.
+#: One constant because two places depend on it: what the pre-pass writes,
+#: and the sweep that clears up after a run that was killed before it could.
+PREPASS_SUFFIX = ".stereo360-prepass"
+
+
+def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
     """Upscale and/or interpolate the source first, returning what to convert.
 
-    Returns (path, temporary) -- the path to feed the converter, and whether
-    it needs deleting afterwards. Returns the original input untouched when
-    nothing was asked for, so the ordinary path costs one attribute lookup.
+    Returns the path to feed the converter, and appends every intermediate it
+    creates to `made` -- which the caller owns. The list belongs to the caller
+    precisely because this function can raise: a cancel halfway through a
+    pre-pass has a half-written 8K file to its name, and a list returned only
+    on success would never reach the code that deletes it.
 
     Before the stereo pass, never after, and never per eye. These models
     invent detail rather than recovering it, so running one on each eye would
     invent *different* detail for each and hand the viewer binocular rivalry
     instead of sharpness. Mono in, mono out, one consistent picture to convert.
+
+    Upscaling is Topaz's alone. Interpolation can be Topaz's or RIFE's, and
+    RIFE needs nothing installed, so the two halves are decided separately --
+    a machine without Topaz can still raise a frame rate.
+
+    Both passes are checked before either runs, so a missing graph or a
+    source that is already fast is refused before a depth model spends a
+    minute loading.
     """
     if not getattr(args, "upscale", None) and not getattr(args, "interpolate", None):
-        return args.input, False
+        return args.input
 
     import os
 
+    from . import esrgan as _es
+    from . import fsrcnnx as _fs
+    from . import interpolate as _fi
     from . import upscale as _u
 
-    install = _u.find()
-    if install is None:
-        raise SystemExit(
-            "--upscale/--interpolate need Topaz Video AI, which is not "
-            "installed here. Everything else works without it.")
-    auth = _u.auth_state(install)
-    if auth == "login":
-        raise SystemExit(
-            "Topaz Video AI is installed but not signed in. Please open it "
-            "and sign in, then run this again.")
+    try:
+        info = pipeline.ffmpeg_io.probe(args.input)
+    except Exception:                                       # noqa: BLE001
+        info = None          # unreadable here is the converter's problem
 
-    up = fi = None
-    if args.upscale:
+    install = _u.find()
+    wanted = (args.interpolate or "").strip().lower()
+
+    # Which interpolator, before anything is run: 'auto' is Chronos when
+    # Topaz is here and RIFE when it is not, so the flag means the same thing
+    # on both kinds of machine without the user having to know which.
+    use_rife = False
+    fi = None
+    if wanted:
+        if not is_image and info is not None and not _fi.offered_for(info.fps):
+            raise SystemExit(
+                f"This source is {info.fps:g} fps, and interpolation is for "
+                f"sources at {_fi.MAX_SOURCE_FPS:g} fps or below -- above "
+                f"that it only multiplies the frames to convert.")
+        if wanted == "auto":
+            wanted = _fi.CODE if install is None else "chr"
+        if wanted == _fi.CODE:
+            use_rife = True         # streamed by the renderer, not done here
+            if not _fi.available(args.rife_model):
+                raise SystemExit("\n".join((
+                    f"No RIFE model at {_fi.model_path(args.rife_model)}.",
+                    "Fetch it once (about 20 MB):",
+                    "    python scripts/fetch_rife.py")))
+        elif install is None:
+            raise SystemExit(
+                f"--interpolate {wanted} is a Topaz model, and Topaz Video AI "
+                f"is not installed here. Use --interpolate rife for the free "
+                f"one, which needs nothing installed.")
+
+    # Which upscaler. Real-ESRGAN is for photos and refused for video: it
+    # invents a third more frame-to-frame movement than the scene has, which
+    # in a headset reads as crawling. See stereo360/esrgan.py for the table.
+    wanted_up = (args.upscale or "").strip().lower()
+    use_esrgan = wanted_up == _es.CODE
+    # FSRCNNX takes video as well as stills: it is a resampler rather than a
+    # generator, so it does not invent detail that fails to hold still. See
+    # stereo360/fsrcnnx.py.
+    use_shader = wanted_up == _fs.CODE
+    if use_shader:
+        if not os.path.exists(_fs.shader_path(args.fsrcnnx_shader)):
+            raise SystemExit("\n".join((
+                f"No FSRCNNX shader at {_fs.shader_path(args.fsrcnnx_shader)}.",
+                "Fetch it once (about 70 KB):",
+                "    python scripts/fetch_fsrcnnx.py")))
+        if not _fs.usable():
+            raise SystemExit(
+                "--upscale fsrcnnx needs libplacebo in ffmpeg and a Vulkan "
+                "device, and this machine has one or neither. Everything "
+                "else works without it.")
+    elif use_esrgan:
+        if not is_image:
+            raise SystemExit(
+                "--upscale esrgan is for photos. On video it is the least "
+                "steady upscaler measured -- 135% of the movement the real "
+                "footage has, against 104% for Topaz's Artemis High Quality "
+                "-- and invented detail that will not hold still reads as "
+                "crawling in a headset.")
+        if not _es.available(args.esrgan_model):
+            raise SystemExit("\n".join((
+                f"No Real-ESRGAN model at {_es.model_path(args.esrgan_model)}.",
+                "Fetch it once (about 5 MB):",
+                "    python scripts/fetch_esrgan.py")))
+    elif args.upscale and install is None:
+        raise SystemExit(
+            "--upscale needs Topaz Video AI, which is not installed here. "
+            "The free alternatives are --upscale fsrcnnx for anything, and "
+            "--upscale esrgan for a photo. Everything else works without "
+            "any of them.")
+
+    up = None
+    if (args.upscale and not (use_esrgan or use_shader)) \
+            or (wanted and not use_rife):
+        auth = _u.auth_state(install)
+        if auth == "login":
+            raise SystemExit(
+                "Topaz Video AI is installed but not signed in. Please open "
+                "it and sign in, then run this again.")
+    if args.upscale and not (use_esrgan or use_shader):
         up = _u.resolve(install, args.upscale, "up")
         if up is None:
             raise SystemExit(f"No Topaz upscaling model called {args.upscale!r}. "
                              f"Run --probe-upscalers to see what is installed.")
-        try:
-            w = pipeline.ffmpeg_io.probe(args.input).width
-        except Exception:                                   # noqa: BLE001
-            w = 0            # unreadable here is the converter's problem
+    if args.upscale:
+        w = info.width if info is not None else 0
         if w and not _u.offered_for(w):
             raise SystemExit(
                 f"This source is already {w} wide, so upscaling it would land "
                 f"past 8K for no gain a headset can show. Convert it as it is.")
-    if args.interpolate:
-        fi = _u.resolve(install, args.interpolate, "fi")
+    if wanted and not use_rife:
+        fi = _u.resolve(install, wanted, "fi")
         if fi is None:
             raise SystemExit(
-                f"No Topaz interpolation model called {args.interpolate!r}.")
+                f"No Topaz interpolation model called {wanted!r}.")
 
-    what = " and ".join(x for x in (up and up.name, fi and fi.name) if x)
-    reporter.info(f"Topaz pre-pass: {what}", stage="upscale",
-                  model=(up or fi).code)
-
+    src = args.input
     base = os.path.splitext(args.output or args.input)[0]
-    if is_image:
-        dst = base + ".upscaled.png"
-        _u.run_still(install, args.input, dst, up=up,
-                     scale=args.upscale_scale, reporter=reporter,
-                     cancel=cancel)
-    else:
-        dst = base + ".upscaled.mkv"
-        _u.run(install, args.input, dst, up=up, scale=args.upscale_scale,
-               fi=fi, fps=(args.interpolate_fps or None), reporter=reporter,
-               cancel=cancel)
-    return dst, True
+
+    def working(suffix):
+        """Name the next intermediate, and own it before it exists.
+
+        Registered up front rather than on success: a run stopped in the
+        middle of a pre-pass used to leave the half-written file behind, and
+        an 8K one of those looks exactly like a render that went wrong -- no
+        stereo, no 360 metadata, and sitting next to the output under a name
+        that reads like output.
+        """
+        path = base + PREPASS_SUFFIX + suffix
+        made.append(path)
+        return path
+
+    # A previous run that was killed outright -- the backstop after a cancel
+    # is ignored -- cannot have cleaned up after itself, so do it here. By
+    # prefix rather than by a list of extensions, so a pass added later is
+    # swept without anyone having to remember to add it here too.
+    import glob
+
+    for stale in glob.glob(glob.escape(base + PREPASS_SUFFIX) + "*"):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+    if use_shader:
+        scale = args.upscale_scale
+        skip, end, drop, produced = _prepass_window(
+            args.start_frame, args.max_frames, 1.0)
+        try:
+            if is_image:
+                _fs.run(src, working(".png"), width=info.width,
+                        height=info.height, scale=scale,
+                        shader=args.fsrcnnx_shader, total=1,
+                        reporter=reporter, cancel=cancel)
+            else:
+                _fs.run(src, working(".mkv"), width=info.width,
+                        height=info.height, scale=scale,
+                        shader=args.fsrcnnx_shader, pix_fmt=info.pix_fmt,
+                        total=produced or (info.frame_count
+                                           if info is not None else None),
+                        trim_from=skip, frames=args.max_frames,
+                        reporter=reporter, cancel=cancel)
+        except _fs.ShaderError as e:
+            raise SystemExit(str(e))
+        # The pass wrote exactly the range asked for, so the renderer reads
+        # what it was given from the beginning.
+        if args.max_frames is not None or args.start_frame:
+            args.start_frame = 0
+        src = made[-1]
+
+    if use_esrgan:
+        try:
+            _es.run_still(src, working(".png"), scale=args.upscale_scale,
+                          model=args.esrgan_model, provider=args.ort_provider,
+                          reporter=reporter)
+        except _es.EsrganError as e:
+            raise SystemExit(str(e))
+        src = made[-1]
+
+    if up is not None or fi is not None:
+        what = " and ".join(x for x in (up and up.name, fi and fi.name) if x)
+        # The stage names what is actually happening: an interpolation-only
+        # pass announcing itself as "Upscaling" is a bug report waiting to be
+        # written.
+        stage = "upscale" if up is not None else "interpolate"
+        reporter.info(f"Topaz pre-pass: {what}", stage=stage,
+                      model=(up or fi).code)
+        if is_image:
+            _u.run_still(install, src, working(".png"), up=up,
+                         scale=args.upscale_scale,
+                         reporter=reporter, cancel=cancel)
+        else:
+            # A rate has to be spelled out. Topaz's tvai_fi defaults its own
+            # fps option to 0, which means "leave the rate alone" -- so a
+            # Chronos pass with no rate ran the model over every frame and
+            # handed back a video at exactly the rate it came in at. Doubling
+            # is what "no rate given" means everywhere else here, including
+            # RIFE, so it is what it means here.
+            rate = _target_fps(args, info, fi)
+            ratio = (rate / info.fps
+                     if rate and info is not None and info.fps else 1.0)
+            skip, end, drop, produced = _prepass_window(
+                args.start_frame, args.max_frames, ratio)
+            _u.run(install, src, working(".mkv"), up=up,
+                   scale=args.upscale_scale,
+                   fi=fi, fps=rate,
+                   total=produced or (info.frame_count if info is not None
+                                      else None),
+                   codec=(info.codec if info is not None else None),
+                   pix_fmt=(info.pix_fmt if info is not None else None),
+                   width=(info.width if info is not None else 0),
+                   height=(info.height if info is not None else 0),
+                   stage=stage, trim_from=skip, trim_to=end,
+                   reporter=reporter, cancel=cancel)
+            # What the renderer reads now starts at the window, so its own
+            # range has to be re-stated against that rather than the original.
+            args.start_frame, args.max_frames = drop, args.max_frames
+        src = made[-1]
+
+    # RIFE after the upscaler, on its output, for the same reason the Topaz
+    # chain puts them in that order: the upscaler is the expensive half and
+    # should only ever see the frames that were really shot.
+    if use_rife and not is_image:
+        try:
+            made_frames = _fi.run(
+                src, working(".rife.mkv"),
+                # Re-probed when an upscale has already run, because what is
+                # being smoothed is then that pass's output, not the original.
+                info=(info if len(made) == 1 else None),
+                fps=(args.interpolate_fps or None),
+                model=args.rife_model, provider=args.ort_provider,
+                start=args.start_frame, count=args.max_frames,
+                reporter=reporter, cancel=cancel)
+        except _fi.InterpolateError as e:
+            raise SystemExit(str(e))
+        # The intermediate holds exactly the frames asked for, so the
+        # renderer reads it from the beginning -- and is told how many there
+        # are. Raw frames piped into a container leave no frame count behind,
+        # so without this the renderer has no total to count towards, and its
+        # decoder pads the stream to the container's duration and converts an
+        # eightieth frame that was never written.
+        args.start_frame = 0
+        args.max_frames = made_frames
+        src = made[-1]
+
+    return src
 
 
 def _run(args, reporter, cancel, backends, pipeline, built_cache=None):
     is_image = pipeline.ffmpeg_io.is_image_path(args.input)
-    original_input, prepared = args.input, False
+    original_input, made = args.input, []
+    # The pre-pass re-states the frame range against the intermediate it
+    # writes, so the original has to come back for the next file -- a batch
+    # runs every one of them through this same `args`.
+    original_range = (args.start_frame, args.max_frames)
     try:
-        args.input, prepared = _topaz_prepass(args, reporter, cancel,
-                                              pipeline, is_image)
+        args.input = _topaz_prepass(args, reporter, cancel,
+                                    pipeline, is_image, made)
         return _run_converted(args, reporter, cancel, backends, pipeline,
                               built_cache, is_image)
     finally:
-        if prepared:
-            import os
-
+        # Restored whether or not anything was written: what the pre-pass
+        # changed on `args` it changed before it could fail, and a batch runs
+        # the next file through this same object.
+        args.input = original_input
+        args.start_frame, args.max_frames = original_range
+        for path in made:
             try:
-                os.remove(args.input)
+                os.remove(path)
             except OSError:
                 pass
-            args.input = original_input
 
 
 def _run_converted(args, reporter, cancel, backends, pipeline, built_cache,
@@ -1148,16 +1424,63 @@ def main(argv=None) -> int:
     if args.probe_upscalers:
         import json
 
+        from . import esrgan as _es
+        from . import fsrcnnx as _fs
+        from . import interpolate as _fi
         from . import upscale as _u
 
         # Deliberately never raises: a machine without Topaz, or with a broken
         # one, has to get a usable "no" rather than a traceback, because a GUI
         # calls this at startup on every machine.
         try:
-            print(json.dumps(_u.describe(args.probe_width)))
+            found = _u.describe(args.probe_width)
+            # Two answers in one reply, because the interface asks one
+            # question -- what can this machine do to a source before the
+            # stereo pass -- and the halves have different answers now:
+            # upscaling is Topaz's alone, interpolation is not.
+            for entry in found.get("interpolators", []):
+                entry["source"] = "topaz"
+            for entry in found.get("models", []):
+                entry["source"] = "topaz"
+            # Real-ESRGAN sits in the same list, marked for what it is: a
+            # photo upscaler. The interface shows it greyed for a video
+            # rather than hiding it, so the reason is visible.
+            # The shader goes first among the free ones: it is the only
+            # upscaler here that takes video without crawling.
+            shader = _fs.describe()
+            if shader.get("available"):
+                found.setdefault("models", []).append(
+                    {"code": _fs.CODE, "short": _fs.CODE, "name": _fs.NAME,
+                     "desc": _fs.DESC, "source": "fsrcnnx",
+                     "stills_only": False,
+                     "min_scale": 1.0, "max_scale": 4.0})
+            found["fsrcnnx"] = shader
+            esrgan = _es.describe()
+            if esrgan.get("available"):
+                found.setdefault("models", []).append(
+                    {"code": _es.CODE, "short": _es.CODE, "name": _es.NAME,
+                     "desc": _es.DESC, "source": "esrgan",
+                     "stills_only": True,
+                     "min_scale": 1.0, "max_scale": float(_es.NATIVE_SCALE)})
+            found["esrgan"] = esrgan
+            rife = _fi.describe(args.probe_fps)
+            if rife.get("available"):
+                found.setdefault("interpolators", []).append(
+                    {"code": _fi.CODE, "short": _fi.CODE, "name": _fi.NAME,
+                     "desc": _fi.DESC, "source": "rife",
+                     "min_scale": 1.0, "max_scale": 1.0})
+            found["rife"] = rife
+            found["interpolate_offered"] = bool(
+                found.get("interpolators")
+                and (not args.probe_fps or _fi.offered_for(args.probe_fps)))
+            print(json.dumps(found))
         except Exception as e:                              # noqa: BLE001
             print(json.dumps({"available": False, "auth": "unknown",
-                              "models": [], "offered": False,
+                              "needs_login": False, "models": [],
+                              "interpolators": [], "offered": False,
+                              "interpolate_offered": False,
+                              "esrgan": {"available": False},
+                              "fsrcnnx": {"available": False},
                               "reason": f"{type(e).__name__}: {e}"}))
         return 0
     if args.probe_backends:

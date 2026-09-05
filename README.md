@@ -89,6 +89,77 @@ filename ending `_360_TB` or `_180x180_3dh`. Either signal alone is enough for
 the Quest gallery to show the photo in stereo; writing both costs nothing.
 Nothing is ever renamed for you — the suggestion is only a suggestion.
 
+## Upscaling older footage
+
+Optional, and adds additional Topaz selections if you have [Topaz Video
+AI](https://www.topazlabs.com/topaz-video-ai) installed.
+
+The point is old 360 footage. A 4K equirectangular frame is about 11 pixels per
+degree, which a headset shows as soft; 8K is roughly what one can resolve. This
+rebuilds the source near 8K *before* the stereo pass:
+
+```bash
+# 4K in, near-8K stereo out
+python -m stereo360 old_4k.mp4 -o output.mp4 --upscale
+
+# a specific model and amount
+python -m stereo360 old_4k.mp4 -o output.mp4 --upscale fsrcnnx --upscale-scale 2
+
+# what is installed here, as JSON
+python -m stereo360 --probe-upscalers
+```
+
+Before the stereo pass, never after and never per eye. Some models invent
+detail rather than recovering it, so running one on each eye would invent
+*different* detail for each and hand the viewer binocular rivalry instead of
+sharpness.
+
+Notes on Topaz worth having before you spend an hour on it:
+
+- **Sign in first.** A signed-out Topaz does not refuse the job — it renders it
+  watermarked, and you find out at the end. The UI says so before you start.
+- Tested against **Topaz Video AI 7**, the last perpetual offline release.
+
+## Raising the frame rate
+
+30 fps judders in a headset in a way it does not on a monitor: your head 
+keeps moving and there is no shutter to hide it.
+
+```bash
+# double the frame rate, whichever interpolator this machine has
+python -m stereo360 old.mp4 -o output.mp4 --interpolate
+
+# the free one by name -- fetch the graph once, about 20 MB
+python scripts/fetch_rife.py
+python -m stereo360 old.mp4 -o output.mp4 --interpolate rife
+
+# a specific rate, and Topaz's Chronos rather than RIFE
+python -m stereo360 old.mp4 -o output.mp4 --interpolate chr --interpolate-fps 60
+```
+
+`--interpolate` on its own takes Chronos where Topaz is installed and RIFE
+where it is not, so the flag means the same thing on both kinds of machine.
+Only offered for sources at **30 fps or below** — above that there is no
+judder to fix and the extra frames still have to go through the stereo pass.
+
+Interpolation is a pass over the file before the render, for both RIFE and
+Topaz. Doing it inside the render instead — inventing each frame as the
+converter asks for it — is nicer to wait for, and four to seven times slower,
+because the interpolator then spends the whole render competing with the
+encoder for the machine. Measured at 8K over 59 output frames:
+
+| | inside the render | as a pass first |
+|---|---|---|
+| libx264 (default) | 1046 s | **139 s** |
+| hevc_nvenc | 722 s | **157 s** |
+
+An 8K frame takes 0.94 s to invent on its own; sharing the machine with x264
+it took 14 s. Two phases that each get the machine beat one phase where they
+fight over it.
+
+A frame range counts **output** frames when interpolation is on, since those
+are what comes out and what the progress bar counts.
+
 ## Requirements
 
 - A GPU is strongly recommended. On the CPU, depth estimation is roughly an

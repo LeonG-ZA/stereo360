@@ -40,6 +40,7 @@ class Controller(QObject):
     sourceInfoChanged = Signal()
     backendsChanged = Signal()
     encodersChanged = Signal()
+    upscalersChanged = Signal()
     thumbnailChanged = Signal()
     #: level, text -- appended to the log view
     logged = Signal(str, str)
@@ -65,6 +66,11 @@ class Controller(QObject):
         self._preview_path = os.path.join(
             tempfile.gettempdir(), "stereo360_preview.png")
 
+        #: Frames the render itself has written, and the last pre-pass seen.
+        #: What the Stop banner needs to tell the truth about.
+        self._rendered = 0
+        self._last_stage = ""
+
         self._source_info: Dict[str, Any] = {}
         self._backends: list = []
         self._backend_probe = QProcess(self)
@@ -74,6 +80,11 @@ class Controller(QObject):
         self._encoder_size = None
         self._encoder_probe = QProcess(self)
         self._encoder_probe.finished.connect(self._on_encoders_probed)
+
+        self._upscalers: Dict[str, Any] = {}
+        self._upscale_key = None
+        self._upscale_probe = QProcess(self)
+        self._upscale_probe.finished.connect(self._on_upscalers_probed)
         # Its own process, so a probe can never disturb a running render.
         self._probe = QProcess(self)
         self._probe.finished.connect(self._on_probe_finished)
@@ -120,6 +131,19 @@ class Controller(QObject):
     def sourceInfo(self) -> Dict[str, Any]:
         """What --probe-json reported about the chosen input, or {}."""
         return self._source_info
+
+    @Property("QVariantMap", notify=upscalersChanged)
+    def upscalers(self) -> Dict[str, Any]:
+        """What --probe-upscalers reported, or {} before it has answered.
+
+        `available` says Topaz was found, `offered` that this source is worth
+        upscaling, `needs_login` that it is there but signed out. Alongside
+        those, `interpolators` lists every model that could raise the frame
+        rate -- Topaz's and RIFE's together, each tagged with which it needs
+        -- and `interpolate_offered` says whether this source is slow enough
+        to be worth it. A machine with none of it sees no trace of any of it.
+        """
+        return self._upscalers
 
     @Property("QVariantList", notify=encodersChanged)
     def encoders(self) -> list:
@@ -235,6 +259,57 @@ class Controller(QObject):
             ["-m", "stereo360", "-", "--probe-encoders",
              f"{size[0]}x{size[1]}"])
         self._encoder_probe.start()
+
+    @Slot(int, float)
+    def probeUpscalers(self, width: int = 0, fps: float = 0.0) -> None:
+        """What this machine can do to a source before the stereo pass.
+
+        Asked per source rather than once, because most of the answer depends
+        on it: an 8K input has nothing to gain from upscaling, a 60 fps one
+        nothing from interpolation, and the Topaz sign-in can lapse between
+        one file and the next. Out of process like the other probes, and
+        written so a machine with neither Topaz nor a RIFE model -- which is
+        most of them -- gets an empty answer instead of an error.
+        """
+        key = (int(width), round(float(fps), 3))
+        # Cached per source, except after a signed-out answer: the message
+        # that answer produces asks for a sign-in, so the next attempt has to
+        # be able to find one -- otherwise doing what it says changes nothing.
+        if key == self._upscale_key and not self._upscalers.get("needs_login"):
+            return          # already known; the auth check costs a second
+        if self._upscale_probe.state() != QProcess.NotRunning:
+            return
+        self._upscale_key = key
+        self._upscale_probe.setWorkingDirectory(core_root())
+        self._upscale_probe.setProgram(sys.executable)
+        self._upscale_probe.setArguments(
+            ["-m", "stereo360", "--probe-upscalers",
+             "--probe-width", str(key[0]), "--probe-fps", f"{key[1]:g}"])
+        self._upscale_probe.start()
+
+    def _on_upscalers_probed(self, code: int, _status) -> None:
+        raw = bytes(self._upscale_probe.readAllStandardOutput()).decode(
+            "utf-8", "replace").strip()
+        try:
+            found = json.loads(raw)
+        except ValueError:
+            self._upscale_key = None        # let a later attempt retry
+            return
+        if not isinstance(found, dict):
+            self._upscale_key = None
+            return
+        self._upscalers = found
+        self.upscalersChanged.emit()
+        if found.get("available") and found.get("needs_login"):
+            # Worth saying what still works: RIFE does not care whether Topaz
+            # is signed in, so "signed out" is not the same as "no options".
+            free = any(e.get("source") == "rife"
+                       for e in found.get("interpolators") or ())
+            self.logged.emit(
+                "warn", "Topaz Video AI is installed but not signed in. Sign "
+                        "in there to use its models."
+                        + (" Frame interpolation still works without it."
+                           if free else ""))
 
     def _on_encoders_probed(self, code: int, _status) -> None:
         raw = bytes(self._encoder_probe.readAllStandardOutput()).decode(
@@ -451,6 +526,7 @@ class Controller(QObject):
         if self._busy:
             return
         is_preview = preview_frame is not None
+        self._rendered, self._last_stage = 0, ""
         try:
             argv = options.build_argv(
                 opts, preview_frame=preview_frame,
@@ -471,14 +547,32 @@ class Controller(QObject):
 
     # ------------------------------------------------------------- signals
 
+    #: What to call each pre-pass while it runs. Anything not listed still
+    #: gets said rather than silently reading as the render.
+    _STAGES = {"upscale": "Upscaling", "interpolate": "Smoothing motion"}
+
     def _on_progress(self, frame: int, total: int, elapsed: float,
-                     fps: float, eta: float) -> None:
+                     fps: float, eta: float, stage: str = "") -> None:
+        # Remembered for the banner at the end: stopping during a pre-pass
+        # has produced nothing to save, and saying otherwise sends someone
+        # looking for a file that was never written.
+        if stage:
+            self._last_stage = stage
+        else:
+            self._rendered = frame
+        # A pre-pass says so. It runs before a single stereo frame exists, it
+        # can be the longer half of the job at 8K, and its frame count is not
+        # the render's -- so "Frame 120 of 2400" with no other explanation
+        # reads as a render producing the wrong thing.
+        what = self._STAGES.get(stage, stage.replace("-", " ").capitalize())
         if total > 0:
             self._progress = min(1.0, frame / total)
             head = f"Frame {frame} of {total}"
         else:
             self._progress = 0.0
             head = f"Frame {frame}"
+        if stage:
+            head = f"{what} — frame {frame}" + (f" of {total}" if total else "")
         self.progressChanged.emit()
 
         bits = []
@@ -520,8 +614,19 @@ class Controller(QObject):
 
     def _on_finished(self, ok: bool, cancelled: bool, output: str) -> None:
         self._set_busy(False)
-        if cancelled:
-            self._set_status("Stopped", "The finished frames were saved.")
+        if cancelled and not self._rendered:
+            # Nothing reached the encoder, so there is no partial file. Name
+            # the phase it stopped in, because "nothing was saved" on its own
+            # reads as a failure rather than as a job stopped before it began.
+            what = self._STAGES.get(self._last_stage, "preparing the source")
+            self._set_status(
+                "Stopped",
+                f"Stopped while {what.lower()}, before any frame was "
+                f"rendered — nothing was saved.")
+        elif cancelled:
+            self._set_status(
+                "Stopped",
+                f"The {self._rendered} frames rendered so far were saved.")
         elif ok:
             self._progress = 1.0
             self.progressChanged.emit()

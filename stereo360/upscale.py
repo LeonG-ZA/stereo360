@@ -55,8 +55,10 @@ do not have to be found again:
     a PNG looped twelve times, and an explicit `format=yuv420p` in the chain
     all emit nothing, so it is the demuxer rather than the pixel format -- but
     a one-frame *video* fails too. See `wrap_frames`.
-  * the intermediate has to be yuv420p or the converter's own encoder refuses
-    the colour tags that come back; see `_ENCODERS`.
+  * Topaz hands back RGB, and the converter's own encoder then refuses the
+    colour tags that come with it, so the working file has to be YUV. What
+    format it is otherwise, and whether it is lossless, is
+    `stereo360.intermediate`'s business.
   * Topaz's bundled ffmpeg has no libx264. Its encoder list is its own.
   * the authentication verdict is printed about a second in, while the whole
     run takes ~28 s of engine build. `auth_state` reads until the verdict and
@@ -71,6 +73,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+from .ffmpeg_io import NO_CONSOLE_WINDOW
 
 #: Above this the upscaler is not offered. 8K is already past what a Quest 3
 #: can decode as a 360 stereo *video*, and a 2x on an 8K source would land at
@@ -131,6 +135,9 @@ class Model:
     min_scale: float = 1.0
     max_scale: float = 4.0
     order: int = 999   # Topaz's own ordering, so the list reads as it does there
+    #: Whether the file declared a displayName. The tie-break between two
+    #: models presenting under one name; see `_one_per_name`.
+    named: bool = False
     preflight: int = 0   # frames it wants before it will emit anything
     postflight: int = 0
 
@@ -195,9 +202,28 @@ def _read_models(install: Install, model_type: int) -> List[Model]:
                 min_scale=float(gui.get("minScale") or 1.0),
                 max_scale=float(gui.get("maxScale") or 4.0),
                 order=int(gui.get("displayPri") or 999),
+                named=bool(d.get("displayName")),
                 preflight=int(d.get("preflight") or 0),
                 postflight=int(d.get("postflight") or 0))
-    return sorted(best.values(), key=lambda m: (m.order, m.name.lower()))
+    return sorted(_one_per_name(best.values()),
+                  key=lambda m: (m.order, m.name.lower()))
+
+
+def _one_per_name(models) -> List[Model]:
+    """One entry per name shown, because two of anything reads as a mistake.
+
+    Topaz ships `chf-3` and `ifi-1` both named "Chronos Fast". They differ in
+    that one declares a `displayName` and the other does not, which is the
+    only signal available for which of them Topaz itself means -- so that is
+    the tie-break, and the newer version breaks the remaining tie.
+    """
+    keep: Dict[str, Model] = {}
+    for m in models:
+        seen = keep.get(m.name)
+        if seen is None or (m.named, _version(m.code)) > (seen.named,
+                                                          _version(seen.code)):
+            keep[m.name] = m
+    return list(keep.values())
 
 
 def offered_for(width: int) -> bool:
@@ -229,8 +255,7 @@ def auth_state(install: Install, timeout: float = 40.0) -> str:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             env=install.env(), cwd=os.path.dirname(install.ffmpeg),
-            text=True, errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            text=True, errors="replace", **NO_CONSOLE_WINDOW)
     except OSError:
         return "unknown"
     verdict = "unknown"
@@ -253,27 +278,32 @@ def auth_state(install: Install, timeout: float = 40.0) -> str:
     return verdict
 
 
+def _as_dict(m: Model) -> dict:
+    """A model as the interface wants it: names to show, limits to obey."""
+    return {"code": m.code, "short": m.short, "name": m.name, "desc": m.desc,
+            "min_scale": m.min_scale, "max_scale": m.max_scale}
+
+
 def describe(width: int = 0) -> dict:
     """What the interface needs to decide whether to show any of this.
 
-    One call, because the interface asks once at startup and the answer is
+    One call, because the interface asks once per source and the answer is
     three questions that are only meaningful together: is it here, is it
     usable, and is this particular source worth offering it for.
     """
     install = find()
     if install is None:
         return {"available": False, "reason": "Topaz Video AI was not found",
-                "auth": "unknown", "models": [], "offered": False}
+                "auth": "unknown", "needs_login": False, "models": [],
+                "interpolators": [], "offered": False}
     auth = auth_state(install)
     return {
         "available": True,
         "reason": "",
         "auth": auth,
         "needs_login": auth == "login",
-        "models": [{"code": m.code, "short": m.short, "name": m.name,
-                    "desc": m.desc, "min_scale": m.min_scale,
-                    "max_scale": m.max_scale}
-                   for m in models(install)],
+        "models": [_as_dict(m) for m in models(install)],
+        "interpolators": [_as_dict(m) for m in interpolators(install)],
         "offered": offered_for(width) if width else True,
         "ffmpeg": install.ffmpeg,
     }
@@ -320,23 +350,6 @@ def wrap_frames(model: Optional[Model]) -> int:
     want = model.preflight + model.postflight + 1
     return max(MIN_WRAP_FRAMES, min(want, MAX_WRAP_FRAMES))
 
-#: Preferred intermediate encoders, in order. The pre-pass writes a whole 8K
-#: intermediate that the converter then reads, so this wants to be fast and
-#: near-transparent rather than perfect: NVENC at a high quality is both, and
-#: ffv1 is the fallback where there is no NVIDIA card. Topaz's ffmpeg has no
-#: libx264 at all, which is why the obvious choice is absent.
-#: yuv420p is not incidental. Left to itself the chain hands back RGB, and the
-#: converter passes a source's colour tags through to its own encoder, where
-#: libx264 refuses `colorspace gbr` and the whole run dies at the last step --
-#: after the upscale has been paid for. It also matches what the final output
-#: is encoded as, so nothing is gained by carrying more here.
-_ENCODERS = (
-    ("hevc_nvenc", ("-rc", "constqp", "-qp", "16", "-preset", "p5",
-                    "-pix_fmt", "yuv420p")),
-    ("ffv1", ("-level", "3", "-pix_fmt", "yuv420p")),
-)
-
-
 def resolve(install: Install, wanted: str, kind: str = "up") -> Optional[Model]:
     """A model from a short name ('amq') or an exact code ('amq-13')."""
     want = (wanted or "").strip().lower()
@@ -362,17 +375,20 @@ def interpolators(install: Install) -> List[Model]:
     return _read_models(install, model_type=2)
 
 
-def _encoder(install: Install) -> List[str]:
-    try:
-        out = subprocess.run([install.ffmpeg, "-hide_banner", "-encoders"],
-                             capture_output=True, text=True, timeout=60,
-                             errors="replace").stdout
-    except (OSError, subprocess.SubprocessError):
-        out = ""
-    for name, opts in _ENCODERS:
-        if name in out:
-            return ["-c:v", name, *opts]
-    return ["-c:v", "ffv1", "-pix_fmt", "yuv420p"]
+def _encoder(install: Install, pix_fmt=None, width=0, height=0,
+             frames=None, where=".") -> List[str]:
+    """What to write the working file with.
+
+    Lossless where it fits, and in the source's own pixel format. Both were
+    wrong before -- qp 16 and a blanket yuv420p -- and the converter reads
+    this file to estimate depth from, so neither was free. See
+    stereo360/intermediate.py.
+    """
+    from . import intermediate
+
+    args, _ = intermediate.choose(install.ffmpeg, pix_fmt=pix_fmt, width=width,
+                                  height=height, frames=frames, where=where)
+    return args
 
 
 def chain(up: Optional[Model] = None, scale: float = 2.0,
@@ -396,7 +412,100 @@ def chain(up: Optional[Model] = None, scale: float = 2.0,
     return ",".join(parts)
 
 
+def trimmed(vf: str, trim_from: int = 0, trim_to=None) -> str:
+    """`vf` with the source cut to a frame range before the models see it.
+
+    A frame range is the whole point of a test render, and without this the
+    pass ran over the entire file before the renderer got to apply it -- so
+    asking for sixty frames of an 8K video meant waiting for all of it.
+
+    Both bounds count *source* frames, and the cut goes at the head of the
+    chain rather than `-frames:v` at the tail. Cutting the output short kills
+    Topaz mid-stream: it exits 0xC0000374, a corrupted heap, having written
+    nothing. Given an input that ends where it should, it reaches the end of
+    the stream the way it expects to and stops cleanly. Frame-exact either
+    way, and it never enhances a frame nobody asked for.
+    """
+    bounds = ([f"start_frame={trim_from}"] if trim_from > 0 else []) +              ([f"end_frame={trim_to}"] if trim_to else [])
+    if not bounds:
+        return vf
+    return f"trim={':'.join(bounds)},setpts=PTS-STARTPTS,{vf}"
+
+
 _FRAME_RE = re.compile(r"frame=\s*(\d+)")
+
+#: Codecs Topaz's bundled ffmpeg decodes in software without help. Anything
+#: else is checked before a job starts rather than crashed into.
+_SOFTWARE_CODECS = ("h264", "hevc", "mpeg4", "mpeg2video", "vp9", "prores",
+                    "dnxhd", "ffv1", "rawvideo", "mjpeg")
+
+#: Hardware decoders to try for a codec the software build cannot read, in the
+#: order they are worth trying. Whichever the machine actually has wins.
+_HW_DECODERS = ("cuvid", "qsv", "amf")
+
+#: A decode that failed rather than a model that failed. Topaz answers an
+#: undecodable input by crashing, so the tail of its log is the only evidence.
+_DECODE_FAILED = ("error submitting packet to decoder",
+                  "function not implemented",
+                  "decode error rate")
+
+
+def input_args(install: Install, src: str,
+               codec: Optional[str] = None) -> List[str]:
+    """ffmpeg input options that let Topaz read `src`, or raise saying why.
+
+    Its bundled ffmpeg lists an `av1` decoder that is a hardware-accelerated
+    shell: asked to decode AV1 in software it answers "Function not
+    implemented" and the process then dies with an access violation, which
+    reaches the user as a wall of ffmpeg noise about a filter option. So a
+    codec that is not known-good is settled here, before any work starts, by
+    asking that ffmpeg to decode a single frame.
+
+    Empty list means the plain path works, which is the common case.
+    """
+    if not codec or codec.lower() in _SOFTWARE_CODECS:
+        return []
+
+    candidates: List[List[str]] = [[]]
+    listed = _decoders(install)
+    for suffix in _HW_DECODERS:
+        name = f"{codec.lower()}_{suffix}"
+        if name in listed:
+            candidates.append(["-c:v", name])
+    for args in candidates:
+        if _can_decode(install, src, args):
+            return args
+    raise UpscaleError(
+        f"Topaz Video AI's ffmpeg cannot decode this {codec.upper()} source. "
+        f"Its bundled build has no software {codec.upper()} decoder and no "
+        f"hardware one that works here.\n"
+        f"Either convert the source to H.265 first, or use --interpolate "
+        f"rife, which reads the file through stereo360's own ffmpeg.")
+
+
+def _decoders(install: Install) -> str:
+    try:
+        return subprocess.run(
+            [install.ffmpeg, "-hide_banner", "-decoders"], capture_output=True,
+            text=True, timeout=60, errors="replace", env=install.env(),
+            **NO_CONSOLE_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _can_decode(install: Install, src: str, args: List[str]) -> bool:
+    """Whether Topaz's ffmpeg gets a frame out of `src` with these options."""
+    src = os.path.abspath(src)
+    try:
+        done = subprocess.run(
+            [install.ffmpeg, "-hide_banner", "-nostdin", "-y", *args,
+             "-i", src, "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120, errors="replace",
+            env=install.env(), cwd=os.path.dirname(install.ffmpeg),
+            **NO_CONSOLE_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 class UpscaleError(RuntimeError):
@@ -407,6 +516,9 @@ def run(install: Install, src: str, dst: str, *,
         up: Optional[Model] = None, scale: float = 2.0,
         fi: Optional[Model] = None, fps: Optional[float] = None,
         total: Optional[int] = None, reporter=None, cancel=None,
+        codec: Optional[str] = None, stage: str = "upscale",
+        pix_fmt: Optional[str] = None, width: int = 0, height: int = 0,
+        trim_from: int = 0, trim_to: Optional[int] = None,
         extra_in: Optional[List[str]] = None,
         out_args: Optional[List[str]] = None) -> None:
     """One Topaz pass over `src`, writing `dst`. Raises `UpscaleError`.
@@ -420,17 +532,25 @@ def run(install: Install, src: str, dst: str, *,
     vf = chain(up, scale, fi, fps)
     if not vf:
         raise UpscaleError("nothing to do: no upscale or interpolation model")
+    vf = trimmed(vf, trim_from, trim_to)
+    if out_args is None:
+        out_args = _encoder(install, pix_fmt=pix_fmt, width=width,
+                            height=height, frames=total, where=dst)
+    if extra_in is None:
+        extra_in = input_args(install, src, codec)
+    # Absolute, because the command runs from Topaz's own directory: a path
+    # relative to the user's would point at nothing there.
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
     cmd = [install.ffmpeg, "-hide_banner", "-nostdin", "-y",
-           *(extra_in or []), "-i", src, "-vf", vf,
-           *(out_args if out_args is not None else _encoder(install)), dst]
+           *extra_in, "-i", src, "-vf", vf,
+           *out_args, dst]
     if reporter is not None:
-        reporter.start(total, stage="upscale")
+        reporter.start(total, stage=stage)
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             env=install.env(), cwd=os.path.dirname(install.ffmpeg),
-            text=True, errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            text=True, errors="replace", **NO_CONSOLE_WINDOW)
     except OSError as e:
         raise UpscaleError(f"could not start Topaz: {e}") from e
 
@@ -460,9 +580,16 @@ def run(install: Install, src: str, dst: str, *,
     # file and there is nothing to stat.
     missing = "%" not in dst and not os.path.exists(dst)
     if code != 0 or missing:
-        raise UpscaleError(f"Topaz exited {code}:\n" + "\n".join(tail[-6:]))
+        joined = "\n".join(tail[-6:])
+        if any(s in joined.lower() for s in _DECODE_FAILED):
+            raise UpscaleError(
+                "Topaz Video AI's ffmpeg could not decode this source, so it "
+                "never reached the model. Convert the source to H.265 first, "
+                "or use --interpolate rife, which reads the file through "
+                "stereo360's own ffmpeg.\n" + joined)
+        raise UpscaleError(f"Topaz exited {code}:\n" + joined)
     if reporter is not None:
-        reporter.finish(stage="upscale")
+        reporter.finish(stage=stage)
 
 
 def run_still(install: Install, src: str, dst: str, *,
@@ -486,7 +613,8 @@ def run_still(install: Install, src: str, dst: str, *,
                 "-loop", "1", "-i", src, "-frames:v", str(n),
                 "-r", "30", "-pix_fmt", "yuv420p",
                 "-c:v", "libx264", "-qp", "0", "-preset", "ultrafast", wrapped]
-        if subprocess.run(wrap, capture_output=True, text=True).returncode:
+        if subprocess.run(wrap, capture_output=True, text=True,
+                          **NO_CONSOLE_WINDOW).returncode:
             raise UpscaleError("could not prepare the still for Topaz")
         run(install, wrapped, os.path.join(out_dir, "%03d.png"),
             up=up, scale=scale, total=n, reporter=reporter,
