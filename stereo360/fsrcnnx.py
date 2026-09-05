@@ -66,6 +66,8 @@ _FRAME_RE = re.compile(r"frame=\s*(\d+)")
 #: Whether this ffmpeg can actually run it, which needs libplacebo *and* a
 #: Vulkan device. Probed once: it costs a process launch.
 _usable: Optional[bool] = None
+#: Why not, when `_usable` is False. Cached with it.
+_reason: str = ""
 
 
 class ShaderError(RuntimeError):
@@ -76,6 +78,75 @@ def shader_path(explicit: Optional[str] = None) -> str:
     return explicit or DEFAULT_SHADER
 
 
+#: Hand libplacebo a Vulkan device instead of letting it make its own.
+#:
+#: Without these the filter segfaults before it reaches a frame -- measured on
+#: a Radeon 780M with a healthy driver: `-init_hw_device vulkan` on its own
+#: builds a device and lists queue families happily, and the very same
+#: filtergraph then dies with an access violation the moment libplacebo has to
+#: create one for itself. Supplying it explicitly is the whole fix; the
+#: filtergraph does not change, and no `hwupload` is needed.
+#:
+#: The failure it replaces is the expensive kind: the filter is present, the
+#: driver is current, Vulkan works, and the only symptom is a crash with an
+#: empty log, which reads as "this machine cannot do libplacebo" when the
+#: machine is fine.
+VULKAN_ARGS = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
+
+
+def _has_filter(ffmpeg: str) -> bool:
+    """Whether this build carries the libplacebo filter at all."""
+    try:
+        done = subprocess.run([ffmpeg, "-hide_banner", "-filters"],
+                              capture_output=True, text=True, timeout=60,
+                              errors="replace", **NO_CONSOLE_WINDOW)
+        return "libplacebo" in (done.stdout or "")
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def problem(ffmpeg: str = "ffmpeg", recheck: bool = False) -> Optional[str]:
+    """Why the shader cannot run here, or None if it can.
+
+    Separated from `usable` because the two failures need different advice
+    and used to be reported as one sentence. A build without the filter is
+    fixed by installing a different ffmpeg. A build *with* it that crashes is
+    a driver problem, and saying "this ffmpeg has no libplacebo" about a
+    build whose `-filters` plainly lists it sends the reader somewhere there
+    is nothing to find -- measured on a Radeon 780M, where the filter is
+    present, a Vulkan device initialises, and the filter then segfaults.
+    """
+    global _usable, _reason
+    if _usable is not None and not recheck:
+        return _reason or None
+    try:
+        done = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             *VULKAN_ARGS,
+             "-f", "lavfi", "-i", "testsrc2=size=64x64", "-frames:v", "1",
+             "-vf", "format=yuv420p,libplacebo=w=128:h=128", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120, errors="replace",
+            **NO_CONSOLE_WINDOW)
+        if done.returncode == 0:
+            _usable, _reason = True, ""
+        elif not _has_filter(ffmpeg):
+            _usable, _reason = False, (
+                "this ffmpeg was not built with libplacebo, so the shader "
+                "cannot run; a full build provides it")
+        else:
+            # Negative on POSIX is a signal; the large positive is a Windows
+            # NTSTATUS. Either way the filter is there and it died.
+            code = done.returncode
+            how = (f"signal {-code}" if code < 0
+                   else f"0x{code:08X}" if code > 0xC0000000 else f"exit {code}")
+            _usable, _reason = False, (
+                f"this ffmpeg has libplacebo but it failed to run ({how}) -- "
+                f"usually a Vulkan driver problem rather than a missing build")
+    except (OSError, subprocess.SubprocessError) as e:
+        _usable, _reason = False, f"could not run ffmpeg ({type(e).__name__})"
+    return _reason or None
+
+
 def usable(ffmpeg: str = "ffmpeg", recheck: bool = False) -> bool:
     """Whether libplacebo is present and a Vulkan device answers.
 
@@ -83,20 +154,8 @@ def usable(ffmpeg: str = "ffmpeg", recheck: bool = False) -> bool:
     the filter and still have no device to run it on, and the failure then
     lands in the middle of someone's render rather than before it.
     """
-    global _usable
-    if _usable is not None and not recheck:
-        return _usable
-    try:
-        done = subprocess.run(
-            [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc2=size=64x64", "-frames:v", "1",
-             "-vf", "format=yuv420p,libplacebo=w=128:h=128", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=120, errors="replace",
-            **NO_CONSOLE_WINDOW)
-        _usable = done.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        _usable = False
-    return _usable
+    problem(ffmpeg, recheck)
+    return bool(_usable)
 
 
 def available(explicit: Optional[str] = None, ffmpeg: str = "ffmpeg") -> bool:
@@ -109,9 +168,9 @@ def describe(explicit: Optional[str] = None, ffmpeg: str = "ffmpeg") -> dict:
     if not os.path.exists(path):
         return {"available": False, "shader": path,
                 "reason": f"no FSRCNNX shader at {path}"}
-    if not usable(ffmpeg):
-        return {"available": False, "shader": path,
-                "reason": "this ffmpeg has no libplacebo, or no Vulkan device"}
+    why = problem(ffmpeg)
+    if why:
+        return {"available": False, "shader": path, "reason": why}
     return {"available": True, "shader": path, "reason": ""}
 
 
@@ -161,7 +220,15 @@ def run(src: str, dst: str, *, width: int, height: int, scale: float = 2.0,
     vf = chain(width, height, scale, shader)
     if trim_from > 0:
         vf = f"trim=start_frame={trim_from},setpts=PTS-STARTPTS,{vf}"
-    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", src, "-vf", vf]
+    # Audio is copied, never re-encoded. Without this ffmpeg maps the source's
+    # track and encodes it with whatever the container defaults to -- and the
+    # working file is Matroska, whose default is Vorbis, so an AAC source came
+    # out the far end as low-bitrate Vorbis. Nothing announced it: the pre-pass
+    # is a video stage and audio was never mentioned in the command, so the
+    # default applied in silence and the converter then copied the result into
+    # the output as if it were the original.
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", *VULKAN_ARGS,
+           "-i", src, "-vf", vf, "-c:a", "copy"]
     if frames:
         cmd += ["-frames:v", str(int(frames))]
     from . import intermediate

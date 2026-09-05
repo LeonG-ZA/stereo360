@@ -1043,12 +1043,27 @@ def source_geometry(info, projection_name: str, face_size: Optional[int],
 
 
 def read_source(input_path: str, info, projection_name: str, out_w: int,
-                out_h: int, max_frames: Optional[int], start_frame: int):
-    """Yield SourceFrame, converting cubemap input as it goes."""
+                out_h: int, max_frames: Optional[int], start_frame: int,
+                resize_to: Optional[tuple] = None):
+    """Yield SourceFrame, converting cubemap input as it goes.
+
+    `resize_to` shrinks each frame as it arrives, which is what turns
+    supersampling off: everything downstream then works at the delivered size
+    instead of at the source's. INTER_AREA rather than anything sharper --
+    it area-averages, so it prefilters against the aliasing that a decimation
+    otherwise folds back into the picture, and depth is estimated from this
+    frame. A ringing filter here would hand the model edges that are not in
+    the scene.
+    """
     frames = ffmpeg_io.decode_frames(input_path, max_frames=max_frames,
                                      skip_frames=start_frame)
     if projection_name != "cubemap":
         for frame in frames:
+            if resize_to is not None and frame.shape[1::-1] != resize_to:
+                import cv2
+
+                frame = cv2.resize(frame, resize_to,
+                                   interpolation=cv2.INTER_AREA)
             yield SourceFrame(frame, None)
         return
     for frame in frames:
@@ -1229,6 +1244,7 @@ def convert(
     output_mode: str = DEFAULT_OUTPUT_MODE,
     yaw: float = 0.0,
     output_width: Optional[int] = None,
+    supersample: bool = True,
     reporter: Optional[Reporter] = None,
     cancel: Optional[Callable[[], bool]] = None,
     live_preview: Optional[str] = None,
@@ -1264,8 +1280,37 @@ def convert(
     check_input_is_monoscopic_360(info, input_projection, reporter)
     source_projection = resolve_projection(info, input_projection,
                                            reporter)
+    face_size_asked = face_size
     face_size, w, h = source_geometry(info, source_projection, face_size,
                                       reporter)
+
+    # Supersampling off: work at the delivered size from the first frame
+    # rather than rendering big and shrinking at the end. Everything after
+    # this reads `w` and `h`, so moving them here is the whole change --
+    # depth, the warp and the fill all follow.
+    #
+    # Worth 1.65x on an 8K source delivered at 5760, measured over ten frames
+    # at 15.05 s against 9.11. It is a real trade and not a free one: depth is
+    # estimated from a smaller frame, and the auto face size falls with it
+    # (1920 to 1440 in that case), so the geometry is coarser and not merely
+    # the picture. Off by default for that reason.
+    render_size = None
+    if not supersample and source_projection != "cubemap":
+        want_w, want_h = scaled_eye_size(w, h, output_width)
+        if (want_w, want_h) != (w, h):
+            render_size = (want_w, want_h)
+            w, h = want_w, want_h
+            # Only when it was auto. An explicit --face-size is a decision
+            # about the depth model, not about the delivery size, and
+            # silently rescaling it would be answering a question the user
+            # already answered.
+            if face_size_asked is None:
+                face_size = max(1, w // 4)
+            reporter.info(
+                f"Rendering at {w}x{h} rather than the source's "
+                f"{info.width}x{info.height}: faster, and not supersampled. "
+                f"Face size {face_size}.",
+                width=w, height=h, face_size=face_size, supersample=False)
 
     total = info.frame_count
     if total:
@@ -1305,7 +1350,7 @@ def convert(
         audio_filter=audio_filter, audio_args=audio_args,
     )
     frames = read_source(input_path, info, source_projection, w, h,
-                         max_frames, start_frame)
+                         max_frames, start_frame, resize_to=render_size)
     sink = _Sink(encoder, reporter, cancel, output_mode, yaw, eye_size,
                  preview_path=live_preview,
                  preview_every=live_preview_every)
@@ -1750,6 +1795,15 @@ def _convert_chunked(
         for (eye_strength,) in eyes:
             dn_pres, rights, holes = [], [], []
             for i in range(emit):
+                # Every frame, not only every chunk. The one check above
+                # covers the depth pass; the warps after it are the larger
+                # half -- a chunk of 8 at two eyes is sixteen of them -- and
+                # nothing looked at Stop until all of them had finished and
+                # the first write came round. Over a hundred seconds on a
+                # laptop, against an interface that gives up waiting after
+                # thirty and kills the process, which loses the spherical
+                # metadata and leaks the pre-pass file.
+                sink.check()
                 dn_pres.append(maps[i].copy())  # pre-erosion, chunk-normalized
                 # The warp erodes its depth map in place, so when both eyes
                 # are synthesized the second one needs an intact copy.
@@ -1769,6 +1823,7 @@ def _convert_chunked(
 
             sign = 1.0 if eye_strength >= 0 else -1.0
             for i in range(emit):
+                sink.check()
                 rights[i] = warp.fill_holes(rights[i], holes[i], dn_pres[i],
                                             inpaint_mode=inpaint_mode,
                                             baseline_sign=sign)

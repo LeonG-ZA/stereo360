@@ -26,6 +26,13 @@ def core_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(stereo360.__file__)))
 
 
+#: How long a cancel is given before the child is killed. Generous because
+#: the cost of being wrong is asymmetric: waiting longer than necessary costs
+#: seconds, killing too early costs the output's metadata and leaves a large
+#: temporary file behind.
+KILL_AFTER_MS = 180_000
+
+
 class Runner(QObject):
     """One conversion or preview at a time."""
 
@@ -96,13 +103,22 @@ class Runner(QObject):
         A line on stdin rather than a kill, so ffmpeg finalizes the file and
         the frames already encoded stay playable. The timer is the backstop
         for a child wedged somewhere that never checks.
+
+        The backstop is for a *wedged* child, not a slow one, and it used to
+        be unable to tell the difference. A chunk's depth pass cannot be
+        interrupted -- eight frames of it is tens of seconds on a laptop --
+        so a healthy render could pass thirty seconds without reaching a
+        check, get killed, and lose exactly what a clean stop exists to
+        protect: the spherical metadata is written after the last frame, so a
+        killed run leaves a file a headset shows flat, plus a pre-pass file
+        of a gigabyte or more with nothing to delete it.
         """
         if not self.is_running() or self._cancelling:
             return
         self._cancelling = True
         self.logged.emit("info", "Stopping after the current frame…")
         self._proc.write(b"cancel\n")
-        self._kill_timer.start(30_000)
+        self._kill_timer.start(KILL_AFTER_MS)
 
     def _force_kill(self) -> None:
         if self.is_running():

@@ -104,7 +104,13 @@ def test_a_scale_of_zero_is_refused():
 @needs_model
 def test_video_is_refused_with_the_reason(tmp_path):
     """The refusal has to carry the measurement, because "photos only" on its
-    own reads as an arbitrary limitation rather than a finding."""
+    own reads as an arbitrary limitation rather than a finding.
+
+    Asked of the stills-only model by name rather than of "the ONNX one".
+    Since SPAN arrived, running through onnxruntime no longer implies unfit
+    for video -- SPAN passes a small frame-to-frame change through at 0.99x,
+    steadier than the shader -- so the refusal keys on the measurement and
+    this test has to name a model the measurement actually refuses."""
     src = tmp_path / "clip.mp4"
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
@@ -113,10 +119,14 @@ def test_video_is_refused_with_the_reason(tmp_path):
 
     done = subprocess.run(
         [sys.executable, "-m", "stereo360", str(src),
-         "-o", str(tmp_path / "out.mp4"), "--upscale", "esrgan"],
+         "-o", str(tmp_path / "out.mp4"), "--upscale", "siax"],
         capture_output=True, text=True, timeout=300, cwd=str(ROOT))
 
     assert done.returncode != 0
     said = done.stdout + done.stderr
     assert "photos" in said
-    assert "135%" in said, "the number is the argument; keep it in the message"
+    # The number, not a particular number: the refusal carries whatever was
+    # measured for the model being refused, and Siax's figure is how far it
+    # amplifies a small change rather than the old percentage-of-movement.
+    assert "4.2 times" in said
+    assert "fsrcnnx16" in said, "and it has to say what to use instead"

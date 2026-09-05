@@ -178,7 +178,7 @@ $ArpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\stereo360'
 # ------------------------------------------------------------------ display
 
 $script:StepNo = 0
-$script:StepTotal = 15
+$script:StepTotal = 16
 
 function Write-Step {
     param([string] $Text)
@@ -629,7 +629,7 @@ Write-Decision 'existing_install' $(
 Write-Step 'Choosing the accelerator'
 $acc = Resolve-Accelerator
 # One step more for DirectML, which has to build its own depth model.
-if ($acc.kind -eq 'directml') { $script:StepTotal = 16 }
+if ($acc.kind -eq 'directml') { $script:StepTotal = 17 }
 if ($acc.cap) { Write-Detail "NVIDIA GPU, compute capability $($acc.cap)" }
 else { Write-Detail 'no NVIDIA GPU detected' }
 Write-Decision 'accelerator' $acc.kind
@@ -945,6 +945,32 @@ if ($LASTEXITCODE -ne 0) {
     Write-Detail 'Depth Pro, for stills, downloads on first use -- about 1.9 GB'
 }
 Remove-Item $warm -ErrorAction SilentlyContinue
+
+# ---- enhancement models -------------------------------------------------
+Write-Step 'Fetching the enhancement models'
+# About 104 MB for all seven, against the 105 MB depth model in the step above.
+# Small enough that leaving them out saves nothing and costs a first run where
+# the Enhance panel is simply absent -- which reads as a bug rather than as a
+# missing download, because the panel is hidden rather than empty.
+#
+# Fetched rather than bundled: the three licences differ, and downloading on
+# someone's behalf is a different question from shipping weights inside an
+# installer.
+#
+# Never fatal, and a partial result is the normal one. Five of the seven are
+# ONNX graphs exported from checkpoints rather than files copied, so they need
+# torch and a loader that knows the architectures. Whatever arrives is usable
+# on its own and the interface offers what it finds, so one model that cannot
+# be built here must not take the others with it.
+#
+Invoke-Pip $py @('install', '--no-warn-script-location', 'spandrel') 'spandrel (model export)'
+Invoke-Native { & $py -m stereo360 --fetch-enhancers }
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn 'could not fetch the enhancement models'
+    Write-Detail 'the interface can download them later from the Enhance panel'
+} else {
+    Write-Good 'Upscalers and RIFE cached'
+}
 
 # ---- launchers ----------------------------------------------------------
 Write-Step 'Creating shortcuts'
