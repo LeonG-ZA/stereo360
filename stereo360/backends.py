@@ -183,9 +183,20 @@ def torch_backend_problem() -> Optional[str]:
         from transformers import (AutoImageProcessor,  # noqa: F401
                                   AutoModelForDepthEstimation)
     except Exception as e:                       # noqa: BLE001
-        return (f"transformers does not import against torch "
-                f"{getattr(torch, '__version__', '?')} "
-                f"({type(e).__name__}: {e})")
+        # Name the usual cause rather than only the symptom. This failure is
+        # almost always a pinned torch: torch-directml requires torch 2.4.1
+        # and installing it downgrades whatever was there, after which a
+        # current transformers cannot import. The message is otherwise a
+        # missing symbol from a module nobody here has heard of.
+        why = (f"transformers does not import against torch "
+               f"{getattr(torch, '__version__', '?')} "
+               f"({type(e).__name__}: {e})")
+        if _installed("torch_directml"):
+            why += ("\n  torch-directml is installed and pins torch 2.4.1, "
+                    "which is very likely why. Nothing that renders uses it: "
+                    "`pip uninstall torch-directml && pip install -U torch "
+                    "torchvision`.")
+        return why
     try:
         if torch.cuda.is_available():
             return None

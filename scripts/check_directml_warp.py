@@ -13,10 +13,21 @@ warp depends on, one at a time, and reports what works.
     pip install torch-directml
     python scripts/check_directml_warp.py
 
-WARNING: torch-directml pins torch==2.4.1 and torchvision==0.19.1, so
-installing it will DOWNGRADE torch. That is harmless on a machine where torch
-is CPU-only anyway (AMD on Windows has no ROCm build), but it will break a
-working CUDA install. Do not run this on a CUDA machine without a virtualenv.
+WARNING: install this in a virtualenv, on any machine.
+
+torch-directml pins torch==2.4.1 and torchvision==0.19.1, so installing it
+DOWNGRADES torch. This warning used to say that was harmless where torch is
+CPU-only anyway, and that was wrong -- measured on the AMD-on-Windows machine
+it described. transformers moved on: 5.x imports `DTensor` from
+`torch.distributed.tensor`, which 2.4.1 does not have, so every backend that
+loads through transformers stops importing. Depth Pro is one of them, and it
+is the stills default, so the tool loses its photo path and says only
+"cannot import name 'DTensor'" while doing it.
+
+Nothing that renders imports torch_directml -- `warp_torch` refuses the
+device deliberately, see its docstring -- so on a machine that only converts,
+this package costs a working transformers and buys nothing. It belongs beside
+the experiment that wants it, not in the interpreter that runs the tool.
 
 If every operation passes, the last check runs the real warp on the DirectML
 device and compares it against the numpy reference.
