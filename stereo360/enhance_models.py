@@ -193,8 +193,16 @@ def fetch(keys: Optional[Sequence[str]] = None,
             # windowless parent opens a console of its own -- which for a
             # download that takes a minute is a black rectangle over
             # someone's work.
+            # utf-8 for the child, and belt-and-braces with the script's
+            # own reconfigure: torch's exporter prints emoji, the Windows
+            # default for a pipe is cp1252, and the resulting
+            # UnicodeEncodeError happens inside the exporter rather than
+            # here -- so it looked like a missing package rather than a
+            # console encoding.
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
             proc = subprocess.run(argv, cwd=root, capture_output=True,
-                                  text=True, timeout=900, **NO_CONSOLE_WINDOW)
+                                  text=True, timeout=900, env=env,
+                                  errors="replace", **NO_CONSOLE_WINDOW)
         except (OSError, subprocess.SubprocessError) as e:
             out[spec.key] = {"ok": False, "detail": f"{type(e).__name__}: {e}"}
             continue
@@ -208,8 +216,13 @@ def fetch(keys: Optional[Sequence[str]] = None,
             tail = [l.strip() for l in
                     (proc.stderr or proc.stdout or "").strip().splitlines()
                     if l.strip()]
+            # A warning is not the error, even when it mentions one: torch's
+            # deprecation notice for `dynamic_axes` contains the text
+            # "UserError", and reporting that as the failure sent the reader
+            # after the wrong thing entirely.
             said = next((l for l in reversed(tail)
-                         if "Error" in l or "error" in l), None)
+                         if ("Error" in l or "error" in l)
+                         and "Warning" not in l), None)
             out[spec.key] = {
                 "ok": False,
                 "detail": said or (tail[-1] if tail else

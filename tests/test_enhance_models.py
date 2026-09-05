@@ -503,3 +503,56 @@ def test_neither_installer_dies_over_the_optional_exporter(installer, marker):
     # is, within a few lines either side of the call.
     window = text[max(0, i - 700):i + 300]
     assert marker in window, f"{installer} installs spandrel fatally"
+
+
+# ---------------------------------------------- what actually broke an export
+
+def test_the_export_asks_for_the_tracing_exporter():
+    """torch made its dynamo exporter the default, and SPAN through it
+    segfaults -- exit 139, no traceback, on torch 2.13 -- while the same model
+    through the tracer exports in a second. Not conservatism: a crash with no
+    message, which arrived looking like a missing package."""
+    src = (Path(ROOT) / "scripts" / "fetch_upscalers.py").read_text(
+        encoding="utf-8")
+    assert "dynamo=False" in src
+    # and it must survive a torch too old to know the argument
+    assert "except TypeError" in src
+
+
+def test_the_export_cannot_be_killed_by_something_it_prints():
+    """torch's exporter prints progress with emoji in it, and a Windows
+    console or pipe defaults to cp1252. The print then raises
+    UnicodeEncodeError inside the exporter and takes the export with it: five
+    checkpoints downloaded, no graphs written, and the only clue three frames
+    deep in someone else's traceback."""
+    src = (Path(ROOT) / "scripts" / "fetch_upscalers.py").read_text(
+        encoding="utf-8")
+    assert 'reconfigure(encoding="utf-8", errors="replace")' in src
+
+    fetcher = (Path(ROOT) / "stereo360" / "enhance_models.py").read_text(
+        encoding="utf-8")
+    assert 'PYTHONIOENCODING="utf-8"' in fetcher, \
+        "the child needs it too; the parent's setting does not reach it"
+
+
+def test_a_warning_is_not_reported_as_the_error(monkeypatch):
+    """torch's deprecation notice for `dynamic_axes` contains the text
+    "UserError", so picking the last line mentioning an error reported the
+    warning as the failure and sent the reader after the wrong thing."""
+    from stereo360 import enhance_models as em
+
+    monkeypatch.setattr(em.Spec, "present", lambda self: False)
+    monkeypatch.setattr(em, "_can_export", lambda: True)
+
+    class Done:
+        returncode = 1
+        stdout = ""
+        stderr = ("UserWarning: 'dynamic_axes' is not recommended when "
+                  "dynamo=True, and may lead to 'torch._dynamo.exc.UserError: "
+                  "Constraints violated.'\n"
+                  "RuntimeError: the actual thing that went wrong\n")
+
+    monkeypatch.setattr(em.subprocess, "run", lambda *a, **k: Done())
+    got = em.fetch(keys=["span"], on_line=lambda m: None)
+    assert "RuntimeError" in got["span"]["detail"]
+    assert "UserWarning" not in got["span"]["detail"]

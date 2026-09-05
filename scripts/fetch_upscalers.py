@@ -29,6 +29,23 @@ from stereo360 import upscalers                                  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# torch's ONNX exporter prints progress with emoji in it, and on Windows a
+# console or a pipe defaults to cp1252, which cannot encode them. The print
+# then raises UnicodeEncodeError *inside* the exporter and takes the export
+# down with it -- so a working torch, a working spandrel and a model that
+# loads fine still produced nothing, and the failure read as a missing
+# package. Measured on an installed 1.0.7: five checkpoints downloaded, no
+# graphs written, and the only clue three frames deep in someone else's
+# traceback.
+#
+# `errors="replace"` as well as utf-8, because the point is that no character
+# an upstream library decides to print may stop a model being built.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):        # not a real stream
+        pass
+
 
 def fetch(url: str, dest: str) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -47,11 +64,23 @@ def export_onnx(weights: str, out: str) -> None:
     print(f"    {d.architecture.name} x{d.scale}, {params:.2f}M parameters")
     # Dynamic height and width: the runner tiles, and the tiles at a frame's
     # right and bottom edges are not the same size as the rest.
-    torch.onnx.export(net, torch.randn(1, 3, 64, 64), out,
-                      input_names=["input"], output_names=["output"],
-                      opset_version=17,
-                      dynamic_axes={"input": {2: "h", 3: "w"},
-                                    "output": {2: "H", 3: "W"}})
+    #
+    # `dynamo=False` asks for the older tracing exporter, and it is not
+    # conservatism for its own sake. torch made the dynamo exporter the
+    # default, and SPAN through it *segfaults* -- exit 139, no traceback, on
+    # torch 2.13 -- while the same model through the tracer exports in a
+    # second. The tracer also takes `dynamic_axes`, which the new one
+    # deprecates and warns about. Older torch has no such argument, so its
+    # absence is not an error.
+    kw = dict(input_names=["input"], output_names=["output"],
+              opset_version=17,
+              dynamic_axes={"input": {2: "h", 3: "w"},
+                            "output": {2: "H", 3: "W"}})
+    try:
+        torch.onnx.export(net, torch.randn(1, 3, 64, 64), out,
+                          dynamo=False, **kw)
+    except TypeError:
+        torch.onnx.export(net, torch.randn(1, 3, 64, 64), out, **kw)
 
 
 def main() -> int:
