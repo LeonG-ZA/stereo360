@@ -183,6 +183,93 @@ def upscale(sess, frame: np.ndarray, scale: float = 2.0,
     return out
 
 
+def run_video(src: str, dst: str, *, scale: float = 2.0,
+              model: Optional[str] = None, provider: Optional[str] = None,
+              name: str = NAME, code: str = CODE,
+              trim_from: int = 0, frames: Optional[int] = None,
+              total: Optional[int] = None, pix_fmt: Optional[str] = None,
+              reporter=None, cancel=None, ffmpeg: str = "ffmpeg") -> str:
+    """Upscale every frame of `src` into `dst`. Returns the path written.
+
+    This did not exist while the only model here was for photos. It does now
+    because SPAN changed what is affordable: 5 s a frame against Siax's 129,
+    and it passes a small frame-to-frame change through at 0.99x, steadier
+    than the shader. A model that will not crawl and can be afforded per
+    frame is a video upscaler, and refusing it for want of a loop would be
+    the wrong reason.
+
+    Frame at a time in and out. A whole upscaled 8K sequence never exists as
+    an array, and the intermediate is written by `intermediate.choose`, so
+    this keeps the source's pixel format and its losslessness like every
+    other pre-pass.
+    """
+    path = model_path(model)
+    if not os.path.exists(path):
+        raise EsrganError(f"model not found: {path}")
+
+    import numpy as np
+
+    from . import ffmpeg_io, intermediate
+
+    info = ffmpeg_io.probe(src)
+    out_w = int(round(info.width * scale))
+    out_h = int(round(info.height * scale))
+    sess, chosen = _session(path, provider)
+    if reporter is not None:
+        reporter.info(f"Upscaling with {name} on {chosen}: {scale:g}x from "
+                      f"{info.width}x{info.height}", stage="upscale",
+                      model=code)
+        reporter.start(total, stage="upscale")
+
+    args, _ = intermediate.choose(ffmpeg, pix_fmt=pix_fmt, width=out_w,
+                                  height=out_h, frames=total, where=dst)
+    # The frames arrive on stdin, so the source is opened a second time for
+    # its audio alone -- `1:a?` because a clip without a track is ordinary and
+    # must not fail the map. Copied rather than encoded: this is a working
+    # file for the video stage, and re-encoding audio it only carries would
+    # cost quality for nothing. The same shape `interpolate.py` already uses.
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+           "-f", "rawvideo", "-pix_fmt", "rgb24",
+           "-s", f"{out_w}x{out_h}", "-r", f"{info.fps:g}", "-i", "-",
+           "-i", src, "-map", "0:v", "-map", "1:a?", "-c:a", "copy",
+           *args, dst]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                            stderr=subprocess.PIPE, **NO_CONSOLE_WINDOW)
+    written = 0
+    try:
+        for frame in ffmpeg_io.decode_frames(src, max_frames=frames,
+                                             skip_frames=trim_from):
+            if cancel is not None and cancel():
+                raise EsrganError("cancelled")
+            # decode_frames yields RGB; `upscale` works in whatever it is
+            # handed and returns the same order, so no conversion is needed
+            # in either direction.
+            big = upscale(sess, frame, scale=scale)
+            assert proc.stdin is not None
+            proc.stdin.write(np.ascontiguousarray(big[:out_h, :out_w]).tobytes())
+            written += 1
+            if reporter is not None:
+                reporter.advance(1)
+    except BrokenPipeError:
+        pass                                    # ffmpeg died; reported below
+    finally:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        rc = proc.wait()
+        if reporter is not None:
+            reporter.finish(stage="upscale")
+    if rc != 0 or not os.path.exists(dst):
+        err = (proc.stderr.read().decode("utf-8", "replace").strip()
+               if proc.stderr else "")
+        raise EsrganError(f"ffmpeg exited {rc}:\n" + err[-400:])
+    if not written:
+        raise EsrganError("no frames were upscaled")
+    return dst
+
+
 def run_still(src: str, dst: str, *, scale: float = 2.0,
               model: Optional[str] = None, provider: Optional[str] = None,
               reporter=None, ffmpeg: str = "ffmpeg") -> tuple:

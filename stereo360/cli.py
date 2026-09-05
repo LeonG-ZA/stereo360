@@ -245,6 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "nothing is resampled. Only valid with --output-mode "
                         "vr180, since 360 output keeps the whole sphere and "
                         "has no direction to choose. (default: 0)")
+    p.add_argument("--no-supersample", action="store_true",
+                   help="With --output-width, render at the delivered size "
+                        "instead of rendering full size and resizing at the "
+                        "end. Measured 1.65x faster on an 8K source delivered "
+                        "at 5760 (15.05s to 9.11s a frame). The trade is real: "
+                        "depth is estimated from the smaller frame and the "
+                        "auto face size falls with it, so the geometry is "
+                        "coarser, not only the picture. No effect without "
+                        "--output-width, or on cubemap input.")
     p.add_argument("--output-width", type=int, default=None, metavar="W",
                    help="Deliver a frame W pixels wide instead of whatever "
                         "the source implies: 360 output becomes WxW, vr180 "
@@ -410,6 +419,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rife-model", default=None, metavar="PATH",
                    help="Path to the RIFE ONNX graph (default: "
                         "models/rife_v4.25.onnx)")
+    p.add_argument("--fetch-enhancers", nargs="?", const="all",
+                   metavar="WHICH",
+                   help="Download the source-enhancement models (about 26 MB "
+                        "total) into models/ and exit. WHICH is 'all' or a "
+                        "comma-separated list of fsrcnnx, esrgan, rife. "
+                        "Already-present models are left alone. Used by the "
+                        "installer and by the interface's download button.")
     p.add_argument("--probe-upscalers", action="store_true",
                    help="Print whether Topaz Video AI is installed here, "
                         "whether it is signed in, and which upscaling models "
@@ -583,6 +599,11 @@ _VIDEO_ONLY_FLAGS = (
     ("preview_frame", "--preview-frame",
      "the output already is that one frame"),
     ("spatial_audio", "--spatial-audio", "an image has no audio track"),
+    # A still renders one frame, so trading its geometry for speed buys
+    # seconds and costs the deliverable. `default_output_width` already
+    # exempts photos from the delivery cap for the same reason.
+    ("no_supersample", "--no-supersample",
+     "a still is one frame, and rendering it small only makes it worse"),
 )
 
 
@@ -967,41 +988,56 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
     # invents a third more frame-to-frame movement than the scene has, which
     # in a headset reads as crawling. See stereo360/esrgan.py for the table.
     wanted_up = (args.upscale or "").strip().lower()
-    use_esrgan = wanted_up == _es.CODE
+    from . import upscalers as _up
+
+    # Which of the six was asked for, if any. One lookup rather than a
+    # comparison per model: the list grew from two to six, and a chain
+    # of `== CODE` is how one of them ends up silently unreachable.
+    chosen = _up.get(wanted_up)
+    use_esrgan = chosen is not None and chosen.kind == "onnx"
     # FSRCNNX takes video as well as stills: it is a resampler rather than a
     # generator, so it does not invent detail that fails to hold still. See
     # stereo360/fsrcnnx.py.
-    use_shader = wanted_up == _fs.CODE
+    use_shader = chosen is not None and chosen.kind == "shader"
+    #: The file this run will load: the registry's, unless one was named.
+    chosen_path = (args.fsrcnnx_shader or args.esrgan_model
+                   or (chosen.path if chosen else None))
     if use_shader:
-        if not os.path.exists(_fs.shader_path(args.fsrcnnx_shader)):
+        if not os.path.exists(_fs.shader_path(chosen_path)):
             raise SystemExit("\n".join((
-                f"No FSRCNNX shader at {_fs.shader_path(args.fsrcnnx_shader)}.",
+                f"No FSRCNNX shader at {_fs.shader_path(chosen_path)}.",
                 "Fetch it once (about 70 KB):",
-                "    python scripts/fetch_fsrcnnx.py")))
+                f"    python scripts/fetch_upscalers.py {chosen.code}")))
         if not _fs.usable():
             raise SystemExit(
                 "--upscale fsrcnnx needs libplacebo in ffmpeg and a Vulkan "
                 "device, and this machine has one or neither. Everything "
                 "else works without it.")
     elif use_esrgan:
-        if not is_image:
+        # Only the models measured as unsteady are refused for video,
+        # not every model that happens to run through onnxruntime. SPAN
+        # passes a small input change straight through -- 0.99x, steadier
+        # than the shader -- while Siax turns a one-level wobble into
+        # four, and detail re-invented differently each frame is what a
+        # headset shows as crawling.
+        if chosen.stills_only and not is_image:
             raise SystemExit(
-                "--upscale esrgan is for photos. On video it is the least "
-                "steady upscaler measured -- 135% of the movement the real "
-                "footage has, against 104% for Topaz's Artemis High Quality "
-                "-- and invented detail that will not hold still reads as "
-                "crawling in a headset.")
-        if not _es.available(args.esrgan_model):
+                f"--upscale {chosen.code} is for photos. On video it "
+                f"amplifies a small frame-to-frame change 4.2 times, and "
+                f"invented detail that will not hold still reads as "
+                f"crawling in a headset. For video use "
+                f"--upscale {_up.VIDEO_DEFAULT}, or --upscale span.")
+        if not _es.available(chosen_path):
             raise SystemExit("\n".join((
-                f"No Real-ESRGAN model at {_es.model_path(args.esrgan_model)}.",
-                "Fetch it once (about 5 MB):",
-                "    python scripts/fetch_esrgan.py")))
+                f"No model at {_es.model_path(chosen_path)}.",
+                f"Fetch it once (about {chosen.mb:.0f} MB):",
+                f"    python scripts/fetch_upscalers.py {chosen.code}")))
     elif args.upscale and install is None:
         raise SystemExit(
             "--upscale needs Topaz Video AI, which is not installed here. "
-            "The free alternatives are --upscale fsrcnnx for anything, and "
-            "--upscale esrgan for a photo. Everything else works without "
-            "any of them.")
+            f"The free alternatives are --upscale {_up.VIDEO_DEFAULT} for anything, and "
+            f"--upscale {_up.PHOTO_DEFAULT} for a photo. Everything else works "
+            "without any of them.")
 
     up = None
     if (args.upscale and not (use_esrgan or use_shader)) \
@@ -1064,12 +1100,12 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
             if is_image:
                 _fs.run(src, working(".png"), width=info.width,
                         height=info.height, scale=scale,
-                        shader=args.fsrcnnx_shader, total=1,
+                        shader=chosen_path, total=1,
                         reporter=reporter, cancel=cancel)
             else:
                 _fs.run(src, working(".mkv"), width=info.width,
                         height=info.height, scale=scale,
-                        shader=args.fsrcnnx_shader, pix_fmt=info.pix_fmt,
+                        shader=chosen_path, pix_fmt=info.pix_fmt,
                         total=produced or (info.frame_count
                                            if info is not None else None),
                         trim_from=skip, frames=args.max_frames,
@@ -1083,10 +1119,29 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
         src = made[-1]
 
     if use_esrgan:
+        # A photo is one frame and is written as one; a video goes
+        # through the same pre-pass shape as the shader, frame in and
+        # frame out, so the intermediate keeps the source's format.
+        skip, end, drop, produced = _prepass_window(
+            args.start_frame, args.max_frames, 1.0)
         try:
-            _es.run_still(src, working(".png"), scale=args.upscale_scale,
-                          model=args.esrgan_model, provider=args.ort_provider,
-                          reporter=reporter)
+            if is_image:
+                _es.run_still(src, working(".png"),
+                              scale=args.upscale_scale, model=chosen_path,
+                              provider=args.ort_provider, reporter=reporter)
+            else:
+                _es.run_video(src, working(".mkv"),
+                              scale=args.upscale_scale, model=chosen_path,
+                              provider=args.ort_provider,
+                              name=chosen.name, code=chosen.code,
+                              trim_from=skip, frames=args.max_frames,
+                              pix_fmt=info.pix_fmt,
+                              total=produced or (info.frame_count
+                                                 if info is not None
+                                                 else None),
+                              reporter=reporter, cancel=cancel)
+                if args.max_frames is not None or args.start_frame:
+                    args.start_frame = 0
         except _es.EsrganError as e:
             raise SystemExit(str(e))
         src = made[-1]
@@ -1371,6 +1426,7 @@ def _render(args, reporter, cancel, pipeline, built):
         output_mode=args.output_mode,
         yaw=args.yaw,
         output_width=args.output_width,
+        supersample=not args.no_supersample,
         live_preview=args.live_preview,
         live_preview_every=(pipeline.DEFAULT_PREVIEW_EVERY
                             if args.live_preview_every is None
@@ -1421,6 +1477,34 @@ def main(argv=None) -> int:
                           "recommended": _e.recommended(infos),
                           "encoders": [i.as_dict() for i in infos]}))
         return 0
+    if args.fetch_enhancers:
+        from . import enhance_models as _em
+
+        which = (None if args.fetch_enhancers in ("all", "")
+                 else [w.strip() for w in args.fetch_enhancers.split(",")
+                       if w.strip()])
+        if which is not None:
+            unknown = [w for w in which if w not in _em.BY_KEY]
+            if unknown:
+                print(f"Unknown model(s): {', '.join(unknown)}. "
+                      f"Expected any of {', '.join(_em.BY_KEY)}.",
+                      file=sys.stderr)
+                return 2
+        todo = _em.missing(which)
+        if not todo:
+            print("Every enhancement model is already present.")
+            return 0
+        print(f"Fetching {len(todo)} model(s), about "
+              f"{_em.total_bytes(todo) / 1e6:.0f} MB.")
+        results = _em.fetch(which, on_line=lambda m: print(m, flush=True))
+        bad = [k for k, r in results.items() if not r["ok"]]
+        # A partial result is a success, not a failure: the panel offers
+        # whatever it finds, and one model that cannot be built here must not
+        # fail an install that got the other two.
+        for k in bad:
+            print(f"  {k}: {results[k]['detail']}", file=sys.stderr)
+        return 0
+
     if args.probe_upscalers:
         import json
 
@@ -1442,27 +1526,34 @@ def main(argv=None) -> int:
                 entry["source"] = "topaz"
             for entry in found.get("models", []):
                 entry["source"] = "topaz"
-            # Real-ESRGAN sits in the same list, marked for what it is: a
-            # photo upscaler. The interface shows it greyed for a video
-            # rather than hiding it, so the reason is visible.
-            # The shader goes first among the free ones: it is the only
-            # upscaler here that takes video without crawling.
-            shader = _fs.describe()
-            if shader.get("available"):
+            # Every installed upscaler, from the one table that knows
+            # them, in the order that table lists -- which puts the video
+            # default first and the stills-only one last. Marked rather than
+            # hidden when a job cannot use it, so the interface can grey it
+            # with the reason showing.
+            from . import upscalers as _up
+
+            for v in _up.VARIANTS:
+                if not _up.present(v):
+                    continue
+                if v.kind == "shader" and not _fs.available(v.path):
+                    continue
                 found.setdefault("models", []).append(
-                    {"code": _fs.CODE, "short": _fs.CODE, "name": _fs.NAME,
-                     "desc": _fs.DESC, "source": "fsrcnnx",
-                     "stills_only": False,
-                     "min_scale": 1.0, "max_scale": 4.0})
-            found["fsrcnnx"] = shader
-            esrgan = _es.describe()
-            if esrgan.get("available"):
-                found.setdefault("models", []).append(
-                    {"code": _es.CODE, "short": _es.CODE, "name": _es.NAME,
-                     "desc": _es.DESC, "source": "esrgan",
-                     "stills_only": True,
-                     "min_scale": 1.0, "max_scale": float(_es.NATIVE_SCALE)})
-            found["esrgan"] = esrgan
+                    {"code": v.code, "short": v.code, "name": v.name,
+                     "desc": v.desc, "source": v.kind,
+                     "stills_only": v.stills_only,
+                     "min_scale": 1.0, "max_scale": float(v.scale)})
+            # Kept for the two panels that ask "can this machine shade at
+            # all" and "is there a photo model", which is a different
+            # question from which variants are installed.
+            # Named for the question they answer, not for the model that
+            # used to answer it: "can this machine shade at all" and "is
+            # there a photo model here". Both were called after their first
+            # occupant, and both outlived it.
+            found["shader"] = _fs.describe(_up.BY_CODE["fsrcnnx16"].path)
+            found["photo_model"] = _es.describe(_up.BY_CODE["siax"].path)
+            found["video_default"] = _up.VIDEO_DEFAULT
+            found["photo_default"] = _up.PHOTO_DEFAULT
             rife = _fi.describe(args.probe_fps)
             if rife.get("available"):
                 found.setdefault("interpolators", []).append(
@@ -1473,14 +1564,35 @@ def main(argv=None) -> int:
             found["interpolate_offered"] = bool(
                 found.get("interpolators")
                 and (not args.probe_fps or _fi.offered_for(args.probe_fps)))
+            # What is absent but obtainable. Without this the interface can
+            # only report that a model is missing, which leaves the user to
+            # find a script they have no reason to know exists -- and the
+            # panel hides itself, so they are not even told that much.
+            from . import enhance_models as _em
+
+            found["fetchable"] = [
+                {"key": s_.key, "label": s_.label, "kind": s_.kind,
+                 "mb": round(s_.bytes_ / 1e6, 1), "needs_torch": s_.needs_torch}
+                for s_ in _em.missing()]
+            # The frame-rate judgement on its own, with no opinion about what
+            # happens to be installed. `interpolate_offered` below answers a
+            # different question -- can this machine interpolate this source
+            # *now* -- and so is false on a machine with no RIFE, which is
+            # exactly the machine that needs to be offered the download.
+            found["fps_offered"] = bool(
+                not args.probe_fps or _fi.offered_for(args.probe_fps))
+            found["fetchable_mb"] = round(
+                _em.total_bytes(_em.missing()) / 1e6, 1)
             print(json.dumps(found))
         except Exception as e:                              # noqa: BLE001
             print(json.dumps({"available": False, "auth": "unknown",
                               "needs_login": False, "models": [],
                               "interpolators": [], "offered": False,
                               "interpolate_offered": False,
-                              "esrgan": {"available": False},
-                              "fsrcnnx": {"available": False},
+                              "photo_model": {"available": False},
+                              "shader": {"available": False},
+                              "fetchable": [], "fetchable_mb": 0,
+                              "fps_offered": False,
                               "reason": f"{type(e).__name__}: {e}"}))
         return 0
     if args.probe_backends:

@@ -88,9 +88,15 @@ ApplicationWindow {
     property int maxFrames: 0
 
     // The upscale pre-pass. Off unless asked for
+    // On is the existing behaviour and the better picture: render at the
+    // source size and resize the finished eyes. Off renders at the delivered
+    // size instead, which is faster and coarser -- see the hint on the row.
+    property bool supersample: true
     property bool upscale: false
+    onUpscaleChanged: adoptDefaultResolution()
     property string upscaleModel: "amq"
     property real upscaleScale: 2.0
+    onUpscaleScaleChanged: adoptDefaultResolution()
     property bool interpolate: false
     property string interpolateModel: "chr"
     property real interpolateFps: 0
@@ -108,23 +114,23 @@ ApplicationWindow {
                                        && topaz.offered === true
     readonly property bool topazNeedsLogin: topaz.needs_login === true
     readonly property bool interpolateReady: topaz.interpolate_offered === true
-    // Upscaling is no longer Topaz's alone: Real-ESRGAN does photos, and a
+    // Upscaling is no longer Topaz's alone: a photo model does stills, and a
     // machine with only that should still be offered the control -- for a
     // photo. `offered` is the probe's width judgement and applies to both.
     // `a && a.b === true` looks like a boolean and is not: when `a` is
     // undefined -- which it is until the probe answers -- JavaScript's `&&`
     // hands back that undefined rather than false, and QML will not put it in
     // a bool. Compare first so both sides are always a boolean.
-    readonly property bool esrganReady: topaz.esrgan !== undefined
-                                        && topaz.esrgan.available === true
-    // The shader takes video as well as stills, so unlike Real-ESRGAN it
+    readonly property bool photoModelReady: topaz.photo_model !== undefined
+                                        && topaz.photo_model.available === true
+    // The shader takes video as well as stills, unlike the photo model, so it
     // makes the control worth showing whatever the job is.
-    readonly property bool shaderReady: topaz.fsrcnnx !== undefined
-                                        && topaz.fsrcnnx.available === true
+    readonly property bool shaderReady: topaz.shader !== undefined
+                                        && topaz.shader.available === true
     readonly property bool upscaleReady: topaz.offered === true
                                          && (topaz.available === true
                                              || shaderReady
-                                             || (esrganReady && photoMode))
+                                             || (photoModelReady && photoMode))
     readonly property bool canUpscale: upscaleReady
                                        && defaultUpscaler() !== ""
     readonly property bool canInterpolate: interpolateReady
@@ -133,6 +139,72 @@ ApplicationWindow {
     // interpolates on any machine, so a source can be worth offering one and
     // not the other.
     readonly property bool enhanceReady: upscaleReady || interpolateReady
+
+    // What is missing but obtainable, and how much it costs to get. The card
+    // used to be hidden whenever nothing was installed, which is the worst of
+    // the three possible answers: "you cannot have this" and "you do not have
+    // this yet" look identical, and the probe knew the difference all along.
+    readonly property var fetchable: topaz.fetchable !== undefined
+                                     ? topaz.fetchable : []
+
+    // Only what this source could actually use. The two halves are judged
+    // separately because they answer different questions: `offered` is the
+    // width test, and an 8K source is past the point where upscaling helps;
+    // `fps_offered` is the frame-rate test, and it has no opinion about width.
+    // Gating both on `offered` hid the whole card for an 8K 30 fps source --
+    // which cannot be upscaled and can very much be interpolated.
+    readonly property var fetchNeeded: {
+        var out = []
+        var up = topaz.offered === true
+        var fi = topaz.fps_offered === true
+        for (var i = 0; i < fetchable.length; ++i) {
+            var f = fetchable[i]
+            if (f.kind === "interpolate" ? fi : up)
+                out.push(f)
+        }
+        return out
+    }
+    readonly property bool canFetch: fetchNeeded.length > 0
+
+    // Downloaded is not the same as usable, and the difference is invisible.
+    // A source wide enough to gain from upscaling, with every model fetched
+    // and none of them able to run, showed no Upscale row and said nothing --
+    // so the panel looked broken rather than answered. The probe knows why in
+    // every case; this is only a matter of printing it.
+    readonly property string upscaleBlockedWhy: {
+        if (topaz.offered !== true || upscaleReady)
+            return ""
+        var bits = []
+        if (topaz.shader !== undefined && topaz.shader.available !== true
+            && topaz.shader.reason)
+            bits.push(topaz.shader.reason)
+        if (photoModelReady && !photoMode)
+            bits.push("The photo upscaler is for stills only, and this is a video.")
+        else if (topaz.photo_model !== undefined && topaz.photo_model.available !== true
+                 && topaz.photo_model.reason)
+            bits.push(topaz.photo_model.reason)
+        return bits.join("  ")
+    }
+    readonly property string fetchSummary: {
+        var names = []
+        for (var i = 0; i < fetchNeeded.length; ++i)
+            names.push(fetchNeeded[i].label)
+        return names.join(", ")
+    }
+    readonly property real fetchMb: {
+        var mb = 0
+        for (var i = 0; i < fetchNeeded.length; ++i)
+            mb += fetchNeeded[i].mb
+        return Math.round(mb * 10) / 10
+    }
+    // Fetch only what was offered, so an 8K source does not quietly pull two
+    // upscalers it was just told it has no use for.
+    readonly property string fetchKeys: {
+        var keys = []
+        for (var i = 0; i < fetchNeeded.length; ++i)
+            keys.push(fetchNeeded[i].key)
+        return keys.join(",")
+    }
 
     // 0 means "just double it", which either interpolator does on its own --
     // the rate a headset wants depends on the source, and doubling 30 lands
@@ -153,6 +225,7 @@ ApplicationWindow {
             "input": inputPath, "output": outputPath, "quality": quality,
             "codec": codec, "outputMode": outputMode, "yaw": yaw,
             "outputWidth": outputWidth, "sourceWidth": sourceWidth,
+            "supersample": supersample,
             "strength": strength, "gradientLimit": gradientLimit,
             "faceAngularCorrection": faceAngularCorrection,
             "poleCompensation": poleCompensation,
@@ -223,8 +296,13 @@ ApplicationWindow {
     function adoptDefaultResolution() {
         if (!app.sourceInfo || !app.sourceInfo.width)
             return
-        var w = app.defaultOutputWidth(app.sourceInfo.width,
-                                       app.sourceInfo.height, outputMode,
+        // Reads `upscale` and `upscaleScale` directly for the same reason the
+        // rest of this function reads `app`: it runs from property-changed
+        // handlers, and the bindings above may not have re-evaluated yet.
+        var mul = (upscale && upscaleScale > 0) ? upscaleScale : 1
+        var w = app.defaultOutputWidth(Math.round(app.sourceInfo.width * mul),
+                                       Math.round(app.sourceInfo.height * mul),
+                                       outputMode,
                                        app.isImage(inputPath))
         if (outputWidth === 0 || outputWidth === suggestedOutputWidth)
             outputWidth = w
@@ -266,12 +344,12 @@ ApplicationWindow {
     function upscalerNote(entry, usable) {
         if (entry.source === "topaz")
             return usable ? "Topaz" : "Topaz — signed out"
-        if (entry.source === "esrgan" && !usable)
+        if (entry.stills_only === true && !usable)
             return "photos only"
         return ""
     }
 
-    // Real-ESRGAN is for photos: on video it invents a third more movement
+    // The photo model is for stills: on video it amplifies a small change
     // than the scene has, which reads as crawling. Left in the list and
     // greyed rather than hidden, so the reason can be shown.
     function upscalerUsable(code) {
@@ -280,10 +358,16 @@ ApplicationWindow {
             return false
         for (var i = 0; i < l.length; ++i)
             if (l[i].short === code) {
-                if (l[i].source === "esrgan")
-                    return photoMode        // it crawls on anything moving
-                if (l[i].source === "fsrcnnx")
-                    return true             // photos and video alike
+                // `stills_only` is the probe's own judgement, carried per
+                // model. This used to test `source` against the name of the
+                // one photo model there was, which stopped meaning anything
+                // when `source` became the runtime -- and let a stills-only
+                // model be picked for a video, which is the one thing the
+                // test existed to prevent.
+                if (l[i].stills_only === true)
+                    return photoMode
+                if (l[i].source !== "topaz")
+                    return true             // the free ones need no sign-in
                 return topaz.needs_login !== true
             }
         return false
@@ -294,9 +378,16 @@ ApplicationWindow {
         if (!l)
             return ""
         // Artemis Medium Quality where Topaz can be used -- it is what the
-        // measurements were made against -- then the shader, which is the
-        // only other one that takes video, then whatever is left.
-        var order = ["amq", "fsrcnnx"]
+        // measurements were made against -- and otherwise whichever default
+        // the core names for this kind of job. The two are not the same
+        // model and must not be: a still is judged on one frame, so the
+        // sharpest wins, while a video is judged on how little the invented
+        // detail moves between frames, and the model that wins the first
+        // test loses the second by a distance.
+        var pick = photoMode ? topaz.photo_default : topaz.video_default
+        var order = ["amq"]
+        if (pick)
+            order.push(pick)
         for (var p = 0; p < order.length; ++p)
             for (var i = 0; i < l.length; ++i)
                 if (l[i].short === order[p] && upscalerUsable(order[p]))
@@ -448,14 +539,31 @@ ApplicationWindow {
     readonly property int sourceWidth:
         app.sourceInfo && app.sourceInfo.width ? app.sourceInfo.width : 0
 
+    // The size the stereo pass will actually see, which is not the source's
+    // when a pre-pass runs first. Every sizing decision below reads this
+    // rather than `sourceWidth`: upscaling a 4K source 2x renders 7680x7680
+    // in 360 mode, which no HEVC or H.264 level decodes -- the same ceiling
+    // `default_output_width` exists to keep an 8K *source* under. Judged from
+    // the source alone, a 4K input looks comfortably below the cap and the
+    // upscale carries it over unremarked, discovered after the render.
+    readonly property int effectiveWidth:
+        upscale && upscaleScale > 0 ? Math.round(sourceWidth * upscaleScale)
+                                    : sourceWidth
+    readonly property int effectiveHeight:
+        app.sourceInfo && app.sourceInfo.height
+        ? (upscale && upscaleScale > 0
+           ? Math.round(app.sourceInfo.height * upscaleScale)
+           : app.sourceInfo.height)
+        : 0
+
     readonly property var resolutions:
-        sourceWidth > 0
-        ? app.resolutionChoices(sourceWidth, app.sourceInfo.height, outputMode)
+        effectiveWidth > 0
+        ? app.resolutionChoices(effectiveWidth, effectiveHeight, outputMode)
         : []
 
     readonly property var outputSize:
-        sourceWidth > 0
-        ? app.outputSize(sourceWidth, app.sourceInfo.height, outputMode,
+        effectiveWidth > 0
+        ? app.outputSize(effectiveWidth, effectiveHeight, outputMode,
                          outputWidth)
         : null
     readonly property string outputSizeText:
@@ -1010,6 +1118,25 @@ ApplicationWindow {
                                 }
                             }
 
+                            // Only where a smaller size was actually chosen:
+                            // at full size there is nothing to render smaller
+                            // than, and the switch would promise a saving it
+                            // cannot make.
+                            Row2 {
+                                objectName: "supersampleRow"
+                                label: "Supersample"
+                                visible: win.outputWidth !== 0
+                                         && win.outputWidth !== win.sourceWidth
+                                hint: win.supersample
+                                      ? "Renders each eye at the source size and resizes it down, which smooths edges and keeps depth at full resolution. This is what makes a smaller output cost the same as a full-size one."
+                                      : "Renders at the delivered size instead. Measured 1.65x faster on an 8K source delivered at 5760. Depth is estimated from the smaller frame, so the geometry is coarser and not only the picture — worth checking a depth edge in the headset before trusting it on a long render."
+                                Switch {
+                                    objectName: "supersampleSwitch"
+                                    checked: win.supersample
+                                    onToggled: win.supersample = checked
+                                }
+                            }
+
                             // A note, not a warning. Over the cap is the
                             // correct shape for a YouTube master, and saying
                             // otherwise would talk people out of the one
@@ -1207,7 +1334,72 @@ ApplicationWindow {
                             objectName: "topazCard"
                             title: "Enhance the source"
                             subtitle: "before the 3D pass"
-                            visible: win.enhanceReady
+                            visible: win.enhanceReady || win.canFetch
+                                     || win.upscaleBlockedWhy !== ""
+
+                            Rectangle {
+                                objectName: "upscaleBlocked"
+                                Layout.fillWidth: true
+                                visible: win.upscaleBlockedWhy !== ""
+                                implicitHeight: blockedText.implicitHeight + 16
+                                color: "#2a2114"
+                                radius: 6
+                                border.width: 1
+                                border.color: Theme.warn
+
+                                Text {
+                                    id: blockedText
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    text: "Upscaling is not available for this "
+                                          + "source. " + win.upscaleBlockedWhy
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontS
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+
+                            // Ahead of everything, because with nothing
+                            // installed there is nothing else in the card and
+                            // this is the only thing worth saying.
+                            Rectangle {
+                                objectName: "enhanceFetch"
+                                Layout.fillWidth: true
+                                visible: win.canFetch
+                                implicitHeight: fetchCol.implicitHeight + 16
+                                color: "#14202a"
+                                radius: 6
+                                border.width: 1
+                                border.color: Theme.accent
+
+                                ColumnLayout {
+                                    id: fetchCol
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    spacing: 6
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: app.fetchingEnhancers
+                                              ? "Downloading " + win.fetchSummary + "..."
+                                              : "Not downloaded yet: " + win.fetchSummary
+                                                + ". About " + win.fetchMb
+                                                + " MB in total."
+                                        color: Theme.text
+                                        font.pixelSize: Theme.fontS
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Button {
+                                        objectName: "enhanceFetchButton"
+                                        text: app.fetchingEnhancers
+                                              ? "Downloading..." : "Download"
+                                        enabled: !app.fetchingEnhancers
+                                                 && !app.running
+                                        onClicked: app.fetchEnhancers(win.fetchKeys)
+                                    }
+                                }
+                            }
 
                             // First thing in the card, because a signed-out
                             // Topaz does not refuse the job -- it renders it
@@ -1257,9 +1449,9 @@ ApplicationWindow {
                                     var i = win.topazIndex(l, win.upscaleModel)
                                     if (i < 0)
                                         return ""
-                                    if (l[i].source === "esrgan"
+                                    if (l[i].stills_only === true
                                             && !win.photoMode)
-                                        return "Photos only. On video it is the least steady upscaler measured — 135% of the movement the real footage has, against 104% for Artemis High Quality — and detail that will not hold still reads as crawling."
+                                        return "Photos only. On video it amplifies a small frame-to-frame change 4.2 times — against 0.99 for SPAN and 1.13 for the shader — and detail that will not hold still reads as crawling."
                                     if (l[i].source === "topaz" && win.topazNeedsLogin)
                                         return "Needs a signed-in Topaz."
                                     return l[i].desc

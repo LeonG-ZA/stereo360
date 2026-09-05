@@ -299,6 +299,7 @@ _DEFAULTS = {
     "livePreviewEvery": 2.0,
     "leftShare": 0.5,
     "sharedDetail": True,
+    "supersample": True,
     "depthTiles": 1,
     "fgErode": 2,
     "smooth": 0,
@@ -395,6 +396,12 @@ def build_argv(
     source_width = int(_num(opts.get("sourceWidth"), 0))
     if out_width > 0 and out_width != source_width:
         argv += ["--output-width", str(out_width)]
+        # Only alongside a chosen width: with none, there is nothing to
+        # render smaller than and the flag would claim a saving it cannot
+        # make. Emitted only when off, like the other switches whose default
+        # is the fuller-quality one.
+        if not opts.get("supersample", True):
+            argv.append("--no-supersample")
 
     if not opts.get("faceSizeAuto", True):
         size = int(_num(opts.get("faceSize"), 0))

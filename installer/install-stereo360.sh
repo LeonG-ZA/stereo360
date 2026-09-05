@@ -91,7 +91,7 @@ else
 fi
 
 STEP_NO=0
-STEP_TOTAL=14
+STEP_TOTAL=15
 
 step()   { STEP_NO=$((STEP_NO + 1)); printf '\n%s[%d/%d] %s%s\n' "$C_CYAN" "$STEP_NO" "$STEP_TOTAL" "$1" "$C_RESET"; }
 detail() { printf '%s      %s%s\n' "$C_GRAY" "$1" "$C_RESET"; }
@@ -949,6 +949,36 @@ if [ $? -ne 0 ]; then
 else
     good "Depth Anything V3 small cached (the video default)"
     detail "Depth Pro, for stills, downloads on first use -- about 1.9 GB"
+fi
+
+# ---- enhancement models ---------------------------------------------------
+step "Fetching the enhancement models"
+# About 104 MB for all seven, against the 105 MB depth model above.
+# Small enough that leaving them out saves nothing and costs a first run where
+# the Enhance panel is simply absent -- which reads as a bug rather than as a
+# missing download, because the panel is hidden rather than empty.
+#
+# Fetched rather than bundled: the three licences differ, and downloading on
+# someone's behalf is a different question from shipping weights inside an
+# installer.
+#
+# Never fatal, and a partial result is the normal one. Five of the seven are
+# ONNX graphs exported from checkpoints rather than files copied, so they need
+# torch and a loader that knows the architectures; RIFE wants an archive
+# unpacked, and a desktop Linux without 7z or bsdtar is likelier than a
+# Windows one. Whatever arrives is usable on its own and the interface offers
+# what it finds, so one model that cannot be built here must not take the
+# others with it.
+#
+# spandrel is for those exports and nothing else -- the same trade
+# scripts/export_onnx.py already makes with torch. Without it the two shaders
+# land and the five models do not, which ships half a feature quietly.
+pip_try spandrel     || warn "spandrel did not install; the ONNX upscalers cannot be exported"
+if "$PY" -m stereo360 --fetch-enhancers; then
+    good "Upscalers and RIFE cached"
+else
+    warn "could not fetch the enhancement models"
+    detail "the interface can download them later from the Enhance panel"
 fi
 
 # ---- launchers ------------------------------------------------------------

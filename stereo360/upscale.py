@@ -293,9 +293,17 @@ def describe(width: int = 0) -> dict:
     """
     install = find()
     if install is None:
+        # `offered` is the *width* judgement and nothing else, so it is
+        # answered here too. It used to be hard-coded False on this branch,
+        # which was invisible while Topaz was the only upscaler and became a
+        # bug the moment it was not: the interface gates the whole Enhance
+        # panel on it, so a machine without Topaz could never be shown the
+        # free shader or Real-ESRGAN however well installed they were.
+        # `available` is what says Topaz is absent; this must not say it too.
         return {"available": False, "reason": "Topaz Video AI was not found",
                 "auth": "unknown", "needs_login": False, "models": [],
-                "interpolators": [], "offered": False}
+                "interpolators": [],
+                "offered": offered_for(width) if width else True}
     auth = auth_state(install)
     return {
         "available": True,
@@ -541,8 +549,15 @@ def run(install: Install, src: str, dst: str, *,
     # Absolute, because the command runs from Topaz's own directory: a path
     # relative to the user's would point at nothing there.
     src, dst = os.path.abspath(src), os.path.abspath(dst)
+    # Audio is copied, never re-encoded. Without this ffmpeg maps the source's
+    # track and encodes it with whatever the container defaults to -- and the
+    # working file is Matroska, whose default is Vorbis, so an AAC source came
+    # out the far end as low-bitrate Vorbis. Nothing announced it: the pre-pass
+    # is a video stage and audio was never mentioned in the command, so the
+    # default applied in silence and the converter then copied the result into
+    # the output as if it were the original.
     cmd = [install.ffmpeg, "-hide_banner", "-nostdin", "-y",
-           *extra_in, "-i", src, "-vf", vf,
+           *extra_in, "-i", src, "-vf", vf, "-c:a", "copy",
            *out_args, dst]
     if reporter is not None:
         reporter.start(total, stage=stage)

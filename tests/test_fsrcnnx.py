@@ -96,3 +96,46 @@ def test_it_doubles_a_real_clip(tmp_path):
          "-show_entries", "stream=width,height", "-of", "csv=p=0", str(dst)],
         capture_output=True, text=True, check=True).stdout.strip()
     assert size.startswith("640,320")
+
+
+def test_a_crashing_libplacebo_is_not_reported_as_a_missing_one(monkeypatch):
+    """These need different advice and used to share one sentence. A build
+    without the filter is fixed by installing a different ffmpeg; a build with
+    it that dies is a driver problem, and saying "this ffmpeg has no
+    libplacebo" about a build whose -filters plainly lists it sends the reader
+    somewhere there is nothing to find. Measured on a Radeon 780M: filter
+    present, Vulkan device initialises, filter then segfaults."""
+    import subprocess as sp
+
+    from stereo360 import fsrcnnx
+
+    class Done:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    def fake(cmd, **kw):
+        if "-filters" in cmd:
+            return Done(0, " .. libplacebo  N->V  Apply various GPU filters")
+        return Done(3221225477)          # 0xC0000005, an access violation
+
+    monkeypatch.setattr(sp, "run", fake)
+    why = fsrcnnx.problem(recheck=True)
+    assert why and "has libplacebo" in why
+    assert "0xC0000005" in why
+    assert "driver" in why
+
+
+def test_a_build_without_the_filter_says_so(monkeypatch):
+    import subprocess as sp
+
+    from stereo360 import fsrcnnx
+
+    class Done:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    monkeypatch.setattr(sp, "run",
+                        lambda cmd, **kw: Done(0, "scale\noverlay\n")
+                        if "-filters" in cmd else Done(1))
+    why = fsrcnnx.problem(recheck=True)
+    assert why and "not built with libplacebo" in why

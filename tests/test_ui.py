@@ -1334,6 +1334,42 @@ def test_full_size_is_still_offered():
     assert native[0]["label"] == "7680×7680"
 
 
+def _video_4k(tmp_path, name="4k.mp4"):
+    """A 4K source, which is under the cap until something enlarges it."""
+    import subprocess
+
+    out = str(tmp_path / name)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc2=size=3840x1920:rate=30", "-t", "1",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+         "-y", out], check=True, capture_output=True)
+    return out
+
+
+def test_upscaling_a_4k_video_starts_at_a_size_the_headset_decodes(tmp_path):
+    """The cap is judged on the frame the stereo pass will see, not on the
+    file that was opened. A 4K source is comfortably under it; upscaled 2x it
+    renders 7680x7680, which no HEVC or H.264 level decodes -- and the size
+    picker, reading the source alone, called that the source's own width and
+    said nothing. Found the way these are always found: after the render, on
+    the headset."""
+    src = _video_4k(tmp_path)
+    plain, _ = _dump(f"inputPath={src}")
+    assert plain["outputWidth"] == "0", "a 4K source needs no reduction"
+
+    upscaled, _ = _dump(f"inputPath={src}", "upscale=true")
+    assert upscaled["outputWidth"] == "5760"
+
+
+def test_the_full_size_survives_the_upscale_default(tmp_path):
+    """A default, not a restriction. 7680 is still the right master to upload
+    and has to stay one click away."""
+    choices = options.resolution_choices(7680, 3840, "360")
+    assert [c["width"] for c in choices][0] == 7680
+    assert 5760 in [c["width"] for c in choices]
+
+
 @pytest.mark.parametrize("width,height,mode,photo,why", [
     (7680, 3840, "vr180", False, "VR180 at 8K is 29.5 MP and plays"),
     (7680, 3840, "360", True, "the cap belongs to the video decoder"),
@@ -1740,7 +1776,7 @@ def _topaz(available=True, offered=True, needs_login=False,
             f'"offered": {str(bool(offered)).lower()}, '
             f'"needs_login": {str(bool(needs_login)).lower()}, '
             f'"interpolate_offered": {str(bool(interpolate_offered)).lower()}, '
-            f'"esrgan": {{"available": {str(bool(esrgan)).lower()}}}, '
+            f'"photo_model": {{"available": {str(bool(esrgan)).lower()}}}, '
             f'"models": [{", ".join(up)}], '
             f'"interpolators": [{", ".join(fi)}]' "}")
 
@@ -2104,11 +2140,17 @@ def test_stopping_mid_render_says_how_much_was_kept(qapp):
 
 
 def test_a_photo_can_be_upscaled_without_topaz(tmp_path):
+    """Which photo model is the core's business, not this test's. It named
+    one outright while there was one, and that stopped being true -- the
+    interface now takes the default from the probe, so asserting a
+    particular code here only pins whichever model happened to be first."""
+    from stereo360 import upscalers
+
     props, rows = _dump(_topaz(available=False, topaz_fi=False, rife=False,
                                esrgan=True),
                         f"inputPath={_still(tmp_path)}")
     assert rows["Upscale"] is True
-    assert props["upscaleModel"] == "esrgan"
+    assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
 
 
 def test_a_video_without_topaz_is_offered_no_upscaler():
@@ -2130,12 +2172,48 @@ def test_topaz_stays_the_default_where_it_can_be_used(tmp_path):
 
 def test_a_signed_out_topaz_falls_back_to_the_free_one_for_a_photo(tmp_path):
     """A choice the core cannot honour is worse than no choice."""
+    from stereo360 import upscalers
+
     props, _ = _dump(_topaz(needs_login=True, esrgan=True),
                      f"inputPath={_still(tmp_path)}")
-    assert props["upscaleModel"] == "esrgan"
+    assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
 
 
 def test_the_upscaler_reaches_the_command_line():
     argv = options.build_argv(dict(BASE, input="pano.jpg", output="out.jpg",
                                    upscale=True, upscaleModel="esrgan"))
     assert argv[argv.index("--upscale") + 1] == "esrgan"
+
+
+def test_every_option_the_builder_reads_is_one_the_window_sends():
+    """A switch can exist at every layer but the one that hands the options
+    over, and nothing else notices.
+
+    That is not hypothetical: the Supersample switch had a property, a row, a
+    hint, a default and a command-line flag, and `currentOptions()` did not
+    carry it -- so `build_argv` fell back to its default, never emitted the
+    flag, and the render went on supersampling while the interface showed the
+    switch turned off. Every layer was individually right.
+
+    So this compares the two ends directly: whatever `build_argv` reads out of
+    the options map, the window has to put in."""
+    import re
+
+    opts_src = (Path(__file__).resolve().parent.parent
+                / "stereo360_ui" / "options.py").read_text(encoding="utf-8")
+    reads = set(re.findall(r'opts\.get\(\s*"([A-Za-z_]\w*)"', opts_src))
+    reads |= set(re.findall(r'opts\[\s*"([A-Za-z_]\w*)"\s*\]', opts_src))
+
+    qml = (Path(__file__).resolve().parent.parent / "stereo360_ui" / "qml"
+           / "Main.qml").read_text(encoding="utf-8")
+    body = qml[qml.index("function currentOptions()"):]
+    body = body[:body.index("\n    }")]
+    sends = set(re.findall(r'"([A-Za-z_]\w*)"\s*:', body))
+
+    # `splitBaseline` is the deprecated spelling of `leftShare`. The builder
+    # still honours it so an old saved preset keeps working; the window has
+    # no control for it and should not start sending one.
+    missing = reads - sends - {"splitBaseline"}
+    assert not missing, (
+        f"the window never sends these, so their controls do nothing: "
+        f"{sorted(missing)}")

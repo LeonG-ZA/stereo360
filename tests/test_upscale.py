@@ -49,8 +49,15 @@ def test_describe_says_no_without_raising(monkeypatch):
     d = upscale.describe(3840)
     assert d["available"] is False
     assert d["models"] == []
-    assert d["offered"] is False
     assert d["reason"]
+    # `offered` answers the width question and only that one, even here.
+    # It used to be hard-coded False on this branch, which was harmless while
+    # Topaz was the only upscaler and became a bug the moment it was not: the
+    # interface gates the entire Enhance panel on `offered`, so a machine
+    # without Topaz could never be offered the free shader or Real-ESRGAN
+    # however well installed they were. `available` above is what reports that
+    # Topaz is missing; this must not report it a second time.
+    assert d["offered"] is True
 
 
 # -------------------------------------------------------------- when to offer

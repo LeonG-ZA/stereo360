@@ -185,6 +185,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "spatialAudioHint", "photoMode",
                          "upscale", "upscaleModel", "upscaleScale",
                          "interpolate", "interpolateModel", "interpolateFps",
+                         # Which downloads the panel decided to offer. The
+                         # card's visibility alone cannot catch offering an
+                         # upscaler to a source already too wide to upscale.
+                         "fetchKeys", "fetchSummary", "upscaleBlockedWhy", "supersample",
                          "strength", "gradientLimit",
                          "faceAngularCorrection", "poleCompensation", "leftShare",
                          "livePreview", "livePreviewEvery"):

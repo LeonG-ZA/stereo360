@@ -41,6 +41,7 @@ class Controller(QObject):
     backendsChanged = Signal()
     encodersChanged = Signal()
     upscalersChanged = Signal()
+    fetchingChanged = Signal()
     thumbnailChanged = Signal()
     #: level, text -- appended to the log view
     logged = Signal(str, str)
@@ -83,8 +84,12 @@ class Controller(QObject):
 
         self._upscalers: Dict[str, Any] = {}
         self._upscale_key = None
+        self._last_upscale_args = None
         self._upscale_probe = QProcess(self)
         self._upscale_probe.finished.connect(self._on_upscalers_probed)
+        self._fetching = False
+        self._fetch_proc = QProcess(self)
+        self._fetch_proc.finished.connect(self._on_enhancers_fetched)
         # Its own process, so a probe can never disturb a running render.
         self._probe = QProcess(self)
         self._probe.finished.connect(self._on_probe_finished)
@@ -272,6 +277,7 @@ class Controller(QObject):
         most of them -- gets an empty answer instead of an error.
         """
         key = (int(width), round(float(fps), 3))
+        self._last_upscale_args = key
         # Cached per source, except after a signed-out answer: the message
         # that answer produces asks for a sign-in, so the next attempt has to
         # be able to find one -- otherwise doing what it says changes nothing.
@@ -286,6 +292,57 @@ class Controller(QObject):
             ["-m", "stereo360", "--probe-upscalers",
              "--probe-width", str(key[0]), "--probe-fps", f"{key[1]:g}"])
         self._upscale_probe.start()
+
+    @Property(bool, notify=fetchingChanged)
+    def fetchingEnhancers(self) -> bool:
+        """True while the models are downloading, so the button can say so."""
+        return self._fetching
+
+    @Slot(str)
+    @Slot()
+    def fetchEnhancers(self, which: str = "") -> None:
+        """Download the enhancement models the probe reported as missing.
+
+        Out of process like the probes, and for the same reason: this reaches
+        the network and unpacks an archive, neither of which belongs on the
+        thread drawing the window.
+
+        The probe is re-run afterwards rather than the answer being patched in
+        here. What the panel may offer depends on the source as well as on the
+        files -- the photo model is for stills, RIFE only applies at or below
+        30 fps -- and that judgement already exists in one place.
+        """
+        if self._fetching or self._fetch_proc.state() != QProcess.NotRunning:
+            return
+        self._fetching = True
+        self.fetchingChanged.emit()
+        self.logged.emit("info", "Downloading the enhancement models...")
+        self._fetch_proc.setWorkingDirectory(core_root())
+        self._fetch_proc.setProgram(sys.executable)
+        # Only what the panel offered. An 8K source is told upscaling will not
+        # help it, so it must not then download two upscalers.
+        self._fetch_proc.setArguments(
+            ["-m", "stereo360", "--fetch-enhancers"] + ([which] if which else []))
+        self._fetch_proc.start()
+
+    def _on_enhancers_fetched(self, code: int, _status) -> None:
+        self._fetching = False
+        self.fetchingChanged.emit()
+        out = (bytes(self._fetch_proc.readAllStandardOutput()).decode(
+            "utf-8", "replace")
+            + bytes(self._fetch_proc.readAllStandardError()).decode(
+                "utf-8", "replace")).strip()
+        for line in out.splitlines():
+            if line.strip():
+                self.logged.emit("info", line.rstrip())
+        if code != 0:
+            self.logged.emit(
+                "warn", "Some models could not be downloaded. Whatever did "
+                        "arrive is usable; the panel offers what it finds.")
+        # Force the re-probe: the cache key is the source, which has not
+        # changed, so without this the stale "nothing available" answer stands.
+        self._upscale_key = None
+        self.probeUpscalers(*(self._last_upscale_args or (0, 0.0)))
 
     def _on_upscalers_probed(self, code: int, _status) -> None:
         raw = bytes(self._upscale_probe.readAllStandardOutput()).decode(
