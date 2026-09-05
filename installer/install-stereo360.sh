@@ -973,7 +973,7 @@ step "Fetching the enhancement models"
 # spandrel is for those exports and nothing else -- the same trade
 # scripts/export_onnx.py already makes with torch. Without it the two shaders
 # land and the five models do not, which ships half a feature quietly.
-pip_try spandrel     || warn "spandrel did not install; the ONNX upscalers cannot be exported"
+pip_try spandrel \n    || warn "spandrel did not install; the ONNX upscalers cannot be exported"
 if "$PY" -m stereo360 --fetch-enhancers; then
     good "Upscalers and RIFE cached"
 else

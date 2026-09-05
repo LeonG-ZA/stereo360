@@ -1,8 +1,10 @@
 """The enhancement models: where they live, and who is told when they do not."""
 import json
 import os
+import tempfile
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -399,18 +401,18 @@ def test_a_missing_export_dependency_is_reported_once(monkeypatch):
     and left the reader to notice they were one sentence."""
     from stereo360 import enhance_models as em
 
-    monkeypatch.setattr(em, "missing_export_dependency",
-                        lambda: "spandrel is not installed")
+    why = "ModuleNotFoundError: No module named 'spandrel'"
+    monkeypatch.setattr(em, "missing_export_dependency", lambda: why)
     monkeypatch.setattr(em, "_can_export", lambda: False)
     monkeypatch.setattr(em.Spec, "present", lambda self: False)
     said = []
     got = em.fetch(keys=["span", "spanldl", "siax"], on_line=said.append)
 
-    assert sum("spandrel is not installed" in m for m in said) == 1
+    assert sum(why in m for m in said) == 1
     assert any("pip install spandrel" in m for m in said)
     for key in ("span", "spanldl", "siax"):
         assert got[key]["ok"] is False
-        assert got[key]["detail"] == "spandrel is not installed"
+        assert got[key]["detail"] == why
 
 
 def test_the_shaders_are_still_fetched_without_the_exporter(monkeypatch):
@@ -435,3 +437,69 @@ def test_the_shaders_are_still_fetched_without_the_exporter(monkeypatch):
     em.fetch(on_line=lambda m: None)
     assert "fsrcnnx16" in tried and "fsrcnnx8" in tried
     assert "span" not in tried, "an export that cannot run must not be tried"
+
+
+def test_a_present_but_broken_dependency_is_caught():
+    """`find_spec` was the first attempt and is not enough. It answers whether
+    a name resolves, not whether the module loads -- so a package that is
+    installed and broken, which is the ordinary result of a pinned
+    dependency, passed the check and then failed once per model with the tail
+    of another script's stderr. This is the same trap `transformers` sprang
+    on `backends.torch_backend_problem`, and it was walked into twice."""
+    import subprocess
+    import textwrap
+
+    shim = tempfile.mkdtemp()
+    with open(os.path.join(shim, "spandrel.py"), "w") as fh:
+        fh.write("raise ImportError('present but not importable')\n")
+    env = dict(os.environ, PYTHONPATH=shim)
+    got = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent("""
+            import sys
+            sys.path.insert(0, %r)
+            from stereo360 import enhance_models as em
+            print(em.missing_export_dependency())
+        """) % ROOT],
+        capture_output=True, text=True, timeout=300, env=env, cwd=ROOT)
+    assert got.returncode == 0, got.stderr
+    assert "present but not importable" in got.stdout, got.stdout
+
+
+def test_the_advice_fits_which_fault_it_is(monkeypatch):
+    """"pip install it" is wrong for a package that is already installed and
+    merely will not load, and that is the commoner of the two."""
+    from stereo360 import enhance_models as em
+
+    monkeypatch.setattr(em.Spec, "present", lambda self: False)
+    for why, expect, forbid in (
+            ("ModuleNotFoundError: No module named 'spandrel'",
+             "pip install spandrel", "force-reinstall"),
+            ("ImportError: cannot import name 'X'",
+             "force-reinstall", "-m pip install spandrel")):
+        monkeypatch.setattr(em, "missing_export_dependency", lambda w=why: w)
+        monkeypatch.setattr(em, "_can_export", lambda: False)
+        said = []
+        em.fetch(keys=["span"], on_line=said.append)
+        joined = " ".join(said)
+        assert expect in joined, joined
+        assert forbid not in joined, joined
+
+
+@pytest.mark.parametrize("installer,marker", [
+    ("Install stereo360.bat", "try {"),
+    ("install-stereo360.sh", "pip_try"),
+])
+def test_neither_installer_dies_over_the_optional_exporter(installer, marker):
+    """The step says a partial result is the normal one, and that has to be
+    true of the exporter too. `Invoke-Pip` throws, so the Windows step needed
+    wrapping or one optional package failing to fetch would have ended the
+    whole install -- while Linux, going through `pip_try`, carried on. The two
+    reached different places from the same intent."""
+    import re
+
+    text = (Path(ROOT) / "installer" / installer).read_text(encoding="utf-8")
+    i = text.index("spandrel")
+    # The install has to sit inside whatever that platform's non-fatal shape
+    # is, within a few lines either side of the call.
+    window = text[max(0, i - 700):i + 300]
+    assert marker in window, f"{installer} installs spandrel fatally"

@@ -91,22 +91,33 @@ def total_bytes(specs: Sequence[Spec]) -> int:
 
 
 def missing_export_dependency() -> Optional[str]:
-    """Which import the ONNX exports need and cannot do, or None.
+    """Why the ONNX exports cannot run here, or None if they can.
 
-    Named separately because the answer is worth saying once and plainly.
-    Both are only wanted while a graph is being written; nothing loads a
-    model through torch afterwards.
+    Imports for real, in a throwaway process. `find_spec` was tried first and
+    is not enough: it answers whether a name resolves, not whether the module
+    loads, so a package that is installed and broken -- the ordinary result of
+    a pinned dependency -- passed the check and then failed once per model
+    with the tail of somebody else's stderr. The same trap as
+    `backends.torch_backend_problem`, which is why that one imports the names
+    it actually needs.
+
+    A subprocess rather than an import here because the caller may be the
+    interface, and pulling torch into a running window to find out whether a
+    download is possible is a poor trade. It is one short process, once.
     """
-    import importlib.util
-
-    for mod, why in (("torch", "torch is not installed"),
-                     ("spandrel", "spandrel is not installed")):
-        try:
-            if importlib.util.find_spec(mod) is None:
-                return why
-        except (ImportError, ValueError):
-            return why
-    return None
+    probe = "import torch, spandrel"
+    try:
+        done = subprocess.run([sys.executable, "-c", probe],
+                              capture_output=True, text=True, timeout=180,
+                              **NO_CONSOLE_WINDOW)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"could not check for torch and spandrel ({type(e).__name__})"
+    if done.returncode == 0:
+        return None
+    # The last line of a traceback is the exception, which is the sentence
+    # worth repeating. Everything above it is where, not what.
+    lines = [l for l in (done.stderr or "").strip().splitlines() if l.strip()]
+    return lines[-1] if lines else "torch and spandrel are not both usable"
 
 
 def _can_export() -> bool:
@@ -141,7 +152,18 @@ def fetch(keys: Optional[Sequence[str]] = None,
         why = missing_export_dependency()
         if on_line:
             on_line(f"Cannot export the model graphs: {why}")
-            on_line(f"    {sys.executable} -m pip install spandrel")
+            # "pip install it" is the wrong advice for a package that is
+            # already installed and merely will not load, which is the
+            # commoner of the two faults: it is what a pinned dependency
+            # leaves behind. Say which fault this is.
+            absent = "No module named" in why
+            if absent:
+                on_line(f"    {sys.executable} -m pip install spandrel")
+            else:
+                on_line("  Both are installed but one does not load. Usually a "
+                        "pinned dependency; reinstall them together:")
+                on_line(f"    {sys.executable} -m pip install -U --force-"
+                        f"reinstall torch spandrel")
             on_line("  The shaders need nothing and are fetched anyway.")
         for s_ in todo:
             if s_.needs_torch:
@@ -179,10 +201,19 @@ def fetch(keys: Optional[Sequence[str]] = None,
         if proc.returncode == 0 and spec.present():
             out[spec.key] = {"ok": True, "detail": "fetched"}
         else:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            # The most informative line, not the last one. The fetch script
+            # ends its failure with an instruction, so taking the tail
+            # reported "    pip install spandrel" as though that were the
+            # error -- advice detached from what went wrong.
+            tail = [l.strip() for l in
+                    (proc.stderr or proc.stdout or "").strip().splitlines()
+                    if l.strip()]
+            said = next((l for l in reversed(tail)
+                         if "Error" in l or "error" in l), None)
             out[spec.key] = {
                 "ok": False,
-                "detail": tail[-1] if tail else f"exit {proc.returncode}"}
+                "detail": said or (tail[-1] if tail else
+                                   f"exit {proc.returncode}")}
         if on_line:
             r = out[spec.key]
             on_line(f"  {spec.label}: "

@@ -963,7 +963,18 @@ Write-Step 'Fetching the enhancement models'
 # on its own and the interface offers what it finds, so one model that cannot
 # be built here must not take the others with it.
 #
-Invoke-Pip $py @('install', '--no-warn-script-location', 'spandrel') 'spandrel (model export)'
+# Wrapped, because Invoke-Pip throws and this step must not end the install.
+# The comment above says a partial result is the normal one, and that has to
+# be true of the exporter too: a machine that cannot install it should finish
+# with the shaders and be told what it is missing, not stop halfway through
+# an install because one optional package would not fetch. Linux reaches the
+# same place through pip_try, which returns rather than dying.
+try {
+    Invoke-Pip $py @('install', '--no-warn-script-location', 'spandrel') 'spandrel (model export)'
+} catch {
+    Write-Warn 'spandrel did not install; the ONNX upscalers cannot be exported'
+    Write-Detail 'the shaders still work, and the interface can fetch the rest later'
+}
 Invoke-Native { & $py -m stereo360 --fetch-enhancers }
 if ($LASTEXITCODE -ne 0) {
     Write-Warn 'could not fetch the enhancement models'
