@@ -906,6 +906,25 @@ if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1 \
     USING_SYSTEM_FFMPEG=1
 elif [ -x "$FFDIR/ffmpeg" ] && "$FFDIR/ffmpeg" -hide_banner -version >/dev/null 2>&1; then
     good "ffmpeg already installed here; keeping it"
+
+    # Asked, not assumed. BtbN's builds are comprehensive and are expected to
+    # carry libplacebo, but the shader is the video default and "expected to"
+    # is not a check -- the Windows build shipped without it for exactly that
+    # reason. A machine that cannot run it should hear so beside the ffmpeg
+    # that cannot.
+    WHY="$("$PY" - "$FFDIR/ffmpeg" <<'PYEOF' 2>/dev/null
+import sys
+from stereo360 import fsrcnnx
+print(fsrcnnx.problem(sys.argv[1]) or "ok")
+PYEOF
+)"
+    if [ -n "$WHY" ] && [ "$WHY" != "ok" ]; then
+        warn "this ffmpeg cannot run the shader upscaler:"
+        warn "  $WHY"
+        detail "everything else works; the other upscalers do not need it"
+    else
+        good "libplacebo runs, so the shader upscaler is available"
+    fi
 else
     mkdir -p "$FFDIR"
     FFURL="$FFMPEG_URL_FALLBACK"

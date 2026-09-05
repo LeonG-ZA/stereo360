@@ -152,12 +152,20 @@ $GetPipUrl = 'https://bootstrap.pypa.io/get-pip.py'
 # install outside this folder and put ffmpeg on PATH, which this deliberately
 # does not do.
 #
-# "essentials" rather than "full": 106 MB against 240 MB, and it still has
-# libx264, libx265 and libopus, which is everything stereo360 asks for.
+# "full" rather than "essentials": 251 MB against 111 MB, and the extra 140 MB
+# is not optional any more. Essentials carries libx264, libx265 and libopus,
+# which was everything stereo360 asked for when this was written -- before the
+# shader upscaler. FSRCNNX runs through libplacebo on Vulkan, and essentials
+# is built with neither: `-filters` does not list libplacebo and the
+# configuration line has no --enable-vulkan. So the video default upscaler
+# could not run on a fresh install, and the interface said so in a message
+# about a missing Vulkan device, which reads as a driver problem rather than
+# as the wrong ffmpeg.
 $FfmpegRepo = 'GyanD/codexffmpeg'
-$FfmpegAssetPattern = '*essentials_build.zip'
-# Used only if the release API cannot be reached.
-$FfmpegUrlFallback = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0/ffmpeg-9.0-essentials_build.zip'
+$FfmpegAssetPattern = '*full_build.zip'
+# Used only if the release API cannot be reached. Not the -shared variant,
+# which is smaller and expects its DLLs alongside.
+$FfmpegUrlFallback = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build.zip'
 
 # cu128 carries cubins for sm_70 through sm_120 -- Volta to Blackwell, which
 # is every consumer card since 2017 and includes the 50 series. Ada (sm_89)
@@ -897,7 +905,11 @@ $ffUrl = $FfmpegUrlFallback
 try {
     $ffRel = Invoke-RestMethod "https://api.github.com/repos/$FfmpegRepo/releases/latest" `
         -Headers @{ 'User-Agent' = 'stereo360-installer' }
-    $asset = $ffRel.assets | Where-Object { $_.name -like $FfmpegAssetPattern } |
+    # `-notlike '*shared*'` because 'full_build-shared.zip' also matches the
+    # pattern, is smaller, and expects its DLLs beside the executable.
+    $asset = $ffRel.assets |
+        Where-Object { $_.name -like $FfmpegAssetPattern -and
+                       $_.name -notlike '*shared*' } |
         Select-Object -First 1
     if ($asset) {
         $ffUrl = $asset.browser_download_url
@@ -914,6 +926,26 @@ New-Item -ItemType Directory -Path $ffDest -Force | Out-Null
 Copy-Item (Join-Path $bin.DirectoryName '*.exe') $ffDest -Force
 Remove-Item $ffzip; Remove-Item $ffdir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Good 'ffmpeg and ffprobe (GPL build, no libfdk_aac -- see the README)'
+
+# Asked, not assumed. The build that ships changes, and the shader is the
+# video default: a machine that cannot run libplacebo should hear it here,
+# beside the ffmpeg that cannot, rather than from the interface later in a
+# message about a Vulkan device.
+$shaderCheck = Join-Path $tmp 'shader.py'
+Set-Content -Path $shaderCheck -Encoding utf8 -Value @'
+import sys
+from stereo360 import fsrcnnx
+print(fsrcnnx.problem(sys.argv[1]) or "ok")
+'@
+$why = & $py $shaderCheck (Join-Path $ffDest 'ffmpeg.exe') 2>$null
+if ($why -and $why -ne 'ok') {
+    Write-Warn 'this ffmpeg cannot run the shader upscaler:'
+    Write-Warn "  $why"
+    Write-Detail 'everything else works; the other upscalers do not need it'
+} else {
+    Write-Good 'libplacebo runs, so the shader upscaler is available'
+}
+Remove-Item $shaderCheck -ErrorAction SilentlyContinue
 }
 
 # ---- model --------------------------------------------------------------
