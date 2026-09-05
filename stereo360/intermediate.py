@@ -77,10 +77,29 @@ _KEEP = (
 #: neighbour, which reported 56.7 dB for a codec that is bit exact and 32.5
 #: for ffv1, which is lossless by construction. Normalise both timelines with
 #: `setpts=N/FRAME_RATE/TB` before believing any number out of it.
+# libx264 ahead of ffv1, which is the order the measurements have always
+# supported and the list did not. Both are mathematically lossless -- verified
+# by round-tripping raw frames rather than by trusting the flag: 7680x3840
+# through each and back came out bit-identical to the input, sha for sha.
+# x264 is the faster and the smaller of the two, measured on the same five 8K
+# frames, encode only:
+#
+#     libx264 -qp 0 -preset ultrafast    0.074 s/frame    27 MB
+#     ffv1 -level 3                      0.126 s/frame    40 MB
+#
+# and in the pre-pass shape, where a decode runs alongside, 0.007 against
+# 0.067 s/frame. The docstring table above measured the same ordering at 8K
+# and the list still put ffv1 first, so every machine without an NVIDIA card
+# -- which is the machines this fallback exists for -- took the slower one.
+#
+# ffv1 stays, and stays lossless-only, because it carries what x264 cannot:
+# 12-, 14- and 16-bit, RGB and alpha. The format check in `encoder_args` runs
+# before this order, so a source x264 cannot hold still lands on ffv1 rather
+# than being quietly reduced to fit the faster encoder.
 _LOSSLESS = (
     ("hevc_nvenc", ("-tune", "lossless", "-preset", "p5")),
-    ("ffv1", ("-level", "3",)),
     ("libx264", ("-qp", "0", "-preset", "ultrafast")),
+    ("ffv1", ("-level", "3",)),
 )
 _NEAR = (
     ("hevc_nvenc", ("-rc", "constqp", "-qp", "10", "-preset", "p5")),
@@ -121,6 +140,61 @@ def supported(ffmpeg: str, encoder: str) -> frozenset:
     return got
 
 
+#: Frame size the `opens` probe encodes. Not arbitrary, and not small.
+#:
+#: Hardware encoders refuse frames below a minimum, so too small a probe
+#: rejects an encoder that works perfectly at real sizes -- the opposite of
+#: this check's purpose, and worse than not checking, because it would push a
+#: machine with working hardware onto a CPU encoder. Measured on a Radeon
+#: 780M: h264_amf and hevc_amf both fail at 64x64 with `encoder->Init()
+#: failed with error 5`, and both succeed from 128x128 up.
+#:
+#: 640x480 rather than that floor, because the floor that matters cannot be
+#: measured here: NVENC wants at least 145 wide for H.264 and 160 for AV1,
+#: and QSV about 176x144. Sized to clear every one of them with room, since
+#: the cost of being generous is one 640x480 frame and the cost of being
+#: exact is silently disabling a GPU on hardware this machine does not have.
+_PROBE_SIZE = "640x480"
+
+_opens: Dict[Tuple[str, str], bool] = {}
+
+
+def opens(ffmpeg: str, encoder: str) -> bool:
+    """Whether `encoder` can actually start here, not merely exist.
+
+    `supported` reads what an encoder was *compiled* to accept, which says
+    nothing about whether it can run. `hevc_nvenc` leads both tables for
+    speed and is listed by every full ffmpeg build, NVIDIA card or not -- so
+    on an AMD or Intel machine it was chosen, and then failed at the first
+    frame with "Could not open encoder before EOF". That is every pre-pass,
+    not one of them: Topaz, RIFE and the shader all write their working file
+    through here.
+
+    So it is asked by running it, which is the same trade `fsrcnnx.usable`
+    already makes for libplacebo and for the same reason -- a thing can be
+    present and still have no device to run on, and finding that out in the
+    middle of someone's render is the expensive way.
+
+    One `_PROBE_SIZE` frame to null, once per (ffmpeg, encoder), cached for
+    the process. Options are left off deliberately: this asks whether the
+    encoder opens at all, and a tuning flag cannot rescue a missing GPU.
+    """
+    key = (ffmpeg, encoder)
+    if key in _opens:
+        return _opens[key]
+    try:
+        done = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", f"testsrc2=size={_PROBE_SIZE}", "-frames:v", "1",
+             "-c:v", encoder, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120, errors="replace",
+            **NO_CONSOLE_WINDOW)
+        _opens[key] = done.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        _opens[key] = False
+    return _opens[key]
+
+
 def wants_lossless(width: int, height: int, frames: Optional[int],
                    where: str) -> bool:
     """Whether a lossless working file for this job is a reasonable size.
@@ -157,6 +231,8 @@ def encoder_args(ffmpeg: str = "ffmpeg", *, pix_fmt: Optional[str] = None,
     # source's chroma to keep the faster encoder is the trade this module
     # exists to refuse.
     for name, opts in table:
+        if not opens(ffmpeg, name):
+            continue
         formats = supported(ffmpeg, name)
         fmt = None
         if want in formats:
@@ -170,7 +246,7 @@ def encoder_args(ffmpeg: str = "ffmpeg", *, pix_fmt: Optional[str] = None,
     # Nobody can carry it, so say what was given up rather than doing it
     # quietly.
     for name, opts in table:
-        if "yuv420p" in supported(ffmpeg, name):
+        if opens(ffmpeg, name) and "yuv420p" in supported(ffmpeg, name):
             return (["-c:v", name, *opts, "-pix_fmt", "yuv420p"],
                     f"{name}, {kind}, yuv420p (wanted {want})")
     return (["-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p"],
