@@ -90,6 +90,29 @@ def total_bytes(specs: Sequence[Spec]) -> int:
     return sum(s.bytes_ for s in specs)
 
 
+def missing_export_dependency() -> Optional[str]:
+    """Which import the ONNX exports need and cannot do, or None.
+
+    Named separately because the answer is worth saying once and plainly.
+    Both are only wanted while a graph is being written; nothing loads a
+    model through torch afterwards.
+    """
+    import importlib.util
+
+    for mod, why in (("torch", "torch is not installed"),
+                     ("spandrel", "spandrel is not installed")):
+        try:
+            if importlib.util.find_spec(mod) is None:
+                return why
+        except (ImportError, ValueError):
+            return why
+    return None
+
+
+def _can_export() -> bool:
+    return missing_export_dependency() is None
+
+
 def fetch(keys: Optional[Sequence[str]] = None,
           on_line=None) -> Dict[str, Dict[str, object]]:
     """Fetch whatever is missing. Returns {key: {ok, detail}}.
@@ -99,12 +122,31 @@ def fetch(keys: Optional[Sequence[str]] = None,
     step -- importing that into a running interface to fetch a 71 KB shader
     would be a poor trade.
 
-    Never raises. A machine that is offline, or has no torch for the ESRGAN
-    export, must still finish an install with the other two in place; the
-    Enhance panel is built to offer whatever it finds.
+    Never raises. A machine that is offline, or without the export
+    dependencies, must still finish with whatever it could get; the Enhance
+    panel is built to offer what it finds.
+
+    The one missing dependency is reported once, before anything is tried,
+    rather than as a failure per model. Five graphs are exported from
+    checkpoints and all five need the same loader, so without it the run
+    printed the same cryptic tail line five times and left the reader to
+    notice they were one sentence.
     """
     root = repo_root()
     out: Dict[str, Dict[str, object]] = {}
+    todo = [s_ for s_ in (SPECS if keys is None else
+                          [BY_KEY[k] for k in keys if k in BY_KEY])
+            if not s_.present()]
+    if any(s_.needs_torch for s_ in todo) and not _can_export():
+        why = missing_export_dependency()
+        if on_line:
+            on_line(f"Cannot export the model graphs: {why}")
+            on_line(f"    {sys.executable} -m pip install spandrel")
+            on_line("  The shaders need nothing and are fetched anyway.")
+        for s_ in todo:
+            if s_.needs_torch:
+                out[s_.key] = {"ok": False, "detail": why}
+        keys = [s_.key for s_ in todo if not s_.needs_torch]
     for spec in (SPECS if keys is None else
                  [BY_KEY[k] for k in keys if k in BY_KEY]):
         if spec.present():

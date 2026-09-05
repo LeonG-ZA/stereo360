@@ -390,3 +390,48 @@ def test_the_onnx_pass_takes_audio_from_the_source_it_was_given():
     src = inspect.getsource(esrgan.run_video)
     assert '"-map", "1:a?"' in src
     assert '"-map", "0:v"' in src
+
+
+def test_a_missing_export_dependency_is_reported_once(monkeypatch):
+    """Five graphs are exported from checkpoints and all five need the same
+    loader. Without it the run printed the same cryptic tail line five times
+    -- `    pip install spandrel`, the last line of another script's stderr --
+    and left the reader to notice they were one sentence."""
+    from stereo360 import enhance_models as em
+
+    monkeypatch.setattr(em, "missing_export_dependency",
+                        lambda: "spandrel is not installed")
+    monkeypatch.setattr(em, "_can_export", lambda: False)
+    monkeypatch.setattr(em.Spec, "present", lambda self: False)
+    said = []
+    got = em.fetch(keys=["span", "spanldl", "siax"], on_line=said.append)
+
+    assert sum("spandrel is not installed" in m for m in said) == 1
+    assert any("pip install spandrel" in m for m in said)
+    for key in ("span", "spanldl", "siax"):
+        assert got[key]["ok"] is False
+        assert got[key]["detail"] == "spandrel is not installed"
+
+
+def test_the_shaders_are_still_fetched_without_the_exporter(monkeypatch):
+    """They are a download, not a build. A machine that cannot export the
+    graphs should still end up able to upscale."""
+    from stereo360 import enhance_models as em
+
+    monkeypatch.setattr(em, "_can_export", lambda: False)
+    monkeypatch.setattr(em, "missing_export_dependency",
+                        lambda: "spandrel is not installed")
+    monkeypatch.setattr(em.Spec, "present", lambda self: False)
+    tried = []
+
+    def fake_run(argv, **kw):
+        tried.append(argv[-1])
+
+        class Done:
+            returncode, stdout, stderr = 1, "", ""
+        return Done()
+
+    monkeypatch.setattr(em.subprocess, "run", fake_run)
+    em.fetch(on_line=lambda m: None)
+    assert "fsrcnnx16" in tried and "fsrcnnx8" in tried
+    assert "span" not in tried, "an export that cannot run must not be tried"

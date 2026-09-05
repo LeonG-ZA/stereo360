@@ -9,3 +9,11 @@ onnxruntime>=1.17
 # without them the script fails with ModuleNotFoundError before doing anything.
 onnx>=1.16
 onnxscript>=0.1
+
+# To export an *upscaler* graph with scripts/fetch_upscalers.py. Five of the
+# six are published as checkpoints rather than ONNX, and spandrel identifies
+# the architecture and builds it -- SPAN's blocks in particular ship their
+# fused convolution unfused, so a loader that takes it at face value gets a
+# plausible model made of initialisation noise. Wanted only while a graph is
+# being written; nothing loads a model through torch afterwards.
+spandrel>=0.4
