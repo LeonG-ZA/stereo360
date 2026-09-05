@@ -26,7 +26,7 @@
 #: `test_no_tag_already_claims_this_version` caught this the moment v1.0.2 was
 #: cut and kept saying so through v1.0.3. The guard worked; it was the acting
 #: on it that did not. So this holds the *next* release, never the last one.
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 #: Package versions from before the two were kept in step, and the release each
 #: one actually went out as.

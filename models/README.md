@@ -1,8 +1,22 @@
 # models/
 
-Exported ONNX depth models live here. They are **not** in the repository —
-together they run to about 194 MB, nothing in them is authored here, and
-`scripts/export_onnx.py` regenerates them on demand.
+Exported ONNX models live here. They are **not** in the repository — together
+they run to about 217 MB, nothing in them is authored here, and the scripts
+below fetch or regenerate them on demand.
+
+The depth graphs are only needed for `--depth-backend onnx`;
+`rife_v4.25.onnx` is only needed for `--interpolate rife`:
+
+```bash
+# the interpolation graph, about 20 MB, from the vs-mlrt model release
+python scripts/fetch_rife.py
+
+# the photo upscaler, about 5 MB, exported from the official weights
+python scripts/fetch_esrgan.py
+
+# the video upscaler, about 70 KB of GLSL -- a shader, not a model
+python scripts/fetch_fsrcnnx.py
+```
 
 Only needed for `--depth-backend onnx`. The default backend downloads its
 weights from the HuggingFace Hub and needs nothing in this directory.

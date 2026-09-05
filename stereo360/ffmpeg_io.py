@@ -145,6 +145,10 @@ class VideoInfo:
     has_audio: bool
     color: ColorTags = field(default_factory=ColorTags)
     pix_fmt: Optional[str] = None
+    #: The video codec as ffprobe names it -- 'hevc', 'h264', 'av1'. Wanted
+    #: because not every ffmpeg on the machine can decode every one of them:
+    #: Topaz's bundled build has no software AV1 decoder.
+    codec: Optional[str] = None
     #: 'equirectangular' | 'cubemap' | ... as declared by the file's sv3d box,
     #: or None when it declares nothing. Untagged is the common case, so it
     #: cannot mean "not spherical" -- only "did not say".
@@ -347,6 +351,7 @@ def probe(path: str) -> VideoInfo:
                         transfer=tag("color_transfer"),
                         primaries=tag("color_primaries")),
         pix_fmt=vstream.get("pix_fmt"),
+        codec=vstream.get("codec_name"),
         projection=projection,
         cubemap_padding=padding,
         bound_left=bound_left,

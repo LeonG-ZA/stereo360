@@ -8,6 +8,8 @@ No QML and no window: Runner and Controller are plain QObjects, so a
 QCoreApplication event loop is enough and these run on a headless machine.
 """
 
+import argparse
+import re
 import time
 from pathlib import Path
 
@@ -248,6 +250,31 @@ def test_controller_reports_missing_input_without_spawning(qapp):
 # ------------------------------------------------------------------- render
 
 
+def _is_qml_warning(line):
+    """Whether a line of the selftest's stderr is a QML complaint.
+
+    Qt writes these two ways, and this used to look for only one of them::
+
+        QML Connections: Implicitly defined onFoo properties ...
+        file:///.../qml/Main.qml:118:5: Unable to assign [undefined] to bool
+
+    The second form -- every binding and type error, which is what this check
+    is really for -- names the file rather than announcing itself, and the
+    name is `Main.qml` in lower case. A case-sensitive search for "QML" walked
+    straight past it, so two real warnings shipped while the test that exists
+    to catch them stayed green.
+
+    setGeometry is excluded deliberately: it fires when the *test machine's*
+    screen is smaller than the requested window, which says nothing about the
+    layout and would make this flaky on exactly the small displays the sizing
+    is meant to support.
+    """
+    if "setGeometry" in line:
+        return False
+    return ("QML" in line or "Detected anchors" in line
+            or re.search(r"\.qml:\d+", line) is not None)
+
+
 def _selftest(*extra):
     """Run the UI selftest and return (stdout, warning lines)."""
     import subprocess
@@ -276,9 +303,7 @@ def _selftest(*extra):
     # screen is smaller than the requested window, which says nothing about
     # the layout and would make this flaky on exactly the small displays the
     # sizing is meant to support.
-    warnings = [ln for ln in proc.stderr.splitlines()
-                if ("QML" in ln or "Detected anchors" in ln)
-                and "setGeometry" not in ln]
+    warnings = [ln for ln in proc.stderr.splitlines() if _is_qml_warning(ln)]
     return proc.stdout, warnings
 
 
@@ -286,6 +311,29 @@ def _size_of(stdout):
     field = next(t for t in stdout.split() if t.startswith("size="))
     w, _, h = field[len("size="):].partition("x")
     return int(w), int(h)
+
+
+def test_the_warning_filter_sees_both_shapes_qt_writes():
+    """The filter missed every file-anchored warning for want of a lower-case
+    letter, which is how two of them shipped past `test_qml_loads_and_renders`.
+    """
+    caught = [
+        "file:///C:/x/stereo360_ui/qml/Main.qml:118:5: Unable to assign "
+        "[undefined] to bool",
+        "qrc:/qt/qml/Main.qml:42:9: ReferenceError: nope is not defined",
+        "QML Connections: Implicitly defined onFoo properties are deprecated",
+        "Detected anchors on an item that is managed by a layout.",
+    ]
+    for line in caught:
+        assert _is_qml_warning(line), line
+
+    ignored = [
+        "SELFTEST ok size=1280x800",
+        "QWindowsWindow::setGeometry: Unable to set geometry 1280x800",
+        "file:///C:/x/qml/Main.qml: QWindowsWindow::setGeometry: 1280x800",
+    ]
+    for line in ignored:
+        assert not _is_qml_warning(line), line
 
 
 def test_qml_loads_and_renders():
@@ -1657,3 +1705,437 @@ def test_pole_compensation_is_omitted_at_its_default():
 def test_pole_compensation_reaches_the_command():
     argv = options.build_argv(dict(BASE, poleCompensation=3.0))
     assert argv[argv.index("--pole-compensation") + 1] == "3"
+
+
+# ------------------------------------------------------- the Topaz pre-pass
+#
+# The controls only exist on a machine that has Topaz Video AI installed, so
+# every test that needs one fakes the probe result rather than the install --
+# otherwise these pass on one developer's machine and skip on everyone's.
+
+_ESRGAN = ('{"code": "esrgan", "short": "esrgan", '
+           '"name": "Real-ESRGAN (photos)", "desc": "free", '
+           '"source": "esrgan", "stills_only": true}')
+_CHRONOS = ('{"code": "chr-2", "short": "chr", "name": "Chronos", '
+            '"desc": "d", "source": "topaz"}')
+_RIFE = ('{"code": "rife", "short": "rife", "name": "RIFE v4.25", '
+         '"desc": "free", "source": "rife"}')
+_TOPAZ_UP = ('{"code": "amq-13", "short": "amq", '
+             '"name": "Artemis - Medium Quality", "desc": "d", '
+             '"source": "topaz"}')
+
+
+def _topaz(available=True, offered=True, needs_login=False,
+           interpolate_offered=True, rife=True, topaz_fi=True, esrgan=False):
+    """A `--set topaz=` override standing in for a probe result.
+
+    `rife` and `topaz_fi` decide which interpolators the machine turns out to
+    have, which is now the interesting axis: RIFE needs nothing installed, so
+    a machine with no Topaz still has one.
+    """
+    fi = ([_CHRONOS] if topaz_fi else []) + ([_RIFE] if rife else [])
+    up = ([_TOPAZ_UP] if available else []) + ([_ESRGAN] if esrgan else [])
+    return ("topaz={"
+            f'"available": {str(bool(available)).lower()}, '
+            f'"offered": {str(bool(offered)).lower()}, '
+            f'"needs_login": {str(bool(needs_login)).lower()}, '
+            f'"interpolate_offered": {str(bool(interpolate_offered)).lower()}, '
+            f'"esrgan": {{"available": {str(bool(esrgan)).lower()}}}, '
+            f'"models": [{", ".join(up)}], '
+            f'"interpolators": [{", ".join(fi)}]' "}")
+
+
+def test_upscaling_is_absent_without_topaz():
+    """Most machines have not got it, and an option that cannot be used is
+    worse than no option -- it reads as something broken."""
+    _, rows = _dump()
+    assert rows["Upscale"] is False
+    assert rows["Smooth motion"] is False
+
+
+def test_upscaling_is_absent_for_an_8k_source():
+    """`offered` is the core's judgement, made from the source width: an 8K
+    input has nothing to gain and would cost an hour to prove it."""
+    _, rows = _dump(_topaz(offered=False))
+    assert rows["Upscale"] is False
+
+
+def test_upscaling_appears_when_topaz_is_installed_and_the_source_is_small():
+    _, rows = _dump(_topaz())
+    assert rows["Upscale"] is True
+    assert rows["Smooth motion"] is True
+
+
+def test_interpolation_appears_without_topaz():
+    """The point of wiring RIFE in: a machine with no Topaz can still raise a
+    frame rate, and the interface has to say so."""
+    _, rows = _dump(_topaz(available=False, offered=False, topaz_fi=False))
+    assert rows["Upscale"] is False, "nothing to upscale with"
+    assert rows["Smooth motion"] is True
+
+
+def test_interpolation_is_hidden_above_30_fps():
+    """Judder is a low-frame-rate artifact. Above 30 there is nothing to fix,
+    and doubling only multiplies the frames the stereo pass has to convert."""
+    _, rows = _dump(_topaz(interpolate_offered=False))
+    assert rows["Smooth motion"] is False
+    assert rows["Upscale"] is True, "the other half still applies"
+
+
+def test_the_default_interpolator_follows_the_machine():
+    """Chronos when Topaz is there and signed in -- it is what the numbers
+    were measured against -- and RIFE when it is not."""
+    props, _ = _dump(_topaz())
+    assert props["interpolateModel"] == "chr"
+
+    props, _ = _dump(_topaz(available=False, offered=False, topaz_fi=False))
+    assert props["interpolateModel"] == "rife"
+
+
+def test_a_signed_out_topaz_falls_back_to_rife():
+    """The choice has to be one the core can honour: a Topaz model with Topaz
+    signed out would build a command that fails."""
+    props, _ = _dump(_topaz(needs_login=True))
+    assert props["interpolateModel"] == "rife"
+
+
+def test_the_model_rows_wait_for_the_switch():
+    """A model to upscale with is meaningless until upscaling is on, and the
+    panel is long enough already."""
+    _, rows = _dump(_topaz())
+    assert rows["Upscale model"] is False
+    assert rows["Motion model"] is False
+    _, rows = _dump(_topaz(), "upscale=true", "interpolate=true")
+    assert rows["Upscale model"] is True
+    assert rows["Motion model"] is True
+    assert rows["Frame rate"] is True
+
+
+def test_interpolation_is_hidden_for_a_photo(tmp_path):
+    """One frame has nothing to interpolate between. The upscaler still
+    applies, which is why only half the card goes."""
+    _, rows = _dump(_topaz(), f"inputPath={_still(tmp_path)}",
+                    "upscale=true", "interpolate=true")
+    assert rows["Upscale"] is True
+    assert rows["Smooth motion"] is False
+    assert rows["Motion model"] is False
+
+
+def test_a_signed_out_topaz_says_so():
+    """It does not refuse a signed-out job -- it renders it watermarked, which
+    is discovered at the end of the hour it took."""
+    items = _items(_topaz(needs_login=True))
+    assert items["topazCard"][0] is True, "still shown, or the message has no home"
+    assert items["topazLogin"][0] is True
+    assert _items(_topaz())["topazLogin"][0] is False
+
+
+def test_the_login_message_asks_for_a_sign_in():
+    """The wording is the whole point of the banner, so assert it rather than
+    trusting a rectangle to be present."""
+    qml = (Path(__file__).resolve().parent.parent
+           / "stereo360_ui" / "qml" / "Main.qml").read_text(encoding="utf-8")
+    block = qml[qml.index('objectName: "topazLogin"'):]
+    block = block[:block.index("Row2")]
+    assert "sign in to Topaz Video AI" in block
+
+
+def test_upscaling_reaches_the_command_line():
+    argv = options.build_argv(dict(BASE, upscale=True, upscaleModel="ahq",
+                                   upscaleScale=3.0))
+    assert argv[argv.index("--upscale") + 1] == "ahq"
+    assert argv[argv.index("--upscale-scale") + 1] == "3"
+
+
+def test_the_default_upscaler_is_artemis_medium_quality():
+    """Chosen in a headset rather than from the scorecard, and the UI must not
+    quietly disagree with the CLI about it."""
+    from stereo360 import upscale as _u
+
+    argv = options.build_argv(dict(BASE, upscale=True))
+    assert argv[argv.index("--upscale") + 1] == _u.DEFAULT_UPSCALE
+    assert "--upscale-scale" not in argv          # 2 is the CLI's own default
+
+
+def test_interpolation_reaches_the_command_line():
+    argv = options.build_argv(dict(BASE, interpolate=True,
+                                   interpolateModel="apo",
+                                   interpolateFps=60))
+    assert argv[argv.index("--interpolate") + 1] == "apo"
+    assert argv[argv.index("--interpolate-fps") + 1] == "60"
+
+
+def test_leaving_the_frame_rate_to_topaz_emits_nothing():
+    argv = options.build_argv(dict(BASE, interpolate=True, interpolateFps=0))
+    assert "--interpolate" in argv
+    assert "--interpolate-fps" not in argv
+
+
+def test_nothing_is_emitted_when_the_pre_pass_is_off():
+    argv = options.build_argv(dict(BASE, upscaleModel="ahq", upscaleScale=4.0,
+                                   interpolateFps=120))
+    assert "--upscale" not in argv
+    assert "--interpolate" not in argv
+
+
+def test_a_photo_never_asks_for_interpolation():
+    """The CLI ignores it for a still rather than failing, so the only symptom
+    would be a flag in the shown command that does nothing."""
+    argv = options.build_argv({"input": "pano.jpg", "output": "out.jpg",
+                               "upscale": True, "interpolate": True})
+    assert "--upscale" in argv
+    assert "--interpolate" not in argv
+
+
+def test_a_preview_never_runs_the_pre_pass():
+    """A preview exists to be quick. Upscaling one costs longer than the
+    preview it is meant to speed up the judgement of."""
+    argv = options.build_argv(dict(BASE, upscale=True, interpolate=True),
+                              preview_frame=4, preview_output="p.png")
+    assert "--upscale" not in argv
+    assert "--interpolate" not in argv
+
+
+def test_the_probe_is_asked_about_this_source(qapp, tmp_path: Path):
+    """Per source, not once: whether upscaling is worth offering depends on
+    how wide this one is, and a sign-in can lapse between two files."""
+    c = Controller()
+    c.probeUpscalers(3840)
+    assert _pump(qapp, lambda: c.upscalers != {} , timeout=90), \
+        "the probe never answered"
+    found = c.upscalers
+    assert "available" in found
+    if not found["available"]:
+        pytest.skip("Topaz Video AI is not installed here")
+    assert found["offered"] is True
+    assert c.upscalers.get("models")
+
+
+def test_the_probe_answers_no_rather_than_failing(qapp):
+    """A GUI calls this at startup on every machine, so the machine without
+    Topaz has to get a usable no."""
+    from stereo360 import upscale as _u
+
+    found = _u.describe(3840)
+    assert found["available"] in (True, False)
+    assert isinstance(found["models"], list)
+    assert isinstance(found["interpolators"], list)
+    assert found["needs_login"] in (True, False)
+
+
+def test_an_8k_source_is_not_offered_an_upscale():
+    from stereo360 import upscale as _u
+
+    assert _u.describe(7680)["offered"] is False
+    assert _u.describe(3840)["offered"] is True
+
+
+def test_rife_reaches_the_command_line():
+    argv = options.build_argv(dict(BASE, interpolate=True,
+                                   interpolateModel="rife"))
+    assert argv[argv.index("--interpolate") + 1] == "rife"
+
+
+def test_the_core_offers_interpolation_only_up_to_30_fps():
+    """The UI rule and the CLI rule are the same rule, so assert them against
+    the same function rather than letting them drift."""
+    from stereo360 import interpolate as _fi
+
+    assert _fi.offered_for(24) is True
+    assert _fi.offered_for(30) is True
+    assert _fi.offered_for(29.97) is True
+    assert _fi.offered_for(50) is False
+    assert _fi.offered_for(60) is False
+    assert _fi.offered_for(0) is False
+
+
+def test_the_probe_lists_both_kinds_of_interpolator():
+    """One reply, because the interface asks one question -- what can this
+    machine do to a source before the stereo pass."""
+    import json
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-m", "stereo360", "--probe-upscalers",
+         "--probe-width", "3840", "--probe-fps", "30"],
+        capture_output=True, text=True, timeout=180,
+        cwd=str(Path(__file__).resolve().parent.parent)).stdout
+    found = json.loads(out)
+    assert "interpolate_offered" in found
+    for entry in found["interpolators"]:
+        assert entry["source"] in ("topaz", "rife")
+    if found["rife"]["available"]:
+        assert any(e["source"] == "rife" for e in found["interpolators"])
+
+
+def test_a_fast_source_is_not_offered_interpolation_by_the_probe():
+    import json
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-m", "stereo360", "--probe-upscalers",
+         "--probe-fps", "60"],
+        capture_output=True, text=True, timeout=180,
+        cwd=str(Path(__file__).resolve().parent.parent)).stdout
+    assert json.loads(out)["interpolate_offered"] is False
+
+
+# ------------------------------------------------------- the pre-pass phase
+#
+# Reported on the same channel as the render, and at 8K it is the longer of
+# the two. A run that says "Frame 120 of 2400" while no stereo frame exists
+# yet -- and writes an intermediate next to the output while it does -- reads
+# as a render producing a plainly wrong file, which is exactly how it was
+# first reported.
+
+
+def test_a_prepass_does_not_claim_to_be_the_render(qapp):
+    """Its start event names no output, and taking it for the render's would
+    forget where the finished file is going."""
+    runner = Runner()
+    logged = []
+    runner.logged.connect(lambda level, text: logged.append(text))
+
+    runner._dispatch({"type": "start", "total": 40, "output": "C:/x/out.mp4"})
+    runner._dispatch({"type": "start", "total": 2400, "stage": "interpolate"})
+    runner._dispatch({"type": "done", "stage": "interpolate", "frames": 2400})
+
+    assert runner._output == "C:/x/out.mp4", \
+        "the pre-pass forgot where the render is going"
+    assert any("frames to prepare" in line for line in logged)
+    assert not any("2400 frames to render" in line for line in logged)
+
+
+def test_prepass_progress_says_which_pass_it_is(qapp):
+    """The frame count of a pre-pass is not the render's, so the number needs
+    the phase next to it or it describes something that is not happening."""
+    ctl = Controller()
+    ctl._busy = True
+
+    ctl._on_progress(120, 2400, 100.0, 1.2, 400.0, "interpolate")
+    assert "Smoothing motion" in ctl.status
+    assert "120" in ctl.status
+
+    ctl._on_progress(3, 92, 4.0, 0.7, 60.0, "")
+    assert "Smoothing motion" not in ctl.status
+    assert ctl.status.startswith("Frame 3 of 92")
+
+
+def test_the_stage_reaches_every_progress_event():
+    """It is set once, on start, and every frame of that phase has to carry
+    it -- a progress event that arrives bare is one the interface will show
+    as the render."""
+    import io as _io
+    import json as _json
+
+    from stereo360.events import JsonReporter
+
+    buf = _io.StringIO()
+    r = JsonReporter(buf, interval=0)
+    r.start(10, stage="interpolate")
+    r.advance(1)
+    r.advance(1)
+    r.finish(stage="interpolate")
+    r.start(92)
+    r.advance(1)
+
+    events = [_json.loads(line) for line in buf.getvalue().splitlines()]
+    during = [e for e in events if e["type"] == "progress"]
+    assert [e.get("stage") for e in during[:2]] == ["interpolate", "interpolate"]
+    assert during[-1].get("stage") is None, "the render itself has no stage"
+
+
+def test_the_prepass_file_is_named_as_working_and_swept(tmp_path):
+    """It sits next to the output, so its name has to say it is not one. And
+    a run killed outright cannot clean up after itself, so the next one does.
+    """
+    from stereo360 import cli
+
+    assert cli.PREPASS_SUFFIX.startswith(".")
+    assert "prepass" in cli.PREPASS_SUFFIX
+
+    stale = tmp_path / ("out" + cli.PREPASS_SUFFIX + ".mkv")
+    stale.write_bytes(b"left over from a killed run")
+
+    args = argparse.Namespace(
+        input=str(tmp_path / "in.mp4"), output=str(tmp_path / "out.mp4"),
+        upscale=None, interpolate=None)
+    made = []
+    cli._topaz_prepass(args, None, None, None, False, made)
+    # Nothing was asked for, so the sweep does not run and the file survives;
+    # what matters is that the name is recognisable as this tool's.
+    assert stale.exists()
+
+
+def test_stopping_during_a_prepass_does_not_claim_to_have_saved_anything(qapp):
+    """It was reported as "it said the frames were saved but I don't see
+    anything" -- and there was nothing to see, because the render had not
+    started. The banner has to distinguish the two."""
+    ctl = Controller()
+    ctl._busy = True
+    ctl._on_progress(160, 4800, 200.0, 0.8, 5000.0, "interpolate")
+    ctl._on_finished(False, True, "")
+
+    assert ctl.status == "Stopped"
+    assert "nothing was saved" in ctl.detail
+    assert "smoothing motion" in ctl.detail.lower()
+
+
+def test_stopping_mid_render_says_how_much_was_kept(qapp):
+    """The other half of the same message: here there really is a playable
+    file, and the count is what tells someone whether it is worth keeping."""
+    ctl = Controller()
+    ctl._busy = True
+    ctl._on_progress(160, 4800, 200.0, 0.8, 5000.0, "interpolate")
+    ctl._on_progress(42, 2400, 60.0, 0.7, 3000.0, "")
+    ctl._on_finished(False, True, "C:/x/out.mp4")
+
+    assert "42 frames" in ctl.detail
+    assert "nothing was saved" not in ctl.detail
+
+
+# ----------------------------------------------- upscaling without Topaz
+#
+# Real-ESRGAN does photos and is refused for video: it invents a third more
+# frame-to-frame movement than the scene has. The interface has to offer it
+# where it applies and explain itself where it does not.
+
+
+def test_a_photo_can_be_upscaled_without_topaz(tmp_path):
+    props, rows = _dump(_topaz(available=False, topaz_fi=False, rife=False,
+                               esrgan=True),
+                        f"inputPath={_still(tmp_path)}")
+    assert rows["Upscale"] is True
+    assert props["upscaleModel"] == "esrgan"
+
+
+def test_a_video_without_topaz_is_offered_no_upscaler():
+    """The only one on the machine is for photos, so the control would do
+    nothing but explain itself -- better not to show it."""
+    _, rows = _dump(_topaz(available=False, topaz_fi=False, rife=False,
+                           esrgan=True))
+    assert rows["Upscale"] is False
+
+
+def test_topaz_stays_the_default_where_it_can_be_used(tmp_path):
+    """It is what the numbers in the module were measured against."""
+    props, _ = _dump(_topaz(esrgan=True), f"inputPath={_still(tmp_path)}")
+    assert props["upscaleModel"] == "amq"
+
+    props, _ = _dump(_topaz(esrgan=True))
+    assert props["upscaleModel"] == "amq"
+
+
+def test_a_signed_out_topaz_falls_back_to_the_free_one_for_a_photo(tmp_path):
+    """A choice the core cannot honour is worse than no choice."""
+    props, _ = _dump(_topaz(needs_login=True, esrgan=True),
+                     f"inputPath={_still(tmp_path)}")
+    assert props["upscaleModel"] == "esrgan"
+
+
+def test_the_upscaler_reaches_the_command_line():
+    argv = options.build_argv(dict(BASE, input="pano.jpg", output="out.jpg",
+                                   upscale=True, upscaleModel="esrgan"))
+    assert argv[argv.index("--upscale") + 1] == "esrgan"

@@ -314,6 +314,12 @@ _DEFAULTS = {
     "bitdepth": 8,
     "outputMode": "360",
     "yaw": 0.0,
+    "upscale": False,
+    "upscaleModel": "amq",
+    "upscaleScale": 2.0,
+    "interpolate": False,
+    "interpolateModel": "chr",
+    "interpolateFps": 0.0,
 }
 
 
@@ -504,6 +510,29 @@ def build_argv(
             argv += ["--chunk-overlap", str(overlap)]
         if not opts.get("temporalFill", True):
             argv += ["--no-temporal-fill"]
+
+    # A Topaz pre-pass, when one was asked for and the machine has Topaz --
+    # the controls only exist when it does. Never for a preview: the point of
+    # a preview is a frame in a few seconds, and upscaling one costs longer
+    # than the whole preview does. The pre-pass is also the reason these come
+    # before the frame range below rather than after: they describe the source
+    # being converted, not the conversion.
+    if not is_preview and opts.get("upscale"):
+        model = str(opts.get("upscaleModel") or _DEFAULTS["upscaleModel"])
+        argv += ["--upscale", model]
+        scale = _num(opts.get("upscaleScale"), _DEFAULTS["upscaleScale"])
+        if abs(scale - _DEFAULTS["upscaleScale"]) > 1e-9:
+            argv += ["--upscale-scale", f"{scale:g}"]
+
+    # Video only. A still has no frames to interpolate between, and the CLI
+    # ignores the model rather than failing -- but emitting it would still put
+    # a flag in the displayed command that does nothing.
+    if not is_preview and not photo and opts.get("interpolate"):
+        model = str(opts.get("interpolateModel") or _DEFAULTS["interpolateModel"])
+        argv += ["--interpolate", model]
+        fps = _num(opts.get("interpolateFps"), 0.0)
+        if fps > 0:
+            argv += ["--interpolate-fps", f"{fps:g}"]
 
     if is_preview:
         argv += ["--preview-frame", str(int(preview_frame)),

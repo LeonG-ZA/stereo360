@@ -87,6 +87,65 @@ ApplicationWindow {
     property int startFrame: 0
     property int maxFrames: 0
 
+    // The upscale pre-pass. Off unless asked for
+    property bool upscale: false
+    property string upscaleModel: "amq"
+    property real upscaleScale: 2.0
+    property bool interpolate: false
+    property string interpolateModel: "chr"
+    property real interpolateFps: 0
+
+    // What the core's probe said about Topaz. A plain property holding the
+    // binding, so the selftest can put the window into each of the states --
+    // absent, signed out, 8K source -- on a machine that has no Topaz at all.
+    property var topaz: app.upscalers
+
+    // Every answer comes from the probe rather than from a rule repeated
+    // here: `offered` is its judgement that this source is below 8K, and
+    // `interpolate_offered` that it is at 30 fps or below and there is at
+    // least one interpolator on this machine to do it with.
+    readonly property bool topazReady: topaz.available === true
+                                       && topaz.offered === true
+    readonly property bool topazNeedsLogin: topaz.needs_login === true
+    readonly property bool interpolateReady: topaz.interpolate_offered === true
+    // Upscaling is no longer Topaz's alone: Real-ESRGAN does photos, and a
+    // machine with only that should still be offered the control -- for a
+    // photo. `offered` is the probe's width judgement and applies to both.
+    // `a && a.b === true` looks like a boolean and is not: when `a` is
+    // undefined -- which it is until the probe answers -- JavaScript's `&&`
+    // hands back that undefined rather than false, and QML will not put it in
+    // a bool. Compare first so both sides are always a boolean.
+    readonly property bool esrganReady: topaz.esrgan !== undefined
+                                        && topaz.esrgan.available === true
+    // The shader takes video as well as stills, so unlike Real-ESRGAN it
+    // makes the control worth showing whatever the job is.
+    readonly property bool shaderReady: topaz.fsrcnnx !== undefined
+                                        && topaz.fsrcnnx.available === true
+    readonly property bool upscaleReady: topaz.offered === true
+                                         && (topaz.available === true
+                                             || shaderReady
+                                             || (esrganReady && photoMode))
+    readonly property bool canUpscale: upscaleReady
+                                       && defaultUpscaler() !== ""
+    readonly property bool canInterpolate: interpolateReady
+                                           && defaultInterpolator() !== ""
+    // The card exists for either half. Upscaling is Topaz's alone, but RIFE
+    // interpolates on any machine, so a source can be worth offering one and
+    // not the other.
+    readonly property bool enhanceReady: upscaleReady || interpolateReady
+
+    // 0 means "just double it", which either interpolator does on its own --
+    // the rate a headset wants depends on the source, and doubling 30 lands
+    // at 60 either way.
+    readonly property var fpsChoices: [
+        { text: "Double the source rate", key: 0 },
+        { text: "48 frames a second", key: 48 },
+        { text: "60 frames a second", key: 60 },
+        { text: "72 frames a second", key: 72 },
+        { text: "90 frames a second", key: 90 },
+        { text: "120 frames a second", key: 120 }
+    ]
+
     property bool logExpanded: true
 
     function currentOptions() {
@@ -108,7 +167,14 @@ ApplicationWindow {
             "device": device, "fgErode": fgErode, "smooth": smooth,
             "inpaint": inpaint, "chunkSize": chunkSize,
             "chunkOverlap": chunkOverlap, "temporalFill": temporalFill,
-            "startFrame": startFrame, "maxFrames": maxFrames
+            "startFrame": startFrame, "maxFrames": maxFrames,
+            "upscale": upscale && canUpscale
+                       && upscalerUsable(upscaleModel),
+            "upscaleModel": upscaleModel, "upscaleScale": upscaleScale,
+            "interpolate": interpolate && canInterpolate
+                           && interpolatorUsable(interpolateModel),
+            "interpolateModel": interpolateModel,
+            "interpolateFps": interpolateFps
         }
     }
 
@@ -186,6 +252,130 @@ ApplicationWindow {
                               outputMode, outputWidth)
     }
 
+    // Asked per source, because whether upscaling is worth offering depends
+    // on how wide this one already is -- and because a sign-in that lapsed
+    // since the last file should be reported before the render, not after.
+    function refreshUpscalers() {
+        // Not for the empty state between two files: probing width 0 would
+        // answer "worth offering", and the card would flash into view before
+        // the real width arrived to say otherwise.
+        if (sourceWidth > 0)
+            app.probeUpscalers(sourceWidth, app.sourceInfo.fps || 0)
+    }
+
+    function upscalerNote(entry, usable) {
+        if (entry.source === "topaz")
+            return usable ? "Topaz" : "Topaz — signed out"
+        if (entry.source === "esrgan" && !usable)
+            return "photos only"
+        return ""
+    }
+
+    // Real-ESRGAN is for photos: on video it invents a third more movement
+    // than the scene has, which reads as crawling. Left in the list and
+    // greyed rather than hidden, so the reason can be shown.
+    function upscalerUsable(code) {
+        var l = topaz.models
+        if (!l)
+            return false
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].short === code) {
+                if (l[i].source === "esrgan")
+                    return photoMode        // it crawls on anything moving
+                if (l[i].source === "fsrcnnx")
+                    return true             // photos and video alike
+                return topaz.needs_login !== true
+            }
+        return false
+    }
+
+    function defaultUpscaler() {
+        var l = topaz.models
+        if (!l)
+            return ""
+        // Artemis Medium Quality where Topaz can be used -- it is what the
+        // measurements were made against -- then the shader, which is the
+        // only other one that takes video, then whatever is left.
+        var order = ["amq", "fsrcnnx"]
+        for (var p = 0; p < order.length; ++p)
+            for (var i = 0; i < l.length; ++i)
+                if (l[i].short === order[p] && upscalerUsable(order[p]))
+                    return order[p]
+        for (i = 0; i < l.length; ++i)
+            if (upscalerUsable(l[i].short))
+                return l[i].short
+        return ""
+    }
+
+    // Which interpolator to use unless someone picks another. Chronos when
+    // Topaz is here and signed in -- it is what the measurements were made
+    // against -- and RIFE otherwise, which is free and needs nothing. "" when
+    // the machine has neither, which is what disables the control.
+    function defaultInterpolator() {
+        var l = topaz.interpolators
+        if (!l)
+            return ""
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].short === "chr" && interpolatorUsable("chr"))
+                return "chr"
+        for (i = 0; i < l.length; ++i)
+            if (interpolatorUsable(l[i].short))
+                return l[i].short
+        return ""
+    }
+
+    // A Topaz model cannot be used while Topaz is signed out; RIFE does not
+    // care, which is the point of having it in the same list.
+    function interpolatorUsable(code) {
+        var l = topaz.interpolators
+        if (!l)
+            return false
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].short === code)
+                // Reads `topaz` rather than the `topazNeedsLogin` binding:
+                // this is called from onTopazChanged, where a binding derived
+                // from the same property has not necessarily caught up.
+                return l[i].source !== "topaz" || topaz.needs_login !== true
+        return false
+    }
+
+    // A choice that this machine cannot honour is worse than no choice: it
+    // would build a command the core refuses. Only replaced when it has
+    // stopped being usable, so a deliberate pick survives the next probe.
+    onTopazChanged: {
+        if (!interpolatorUsable(interpolateModel))
+            interpolateModel = defaultInterpolator()
+        if (!upscalerUsable(upscaleModel))
+            upscaleModel = defaultUpscaler()
+    }
+
+    // A photo and a video are offered different upscalers, so the choice has
+    // to be revisited when the kind of job changes as well.
+    onPhotoModeChanged: {
+        if (!upscalerUsable(upscaleModel))
+            upscaleModel = defaultUpscaler()
+    }
+
+    function fpsIndex(fps) {
+        for (var i = 0; i < fpsChoices.length; ++i)
+            if (fpsChoices[i].key === fps)
+                return i
+        return 0
+    }
+
+    // Which entry of a probed model list a short code sits at, for the
+    // ComboBoxes below. -1 when the list has not arrived yet -- which is the
+    // state before the probe answers, and on every machine without Topaz --
+    // leaving the box empty rather than showing the wrong model as chosen.
+    function topazIndex(list, code) {
+        if (!list)
+            return -1
+        for (var i = 0; i < list.length; ++i)
+            if (list[i].short === code)
+                return i
+        return -1
+    }
+
     // Only fetched for the mode that has a direction to choose. Requesting it
     // on the mode change as well as on the file means switching to VR180 finds
     // the picture already there.
@@ -237,6 +427,7 @@ ApplicationWindow {
             win.adoptDefaultResolution()
             win.adoptPhotoDefaults()
             win.refreshEncoders()
+            win.refreshUpscalers()
             // Set the spatial-audio switch from what the file turned out to
             // be, rather than making someone notice a channel count and tick
             // a box. Forgetting it is not a small mistake: with a yaw it
@@ -641,6 +832,9 @@ ApplicationWindow {
                 color: Theme.bg
 
                 ScrollView {
+                    // Named so a selftest screenshot can reach the sections
+                    // below the fold, which is most of the panel.
+                    objectName: "settingsScroll"
                     anchors.fill: parent
                     anchors.margins: Theme.gap
                     contentWidth: availableWidth
@@ -1000,6 +1194,253 @@ ApplicationWindow {
                                     color: Theme.warn
                                     font.pixelSize: Theme.fontS
                                     wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+
+                        // ---- Topaz pre-pass ------------------------------
+                        // Absent unless Topaz Video AI is installed here and
+                        // this source is below 8K. Both answers come from the
+                        // core's own probe, so the rule lives in one tested
+                        // place rather than being restated in the window.
+                        Card {
+                            objectName: "topazCard"
+                            title: "Enhance the source"
+                            subtitle: "before the 3D pass"
+                            visible: win.enhanceReady
+
+                            // First thing in the card, because a signed-out
+                            // Topaz does not refuse the job -- it renders it
+                            // watermarked, which is only discovered at the end
+                            // of an hour of work.
+                            Rectangle {
+                                objectName: "topazLogin"
+                                Layout.fillWidth: true
+                                visible: win.topazNeedsLogin
+                                implicitHeight: loginText.implicitHeight + 16
+                                color: "#2a2114"
+                                radius: 6
+                                border.width: 1
+                                border.color: Theme.warn
+
+                                Text {
+                                    id: loginText
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    text: win.topazReady
+                                          ? "Please sign in to Topaz Video AI. It is installed here but signed out, and it watermarks anything it renders until you open it and sign in. Choose the file again once you have."
+                                          : "Please sign in to Topaz Video AI to use its models. It is installed here but signed out. Choose the file again once you have."
+                                    color: Theme.warn
+                                    font.pixelSize: Theme.fontS
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+
+                            Row2 {
+                                label: "Upscale"
+                                visible: win.upscaleReady
+                                hint: win.upscale
+                                      ? "Runs before the stereo pass, never per eye - these models invent detail, and inventing different detail for each eye would hand the viewer rivalry instead of sharpness. Expect it to roughly double how long the whole job takes."
+                                      : "Off. A 4K source converts as it is. Turning this on rebuilds it near 8K first, which is what a headset can actually show."
+                                Switch {
+                                    enabled: win.canUpscale
+                                    checked: win.upscale && win.canUpscale
+                                    onToggled: win.upscale = checked
+                                }
+                            }
+
+                            Row2 {
+                                label: "Upscale model"
+                                visible: win.upscale && win.upscaleReady
+                                hint: {
+                                    var l = win.topaz.models
+                                    var i = win.topazIndex(l, win.upscaleModel)
+                                    if (i < 0)
+                                        return ""
+                                    if (l[i].source === "esrgan"
+                                            && !win.photoMode)
+                                        return "Photos only. On video it is the least steady upscaler measured — 135% of the movement the real footage has, against 104% for Artemis High Quality — and detail that will not hold still reads as crawling."
+                                    if (l[i].source === "topaz" && win.topazNeedsLogin)
+                                        return "Needs a signed-in Topaz."
+                                    return l[i].desc
+                                }
+                                ComboBox {
+                                    id: upscaleBox
+                                    Layout.fillWidth: true
+                                    enabled: win.canUpscale
+                                    textRole: "name"
+                                    valueRole: "short"
+                                    model: win.topaz.models
+                                    currentIndex: win.topazIndex(
+                                        win.topaz.models, win.upscaleModel)
+                                    onActivated: {
+                                        if (win.upscalerUsable(currentValue))
+                                            win.upscaleModel = currentValue
+                                        else
+                                            currentIndex = win.topazIndex(
+                                                win.topaz.models,
+                                                win.upscaleModel)
+                                    }
+
+                                    delegate: ItemDelegate {
+                                        width: upscaleBox.width
+                                        enabled: win.upscalerUsable(modelData.short)
+                                        highlighted:
+                                            upscaleBox.highlightedIndex === index
+                                        contentItem: ColumnLayout {
+                                            spacing: 0
+                                            Text {
+                                                text: modelData.name
+                                                color: enabled ? Theme.text
+                                                               : Theme.textFaint
+                                                font.pixelSize: Theme.fontM
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            Text {
+                                                text: win.upscalerNote(modelData,
+                                                                       enabled)
+                                                visible: text !== ""
+                                                color: enabled ? Theme.textFaint
+                                                               : Theme.warn
+                                                font.pixelSize: Theme.fontS
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row2 {
+                                label: "Amount"
+                                visible: win.upscale && win.upscaleReady
+                                hint: win.sourceWidth <= 0
+                                      ? "How much wider to make the source before converting it."
+                                      : win.sourceWidth + " to "
+                                        + Math.round(win.sourceWidth
+                                                     * win.upscaleScale)
+                                        + " wide"
+                                        + (win.sourceWidth * win.upscaleScale
+                                           > 7680
+                                           ? ", which is past 8K - no headset shows it, and it costs the time anyway."
+                                           : ".")
+                                Slider {
+                                    Layout.fillWidth: true
+                                    enabled: win.canUpscale
+                                    // Inside every installed model's own
+                                    // range, so the choice of model cannot
+                                    // make the chosen amount illegal.
+                                    from: 1; to: 4; stepSize: 0.25
+                                    value: win.upscaleScale
+                                    onMoved: win.upscaleScale = value
+                                }
+                                Text {
+                                    text: win.upscaleScale.toFixed(2) + "x"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                    Layout.preferredWidth: 42
+                                }
+                            }
+
+                            Row2 {
+                                label: "Smooth motion"
+                                visible: !win.photoMode && win.interpolateReady
+                                hint: win.interpolate
+                                      ? "Worth more in a headset than on a monitor: 30 fps judders when your head keeps moving and there is no shutter to hide it. It also multiplies the frames the stereo pass then has to convert."
+                                      : "Off. The output keeps the source frame rate."
+                                Switch {
+                                    enabled: win.canInterpolate
+                                    checked: win.interpolate
+                                             && win.canInterpolate
+                                    onToggled: win.interpolate = checked
+                                }
+                            }
+
+                            Row2 {
+                                label: "Motion model"
+                                visible: win.interpolate && !win.photoMode
+                                         && win.interpolateReady
+                                hint: {
+                                    var l = win.topaz.interpolators
+                                    var i = win.topazIndex(l, win.interpolateModel)
+                                    if (i < 0)
+                                        return ""
+                                    return l[i].source === "topaz"
+                                           && win.topazNeedsLogin
+                                           ? "Needs a signed-in Topaz. RIFE does not."
+                                           : l[i].desc
+                                }
+                                ComboBox {
+                                    id: interpolateBox
+                                    Layout.fillWidth: true
+                                    enabled: win.canInterpolate
+                                    textRole: "name"
+                                    valueRole: "short"
+                                    model: win.topaz.interpolators
+                                    currentIndex: win.topazIndex(
+                                        win.topaz.interpolators,
+                                        win.interpolateModel)
+                                    // A signed-out Topaz leaves its own models
+                                    // in the list but greyed, rather than
+                                    // vanishing them: the reason they cannot
+                                    // be used is worth showing.
+                                    onActivated: {
+                                        if (win.interpolatorUsable(currentValue))
+                                            win.interpolateModel = currentValue
+                                        else
+                                            currentIndex = win.topazIndex(
+                                                win.topaz.interpolators,
+                                                win.interpolateModel)
+                                    }
+
+                                    delegate: ItemDelegate {
+                                        width: interpolateBox.width
+                                        enabled: win.interpolatorUsable(
+                                            modelData.short)
+                                        highlighted:
+                                            interpolateBox.highlightedIndex === index
+                                        contentItem: ColumnLayout {
+                                            spacing: 0
+                                            Text {
+                                                text: modelData.name
+                                                color: enabled ? Theme.text
+                                                               : Theme.textFaint
+                                                font.pixelSize: Theme.fontM
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            Text {
+                                                text: win.upscalerNote(modelData,
+                                                                       enabled)
+                                                visible: text !== ""
+                                                color: enabled ? Theme.textFaint
+                                                               : Theme.warn
+                                                font.pixelSize: Theme.fontS
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row2 {
+                                label: "Frame rate"
+                                visible: win.interpolate && !win.photoMode
+                                         && win.interpolateReady
+                                hint: win.interpolateFps > 0
+                                      ? "Interpolated to " + win.interpolateFps.toFixed(0) + " frames a second."
+                                      : "Twice the source rate, which is what 30 fps footage wants."
+                                ComboBox {
+                                    id: fpsBox
+                                    Layout.fillWidth: true
+                                    enabled: win.canInterpolate
+                                    textRole: "text"
+                                    valueRole: "key"
+                                    model: win.fpsChoices
+                                    currentIndex: win.fpsIndex(win.interpolateFps)
+                                    onActivated: win.interpolateFps = currentValue
                                 }
                             }
                         }

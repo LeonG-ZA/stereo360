@@ -52,7 +52,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             argv.remove("--dump-rows")
             dump = True
         taken = {}
-        for flag in ("--shot", "--demo", "--size"):
+        for flag in ("--shot", "--demo", "--size", "--scroll"):
             if flag in argv:
                 taken[flag] = argv.pop(argv.index(flag) + 1)
                 argv.remove(flag)
@@ -64,6 +64,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             argv.pop(i)
         shot, demo, size = (taken.get("--shot"), taken.get("--demo"),
                             taken.get("--size"))
+        scroll = taken.get("--scroll")
 
     if selftest:
         # On Windows Qt only writes warnings to stderr when it believes
@@ -119,10 +120,28 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ("warning", "Encoding is the bottleneck at this preset.")):
                 controller.logged.emit(level, text)
 
+        if scroll:
+            # Most of the settings panel is below the fold at any window size
+            # that fits a laptop screen, so a screenshot of it needs to say
+            # where to look.
+            for child in window.findChildren(object):
+                if child.objectName() == "settingsScroll":
+                    view = child.property("contentItem")
+                    if view is not None:
+                        view.setProperty("contentY", float(scroll))
+                    break
+
         for item in overrides:
             name, _, value = item.partition("=")
             if value in ("true", "false"):
                 window.setProperty(name, value == "true")
+            elif value[:1] in ("{", "["):
+                # A whole probe result, so a state that depends on another
+                # program being installed -- Topaz -- can be exercised on a
+                # machine that has not got it.
+                import json
+
+                window.setProperty(name, json.loads(value))
             elif value.lstrip("-").isdigit():
                 window.setProperty(name, int(value))
             else:
@@ -164,6 +183,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "sourceSubsampling", "spatialAudio", "depthTiles",
                          "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
                          "spatialAudioHint", "photoMode",
+                         "upscale", "upscaleModel", "upscaleScale",
+                         "interpolate", "interpolateModel", "interpolateFps",
                          "strength", "gradientLimit",
                          "faceAngularCorrection", "poleCompensation", "leftShare",
                          "livePreview", "livePreviewEvery"):
