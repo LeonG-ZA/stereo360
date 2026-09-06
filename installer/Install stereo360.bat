@@ -588,8 +588,25 @@ function Get-AppRelease {
     try {
         $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'stereo360-installer' }
     } catch {
+        # Why, not a guess at why. A 404 is the one case that really means
+        # there is no release; anything else -- no network, a rate limit, a
+        # bad gateway -- means the question was never answered, and falling
+        # back to main then installs unreleased work while telling the user
+        # a release does not exist. Observed: an install reported "no
+        # published release yet" against a repository with seven of them,
+        # during the seconds one was being replaced.
+        $code = $null
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 404) {
+            $why = 'no published release yet'
+        } elseif ($code) {
+            $why = "the release API answered $code"
+        } else {
+            $why = 'the release API could not be reached'
+        }
         return @{ url = "https://github.com/$Repo/archive/refs/heads/main.zip"
-                  name = 'main branch (no published release yet)' }
+                  name = "main branch ($why)"
+                  fellBack = ($code -ne 404) }
     }
     $asset = $rel.assets | Where-Object { $_.name -like '*.zip' } | Select-Object -First 1
     if ($asset) { return @{ url = $asset.browser_download_url; name = $rel.tag_name } }
@@ -712,6 +729,15 @@ Write-Good 'pip ready'
 
 # ---- the app ------------------------------------------------------------
 Write-Step "Downloading stereo360 ($($release.name))"
+# Installing unreleased work because a lookup failed is worth a warning, not
+# a parenthesis. `fellBack` is set only when the API did not answer, never
+# when it answered that there is no release -- a repository without one has
+# nothing else to offer and this is not news.
+if ($release.fellBack) {
+    Write-Warn 'installing the main branch because the release lookup failed,'
+    Write-Warn 'so this may be ahead of the newest release. Re-run later to'
+    Write-Warn 'get the released version instead.'
+}
 $appzip = Join-Path $tmp 'app.zip'
 Get-Download -Url $release.url -Destination $appzip -Label 'stereo360'
 $unpack = Join-Path $tmp 'app'
