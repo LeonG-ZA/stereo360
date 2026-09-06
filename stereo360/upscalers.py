@@ -98,15 +98,19 @@ VARIANTS: Sequence[Variant] = (
             "https://huggingface.co/Phips/2xNomosUni_span_multijpg_ldl/"
             "resolve/main/2xNomosUni_span_multijpg_ldl.safetensors", 8.9),
     Variant("compactldl", "Compact ldl",
-            "The smallest network here and the closest to the source of any "
-            "model measured. Slightly livelier frame to frame than SPAN.",
+            "The stills default. Sharper than the shader without inventing, "
+            "because JPEG degradation was in its training -- it reads a "
+            "compression artifact as damage where a faithful model sharpens "
+            "it and a GAN paints over it. Slightly livelier frame to frame "
+            "than SPAN.",
             "onnx", "2xNomosUni_compact_multijpg_ldl.onnx", 2, False,
             "https://huggingface.co/Phips/2xNomosUni_compact_multijpg_ldl/"
             "resolve/main/2xNomosUni_compact_multijpg_ldl.safetensors", 2.4),
     Variant("siax", "Siax",
-            "For stills. The best-looking of these on a frozen frame, and "
-            "the worst on video by a distance -- it turns a one-level wobble "
-            "into four, which reads as crawling. Two minutes a frame.",
+            "For stills, and the sharpest of these -- but it invents to get "
+            "there, which shows as detail that was not in the scene. Worst "
+            "on video by a distance: it turns a one-level wobble into four, "
+            "which reads as crawling. Two minutes a frame.",
             "onnx", "4x_NMKD-Siax.onnx", 4, True,
             "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/"
             "4x_NMKD-Siax_200k.pth", 67.0),
@@ -118,10 +122,21 @@ BY_CODE: Dict[str, Variant] = {v.code: v for v in VARIANTS}
 #: thing here that cannot crawl is the one that does not invent.
 VIDEO_DEFAULT = "fsrcnnx16"
 
-#: A still has no next frame to disagree with, so the model that reads best
-#: on a frozen frame wins -- which is the opposite of the video answer, and
-#: the reason these are two constants rather than one.
-PHOTO_DEFAULT = "siax"
+#: Judged by eye on real 360 stills rather than by the scorecard, and the
+#: scorecard would have chosen differently: Siax reads sharpest on a frozen
+#: frame and invents visibly to get there, which a headset shows as detail
+#: that was never in the scene.
+#:
+#: What separates this one is what it was trained on. The sources here are
+#: compressed -- an ordinary outdoor frame measured 1.71 bits a pixel with a
+#: blockiness ratio of 1.137 -- and `multijpg` means JPEG degradation was in
+#: its training, so it treats a compression artifact as damage rather than as
+#: detail. Models trained without that sharpen the artifacts faithfully and
+#: read as noisy; GAN-trained ones paint over them and read as invented. The
+#: `ldl` half is the loss that suppresses what a GAN would otherwise add.
+#:
+#: Also thirty times faster than Siax, which is the smaller reason.
+PHOTO_DEFAULT = "compactldl"
 
 
 def get(code: Optional[str]) -> Optional[Variant]:

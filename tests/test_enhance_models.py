@@ -292,16 +292,19 @@ def test_the_kill_backstop_outlasts_an_uninterruptible_depth_pass():
 # ------------------------------------------------------- the upscaler table
 
 def test_the_two_defaults_are_different_models():
-    """A still is judged on one frame, so the sharpest wins. A video is
-    judged on how little the invented detail moves between frames, and the
-    model that wins the first test loses the second by a distance -- Siax
-    reads best frozen and amplifies a one-level change into four. One
-    default cannot serve both."""
+    """A still is judged on one frame; a video on how little the invented
+    detail moves between them. Those pick different models -- the shader
+    cannot crawl and is what video wants, while a still can afford a network
+    and wants the extra sharpness. One default cannot serve both."""
     from stereo360 import upscalers
 
     assert upscalers.VIDEO_DEFAULT != upscalers.PHOTO_DEFAULT
     assert upscalers.BY_CODE[upscalers.VIDEO_DEFAULT].stills_only is False
-    assert upscalers.BY_CODE[upscalers.PHOTO_DEFAULT].stills_only is True
+    # The photo default is not required to be stills-*only*. That held while
+    # it was Siax and was never the rule: what a still wants is the model
+    # judged best on one frame, and whether that model also survives video is
+    # a separate question it does not have to fail.
+    assert upscalers.PHOTO_DEFAULT in upscalers.BY_CODE
 
 
 def test_the_video_default_is_a_shader():
