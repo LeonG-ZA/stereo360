@@ -573,13 +573,17 @@ def test_base_falls_back_for_the_temporal_backend():
     assert "--depth-model" not in argv
 
 
-def _dump(*sets):
+def _dump(*sets, late=()):
     import subprocess
     import sys
 
     args = []
     for item in sets:
         args += ["--set", item]
+    # `late` is applied after the window has drawn, which is the only way a
+    # probe result ever arrives.
+    for item in late:
+        args += ["--set-late", item]
     proc = subprocess.run(
         [sys.executable, "-m", "stereo360_ui", "--selftest", "--dump-rows",
          *args], capture_output=True, text=True, timeout=300,
@@ -597,7 +601,7 @@ def _dump(*sets):
     return props, rows
 
 
-def _items(*sets):
+def _items(*sets, late=()):
     """{objectName: (visible, startFrac)} from a selftest run.
 
     Controls that are not labelled rows -- the direction picker -- are
@@ -610,6 +614,8 @@ def _items(*sets):
     args = []
     for item in sets:
         args += ["--set", item]
+    for item in late:
+        args += ["--set-late", item]
     proc = subprocess.run(
         [sys.executable, "-m", "stereo360_ui", "--selftest", "--dump-rows",
          *args], capture_output=True, text=True, timeout=300,
@@ -2247,6 +2253,51 @@ def test_a_deliberate_upscaler_survives_the_job_changing(tmp_path):
                      f"inputPath={_still(tmp_path)}")
     assert props["photoMode"] == "True"
     assert props["upscaleModel"] == upscalers.VIDEO_DEFAULT
+
+
+def test_the_upscaler_box_shows_the_model_that_will_run(tmp_path):
+    """What the panel says and what the render does have to be the same
+    model, and every test until now read only the second.
+
+    A ComboBox handed a model where it had none assigns its own currentIndex
+    -- 0, the first entry -- and that assignment replaces the binding that
+    was keeping it honest. Both lists here arrive from a probe, so they
+    always arrive after the box is built: the binding was destroyed on every
+    run, and the box sat on the first upscaler while the render used the
+    chosen one. The property was right the whole time, which is exactly why
+    nothing caught it.
+
+    The list has to arrive *late* for this to reproduce. Handed in before the
+    first frame the binding survives, and the test then passes while the
+    interface is wrong -- so the payload goes through `--set-late`.
+    """
+    from stereo360 import upscalers
+
+    sets = (f"inputPath={_still(tmp_path)}", "upscale=true")
+    late = (_every_upscaler(),)
+    props, _ = _dump(*sets, late=late)
+    shown, index = _items(*sets, late=late)["upscaleBox"]
+
+    codes = [v.code for v in upscalers.VARIANTS]
+    assert shown is True
+    assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
+    assert codes[int(index)] == props["upscaleModel"], (
+        f"the box shows {codes[int(index)]} and the render would use "
+        f"{props['upscaleModel']}")
+
+
+def test_the_motion_model_box_shows_the_model_that_will_run():
+    """The other list off the same probe, with the same flaw. Signed out, so
+    the answer is the second entry: a box stuck on the first would read as
+    correct against RIFE at the top."""
+    late = (_topaz(needs_login=True),)
+    props, _ = _dump("interpolate=true", late=late)
+    shown, index = _items("interpolate=true", late=late)["interpolateBox"]
+
+    codes = ["chr", "rife"]
+    assert shown is True
+    assert props["interpolateModel"] == "rife"
+    assert codes[int(index)] == props["interpolateModel"]
 
 
 def test_the_upscaler_reaches_the_command_line():

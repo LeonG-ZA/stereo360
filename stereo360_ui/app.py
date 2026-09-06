@@ -46,6 +46,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     shot = demo = size = None
     dump = False
     overrides: List[str] = []
+    late: List[str] = []
     if selftest:
         argv.remove("--selftest")
         if "--dump-rows" in argv:
@@ -61,6 +62,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         while "--set" in argv:
             i = argv.index("--set")
             overrides.append(argv.pop(i + 1))
+            argv.pop(i)
+        # The same, applied after the window is up and drawn. A probe result
+        # never arrives any other way, and the difference is not cosmetic: a
+        # ComboBox handed its model before the first frame keeps the binding
+        # on its currentIndex, and handed it afterwards replaces it. Setting
+        # one at startup tests the ordering that cannot happen.
+        while "--set-late" in argv:
+            i = argv.index("--set-late")
+            late.append(argv.pop(i + 1))
             argv.pop(i)
         shot, demo, size = (taken.get("--shot"), taken.get("--demo"),
                             taken.get("--size"))
@@ -131,7 +141,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         view.setProperty("contentY", float(scroll))
                     break
 
-        for item in overrides:
+        def apply(item):
             name, _, value = item.partition("=")
             if name == "topaz":
                 # A handed-in probe result describes the machine the test is
@@ -152,6 +162,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 window.setProperty(name, int(value))
             else:
                 window.setProperty(name, value)
+
+        # Pinned before the first frame even for a late one, so the real
+        # probe cannot land in the gap and hand the box its list early --
+        # which is the whole thing being tested.
+        if any(i.startswith("topaz=") for i in late):
+            controller._pinned_upscalers = True
+        for item in overrides:
+            apply(item)
+        if late:
+            QTimer.singleShot(1500, lambda: [apply(i) for i in late])
 
         def dump_rows():
             """Every labelled settings row and whether it is showing.

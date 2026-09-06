@@ -1468,13 +1468,42 @@ ApplicationWindow {
                                 }
                                 ComboBox {
                                     id: upscaleBox
+                                    objectName: "upscaleBox"
                                     Layout.fillWidth: true
                                     enabled: win.canUpscale
                                     textRole: "name"
                                     valueRole: "short"
                                     model: win.topaz.models
-                                    currentIndex: win.topazIndex(
-                                        win.topaz.models, win.upscaleModel)
+                                    // A ComboBox given a model where it had
+                                    // none picks its own currentIndex -- 0,
+                                    // the first entry -- and that assignment
+                                    // replaces any binding on it. The list
+                                    // arrives from the probe, always after
+                                    // this is built, so a binding here was
+                                    // destroyed every single time: the box
+                                    // sat on the first upscaler while the
+                                    // render used the chosen one, which is
+                                    // the one failure this panel cannot
+                                    // afford. So own the index instead, and
+                                    // re-assert it from the two things it
+                                    // depends on. Deferred where the control
+                                    // is mid-assignment, since it writes
+                                    // after the signal that says it changed.
+                                    function sync() {
+                                        currentIndex = win.topazIndex(
+                                            win.topaz.models, win.upscaleModel)
+                                    }
+                                    Component.onCompleted: sync()
+                                    onCountChanged: Qt.callLater(sync)
+                                    Connections {
+                                        target: win
+                                        function onUpscaleModelChanged() {
+                                            upscaleBox.sync()
+                                        }
+                                        function onTopazChanged() {
+                                            Qt.callLater(upscaleBox.sync)
+                                        }
+                                    }
                                     onActivated: {
                                         if (win.upscalerUsable(currentValue)) {
                                             win.upscaleModel = currentValue
@@ -1576,14 +1605,31 @@ ApplicationWindow {
                                 }
                                 ComboBox {
                                     id: interpolateBox
+                                    objectName: "interpolateBox"
                                     Layout.fillWidth: true
                                     enabled: win.canInterpolate
                                     textRole: "name"
                                     valueRole: "short"
                                     model: win.topaz.interpolators
-                                    currentIndex: win.topazIndex(
-                                        win.topaz.interpolators,
-                                        win.interpolateModel)
+                                    // The same as the upscaler box above, for
+                                    // the same reason: this list also arrives
+                                    // from the probe.
+                                    function sync() {
+                                        currentIndex = win.topazIndex(
+                                            win.topaz.interpolators,
+                                            win.interpolateModel)
+                                    }
+                                    Component.onCompleted: sync()
+                                    onCountChanged: Qt.callLater(sync)
+                                    Connections {
+                                        target: win
+                                        function onInterpolateModelChanged() {
+                                            interpolateBox.sync()
+                                        }
+                                        function onTopazChanged() {
+                                            Qt.callLater(interpolateBox.sync)
+                                        }
+                                    }
                                     // A signed-out Topaz leaves its own models
                                     // in the list but greyed, rather than
                                     // vanishing them: the reason they cannot
