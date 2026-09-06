@@ -32,9 +32,58 @@ is exactly what it penalises. It is a check that a model works, not a ranking.
     compact ldl            5     1.22x    35.41
     Siax                 129     4.24x    26.21
 
+Amplification is a ratio and so travels between machines, but it does *not*
+travel between scenes, which this table originally implied it did. Every row
+above was nudged on a frame of `outdoor.jpg`. Re-measured on a frame of real
+video the shaders held and every learned model rose:
+
+    model          on outdoor.jpg   on video   temporal
+    FSRCNNX 8              1.12x      1.11x       101%
+    FSRCNNX 16             1.13x      1.10x       102%
+    SPAN                   0.99x      1.43x       107%
+    SPAN ldl               1.05x      1.63x       108%
+    compact ldl            1.22x      1.87x       119%
+
+The harness is the same one; the material is not. A resampler computes the
+same thing whatever it is shown, so the shader rows reproduce. A generative
+model re-decides more when there is more to decide about, and a photograph
+gives it less than a video frame does. Read the left column as one scene's
+and the right as the one that governs a pre-pass.
+
 Siax is stills-only on that evidence and not on preference: it is the one
 judged best by eye on a frozen frame and it amplifies a one-level wobble into
 four, which is the crawling the whole table exists to avoid.
+
+`ESRGAN 2x uni` was added later and measured on a different machine -- an
+RTX 5070 Ti through DirectML, onnxruntime having no CUDA provider there -- so
+its seconds do not belong in the column above and are given as a ratio
+instead. Its dB does not either: run there, FSRCNNX 8 reads 39.27 against the
+37.59 recorded above, a constant offset that applies to every row, while the
+FSRCNNX 8-to-16 gap reproduces at 0.09 dB exactly. The column is comparable
+within one run and not between two, which is worth knowing before anyone adds
+a row from a third machine.
+
+    model            vs Siax   amplify   temporal
+    Compact ldl        15x        1.22x       --
+    ESRGAN 2x uni     3.7x        1.82x     142%
+    Siax                1x        4.24x       --
+
+`ArtCNN C4F16` was measured the same way and stays an option rather than the
+default. Against FSRCNNX 16 on the same twelve frames it read 36.58 dB to
+36.13, 0.981 SSIM to 0.980, 101% temporal to 102% and 1.15x amplification to
+1.10x, for 0.34 s a frame against 0.30 -- ahead everywhere and dear nowhere.
+What stopped it becoming the default is that the margin did not survive a
+second scene: on the low-contrast stone of `indoor_4k.jpg` the two are hard
+to tell apart, and ArtCNN is trained on anime, which is not what this
+converts. One favourable scene and one neutral one is not enough to move a
+default that thousands of frames depend on.
+
+Amplification is a ratio of two differences and so is portable; it is the
+number to trust across machines. ESRGAN 2x uni is the answer to "Siax is
+nearly right but too slow": the same architecture at 2x rather than 4x, which
+computes four times the source pixels instead of sixteen. It is stills-only
+on measurement rather than on suspicion -- 142% temporal on real footage,
+worse than Real-ESRGAN's 135%, which this project already rejected for video.
 """
 
 from __future__ import annotations
@@ -55,6 +104,20 @@ class Variant(NamedTuple):
     kind: str
     filename: str            # under models/
     scale: int               # what the graph natively does
+    #: Refuses the model for video outright, which is heavier than the
+    #: evidence now supports and is meant to become advice rather than a bar
+    #: -- "recommended for still images only", with the choice left to
+    #: whoever is looking at the footage.
+    #:
+    #: Watched at 1:1 over 120 frames of dry grass, every model in this
+    #: table looked stable, this flag's two included. The numbers that set
+    #: the flag disagree with each other as well: Siax is barred on 4.24x
+    #: amplification, yet in that clip it moved *less* between frames than
+    #: Compact ldl, which is not barred. A 4x graph asked for 2x is
+    #: downsampled by area on the way out (see esrgan.upscale), and that
+    #: averaging may be quietly steadying it -- which would mean the flag
+    #: rests on a measurement of something else. Worth re-testing before
+    #: anyone relies on it either way.
     stills_only: bool
     url: str
     mb: float                # download size, to say before the wait
@@ -83,17 +146,43 @@ VARIANTS: Sequence[Variant] = (
             "shader", "FSRCNNX_x2_8-0-4-1.glsl", 2, False,
             "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/"
             "FSRCNNX_x2_8-0-4-1.glsl", 0.07),
+    Variant("artcnn16", "ArtCNN C4F16",
+            "A shader like FSRCNNX and within a hair of its cost. It "
+            "measured ahead on brickwork and level on low-contrast stone, "
+            "so it is offered rather than chosen: it is trained for anime, "
+            "which is not what this converts.",
+            "shader", "ArtCNN_C4F16.glsl", 2, False,
+            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
+            "ArtCNN_C4F16.glsl", 0.21),
+    Variant("artcnn32", "ArtCNN C4F32",
+            "The larger shader. Half a decibel ahead of C4F16 on brickwork "
+            "for twice the time, and still under a second a frame -- worth "
+            "it when the source has fine repeating detail and not when it "
+            "does not.",
+            "shader", "ArtCNN_C4F32.glsl", 2, False,
+            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
+            "ArtCNN_C4F32.glsl", 0.73),
+    Variant("artcnnr8", "ArtCNN R8F64",
+            "The sharpest thing here that is still safe in front of video: "
+            "it resolves more than the shader and amplifies less, which "
+            "nothing else in this table manages. Twelve times the shader's "
+            "cost, so it is the choice when the wait is acceptable.",
+            "onnx", "ArtCNN_R8F64.onnx", 2, False,
+            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
+            "ArtCNN_R8F64.onnx", 3.5),
     Variant("span", "SPAN",
-            "The steadiest model measured, and the first fast enough to put "
-            "in front of video: it passes a small change straight through "
-            "rather than re-deciding what to draw.",
+            "The steadiest of the learned models and fast enough for video, "
+            "though not as steady as its first measurement suggested: a "
+            "small change comes back 1.4 times larger on real footage, "
+            "against 1.0 on a photograph. The shaders are steadier.",
             "onnx", "2xNomosUni_span_multijpg.onnx", 2, False,
             "https://huggingface.co/Phips/2xNomosUni_span_multijpg/resolve/"
             "main/2xNomosUni_span_multijpg.safetensors", 4.5),
     Variant("spanldl", "SPAN ldl",
             "SPAN trained with Locally Discriminative Learning, which "
-            "targets the artifacts a GAN leaves behind. Slightly closer to "
-            "the source than plain SPAN for the same cost.",
+            "targets the artifacts a GAN leaves behind. Sharper than plain "
+            "SPAN for the same cost, and slightly less settled with it -- "
+            "1.6 times a small change against SPAN's 1.4.",
             "onnx", "2xNomosUni_span_multijpg_ldl.onnx", 2, False,
             "https://huggingface.co/Phips/2xNomosUni_span_multijpg_ldl/"
             "resolve/main/2xNomosUni_span_multijpg_ldl.safetensors", 8.9),
@@ -106,6 +195,14 @@ VARIANTS: Sequence[Variant] = (
             "onnx", "2xNomosUni_compact_multijpg_ldl.onnx", 2, False,
             "https://huggingface.co/Phips/2xNomosUni_compact_multijpg_ldl/"
             "resolve/main/2xNomosUni_compact_multijpg_ldl.safetensors", 2.4),
+    Variant("esrgan2x", "ESRGAN 2x uni",
+            "For stills, when Siax is close but too slow: the same ESRGAN "
+            "architecture at 2x rather than 4x, so it computes four times "
+            "the source pixels instead of sixteen and finishes in a quarter "
+            "the time. Sharper than Compact ldl without Siax's invention.",
+            "onnx", "2xNomosUni_esrgan_multijpg.onnx", 2, True,
+            "https://huggingface.co/Phips/2xNomosUni_esrgan_multijpg/"
+            "resolve/main/2xNomosUni_esrgan_multijpg.safetensors", 33.5),
     Variant("siax", "Siax",
             "For stills, and the sharpest of these -- but it invents to get "
             "there, which shows as detail that was not in the scene. Worst "

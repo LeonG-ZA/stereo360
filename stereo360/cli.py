@@ -1101,6 +1101,8 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                 _fs.run(src, working(".png"), width=info.width,
                         height=info.height, scale=scale,
                         shader=chosen_path, total=1,
+                        name=chosen.name if chosen else _fs.NAME,
+                        code=chosen.code if chosen else _fs.CODE,
                         reporter=reporter, cancel=cancel)
             else:
                 _fs.run(src, working(".mkv"), width=info.width,
@@ -1109,6 +1111,8 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                         total=produced or (info.frame_count
                                            if info is not None else None),
                         trim_from=skip, frames=args.max_frames,
+                        name=chosen.name if chosen else _fs.NAME,
+                        code=chosen.code if chosen else _fs.CODE,
                         reporter=reporter, cancel=cancel)
         except _fs.ShaderError as e:
             raise SystemExit(str(e))

@@ -151,6 +151,16 @@ def upscale(sess, frame: np.ndarray, scale: float = 2.0,
 
     if scale <= 0:
         raise EsrganError(f"scale must be positive, not {scale:g}")
+
+    # ArtCNN's graphs take one channel, not three, and the shape is the only
+    # honest place to learn that: a table entry can be wrong, a loaded graph
+    # cannot. Asked here rather than at the call sites so run_video and
+    # run_still keep one path -- what changes between these models is the
+    # arithmetic, not the plumbing around it.
+    from . import artcnn
+    if artcnn.is_luma_model(sess):
+        return artcnn.upscale(sess, frame, scale)
+
     name = sess.get_inputs()[0].name
     h, w = frame.shape[:2]
     out_h, out_w = int(round(h * scale)), int(round(w * scale))

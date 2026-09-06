@@ -36,6 +36,26 @@ interpolator in the same position loses 12 dB there, because motion
 estimation needs context the way a resampler does not.
 
 The shader is LGPL-3.0, by igv, and is fetched rather than vendored.
+
+Any mpv user shader can be run here -- `--fsrcnnx-shader` takes a path, and
+`chain` does not care whose file it is. One thing decides whether a given one
+is usable, and it is not quality: **ffmpeg's libplacebo ignores `//!OFFSET`**.
+A shader that declares a half-pixel grid shift for the host to take out does
+not get it taken out, and the result sits half a pixel from where it belongs
+-- which scores like a bad upscaler, looks like a fine one, and would bake a
+geometry error into the depth pass. Grep a candidate before measuring it:
+
+    shader                    //!OFFSET   aligned
+    FSRCNNX, ArtCNN, CuNNy         no       yes
+    ravu-lite                      no       yes
+    ravu-zoom (OFFSET ALIGN)      ---       yes
+    NNEDI3 (mpv-prescalers)       yes        no     -6 dB
+    ravu (plain)                  yes        no     -6 dB
+
+Both failures cost about six decibels of pure misregistration. The tell is
+that a shifted score beats the unshifted one: an aligned image gets worse
+whichever way you push it, so scoring each candidate at zero and at plus and
+minus half a pixel says in one run whether its row means anything.
 """
 
 from __future__ import annotations
@@ -204,6 +224,7 @@ def run(src: str, dst: str, *, width: int, height: int, scale: float = 2.0,
         shader: Optional[str] = None, total: Optional[int] = None,
         pix_fmt: Optional[str] = None,
         trim_from: int = 0, frames: Optional[int] = None,
+        name: str = NAME, code: str = CODE,
         reporter=None, cancel=None, ffmpeg: str = "ffmpeg") -> None:
     """One pass over `src`, writing `dst`. Raises `ShaderError`."""
     path = shader_path(shader)
@@ -239,8 +260,14 @@ def run(src: str, dst: str, *, width: int, height: int, scale: float = 2.0,
     cmd += [*out_args, dst]
 
     if reporter is not None:
-        reporter.info(f"Upscaling with {NAME}: {scale:g}x from "
-                      f"{width}x{height}", stage="upscale", model=CODE)
+        # The model that ran, not the module it lives in. This said
+        # "FSRCNNX (shader)" for every shader once there were four of them,
+        # so an ArtCNN pre-pass announced itself as FSRCNNX and only the
+        # filename disagreed -- the same fault e6f1674 fixed on the onnx
+        # side, left behind here because that path takes a name and this
+        # one did not.
+        reporter.info(f"Upscaling with {name}: {scale:g}x from "
+                      f"{width}x{height}", stage="upscale", model=code)
         reporter.start(total, stage="upscale")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE, text=True,

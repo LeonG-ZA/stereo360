@@ -25,6 +25,71 @@ def test_every_spec_points_at_the_path_its_loader_reads():
     assert {s.key: s.path for s in em.SPECS} == want
 
 
+def test_a_stills_only_model_is_never_the_video_default():
+    """The one mistake this table can make that a user cannot see until the
+    render finishes: 142% temporal on ESRGAN 2x uni is worse than the 135%
+    that got Real-ESRGAN barred from video, so anything marked stills_only
+    must stay out of the video default."""
+    from stereo360 import upscalers
+
+    video = upscalers.BY_CODE[upscalers.VIDEO_DEFAULT]
+    assert not video.stills_only, (
+        f"{video.code} is stills-only and cannot be the video default")
+
+
+def test_the_onnx_entries_name_a_checkpoint_the_exporter_can_read():
+    """An onnx entry is fetched one of two ways and the URL decides which:
+    a checkpoint is exported with spandrel, a published graph is downloaded
+    as it is. Anything else -- a .zip, a page -- silently breaks the
+    download button for that model and nothing else."""
+    from stereo360 import upscalers
+
+    for v in upscalers.VARIANTS:
+        if v.kind != "onnx":
+            continue
+        assert v.filename.endswith(".onnx"), v.code
+        assert v.url.endswith((".safetensors", ".pth", ".onnx")), (
+            f"{v.code}: neither a checkpoint nor a graph: {v.url[-12:]}")
+
+
+def test_a_published_graph_is_not_said_to_need_torch():
+    """torch and spandrel are for the *export*. ArtCNN publishes its graphs,
+    so demanding them would offer a download the machine cannot do -- which
+    is exactly the failure four models hit when spandrel was missing."""
+    from stereo360 import enhance_models as em
+    from stereo360 import upscalers
+
+    by_key = {s.key: s for s in em.SPECS}
+    for v in upscalers.VARIANTS:
+        if v.kind == "onnx" and v.url.endswith(".onnx"):
+            assert not by_key[v.code].needs_torch, (
+                f"{v.code} is published as a graph and needs no exporter")
+
+
+def test_a_luma_graph_is_recognised_from_its_shape():
+    """ArtCNN takes one channel where every other model takes three. The
+    graph is asked rather than the table, because a table entry can be wrong
+    and a loaded graph cannot -- and the wrong answer is not a clean error
+    but a shape rejection partway through a pre-pass."""
+    from stereo360 import artcnn
+
+    class FakeInput:
+        def __init__(self, shape):
+            self.shape = shape
+            self.name = "input"
+
+    class FakeSession:
+        def __init__(self, shape):
+            self._i = [FakeInput(shape)]
+
+        def get_inputs(self):
+            return self._i
+
+    assert artcnn.is_luma_model(FakeSession([1, 1, "H", "W"]))
+    assert not artcnn.is_luma_model(FakeSession([1, 3, "H", "W"]))
+    assert not artcnn.is_luma_model(FakeSession([1, 3, 64, 64]))
+
+
 def test_every_spec_has_a_script_that_exists():
     """`fetch` shells out to these by path, so a rename would turn the
     download button into a no-op that reports success."""

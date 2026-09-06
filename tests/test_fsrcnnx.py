@@ -139,3 +139,18 @@ def test_a_build_without_the_filter_says_so(monkeypatch):
                         if "-filters" in cmd else Done(1))
     why = fsrcnnx.problem(recheck=True)
     assert why and "not built with libplacebo" in why
+
+
+def test_the_run_reports_the_model_that_ran_not_the_module():
+    """There are four shaders now. `run` announced the module constant, so an
+    ArtCNN pre-pass called itself FSRCNNX and only the filename disagreed --
+    the fault e6f1674 fixed on the onnx side and left standing here."""
+    import inspect
+
+    from stereo360 import fsrcnnx
+
+    params = inspect.signature(fsrcnnx.run).parameters
+    assert "name" in params and "code" in params, (
+        "run cannot report the chosen model without being told it")
+    assert params["name"].default == fsrcnnx.NAME
+    assert params["code"].default == fsrcnnx.CODE

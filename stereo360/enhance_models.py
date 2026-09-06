@@ -69,7 +69,11 @@ class Spec(NamedTuple):
 SPECS: Sequence[Spec] = tuple(
     Spec(v.code, v.name, v.path,
          os.path.join("scripts", "fetch_upscalers.py"),
-         int(v.mb * 1e6), v.kind == "onnx", "upscale")
+         # Needing torch is about the *export*, not the runtime: a graph
+         # published as .onnx is fetched and used as it is, and saying it
+         # needs torch would offer a download the machine could not do.
+         int(v.mb * 1e6),
+         v.kind == "onnx" and not v.url.endswith(".onnx"), "upscale")
     for v in upscalers.VARIANTS
 ) + (
     Spec("rife", "RIFE frame interpolation", interpolate.DEFAULT_MODEL,

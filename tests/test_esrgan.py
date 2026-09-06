@@ -67,6 +67,10 @@ class _Sess:
     def get_inputs(self):
         class _In:
             name = "input"
+            #: Three channels: this stands in for an RGB graph, and
+            #: `esrgan.upscale` reads the shape to decide whether a model is
+            #: one of ArtCNN's luma doublers instead.
+            shape = [1, 3, "h", "w"]
         return [_In()]
 
     def run(self, _out, feed):

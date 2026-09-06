@@ -111,7 +111,10 @@ def main() -> int:
         print(f"  {v.name}")
         dest = os.path.join(ROOT, v.path)
         try:
-            if v.kind == "shader":
+            if v.kind == "shader" or v.url.endswith(".onnx"):
+                # ArtCNN publishes its graphs directly, so there is nothing
+                # to convert -- and nothing to install either: this is the
+                # one onnx entry that needs neither torch nor spandrel.
                 fetch(v.url, dest)
             else:
                 # The weights keep their own name and extension beside the
@@ -135,7 +138,8 @@ def main() -> int:
               file=sys.stderr)
         for name, why in failed:
             print(f"  {name}: {why}", file=sys.stderr)
-        if any(v.kind == "onnx" for v in todo):
+        if any(v.kind == "onnx" and not v.url.endswith(".onnx")
+               for v in todo):
             print("\nThe ONNX models need torch and spandrel to export:\n"
                   "    pip install spandrel", file=sys.stderr)
     return 0
