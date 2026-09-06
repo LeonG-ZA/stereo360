@@ -377,8 +377,16 @@ needs_topaz = pytest.mark.skipif(upscale.find() is None,
 
 @needs_topaz
 def test_av1_gets_a_decoder_that_works(tmp_path):
-    """On a machine whose ffmpeg has no software AV1 decoder, the hardware one
-    is found and used rather than crashed into."""
+    """On a machine whose ffmpeg has no software AV1 decoder, either a
+    hardware one is found or the job is refused -- and never crashed into.
+
+    Both outcomes are the design. `input_args` settles this before any work
+    starts precisely because Topaz answers an undecodable input with an
+    access violation, and a machine with no working AV1 decoder at all is an
+    ordinary machine: this one lists av1_cuvid, av1_qsv and av1_amf and can
+    run none of them, having neither an NVIDIA nor an Intel path. Asserting a
+    decoder is always found made the refusal look like a failure, which it is
+    not -- it is the thing that stops the crash."""
     src = tmp_path / "av1.mp4"
     made = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
@@ -388,9 +396,15 @@ def test_av1_gets_a_decoder_that_works(tmp_path):
         pytest.skip("this ffmpeg cannot encode AV1 to test against")
 
     install = upscale.find()
-    args = upscale.input_args(install, str(src), "av1")
-    # Either the software decoder turned out to work here, or a hardware one
-    # was chosen. What matters is that whatever came back actually decodes.
+    try:
+        args = upscale.input_args(install, str(src), "av1")
+    except upscale.UpscaleError as e:
+        # Refused before starting, which is the point. It has to say what to
+        # do instead, or the reader is left with a codec name.
+        assert "av1" in str(e).lower()
+        assert "rife" in str(e).lower() or "h.265" in str(e).lower()
+        return
+    # Otherwise something was chosen, and whatever it is must actually decode.
     assert upscale._can_decode(install, str(src), args)
 
 

@@ -453,6 +453,13 @@ _HW_DECODERS = ("cuvid", "qsv", "amf")
 
 #: A decode that failed rather than a model that failed. Topaz answers an
 #: undecodable input by crashing, so the tail of its log is the only evidence.
+#: Windows access violation and corrupted heap. Topaz answers several
+#: different "cannot" conditions by dying with one of these rather than
+#: by refusing, so the exit code says only that something went wrong --
+#: the surrounding evidence has to say what.
+_CRASH_CODES = (3221225477, 3221225725, 3221226356)
+
+
 _DECODE_FAILED = ("error submitting packet to decoder",
                   "function not implemented",
                   "decode error rate")
@@ -528,6 +535,7 @@ def run(install: Install, src: str, dst: str, *,
         pix_fmt: Optional[str] = None, width: int = 0, height: int = 0,
         trim_from: int = 0, trim_to: Optional[int] = None,
         extra_in: Optional[List[str]] = None,
+        has_audio: bool = False,
         out_args: Optional[List[str]] = None) -> None:
     """One Topaz pass over `src`, writing `dst`. Raises `UpscaleError`.
 
@@ -549,15 +557,21 @@ def run(install: Install, src: str, dst: str, *,
     # Absolute, because the command runs from Topaz's own directory: a path
     # relative to the user's would point at nothing there.
     src, dst = os.path.abspath(src), os.path.abspath(dst)
-    # Audio is copied, never re-encoded. Without this ffmpeg maps the source's
-    # track and encodes it with whatever the container defaults to -- and the
-    # working file is Matroska, whose default is Vorbis, so an AAC source came
-    # out the far end as low-bitrate Vorbis. Nothing announced it: the pre-pass
-    # is a video stage and audio was never mentioned in the command, so the
-    # default applied in silence and the converter then copied the result into
-    # the output as if it were the original.
+    # Audio is copied when there is any, and not mentioned when there is not.
+    #
+    # Copied rather than re-encoded because ffmpeg otherwise picks the
+    # container's default, and the working file is Matroska, whose default is
+    # Vorbis -- so an AAC source came out of the render as low-bitrate Vorbis
+    # with nothing announcing it.
+    #
+    # Conditional because this build crashes on arguments it has no use for.
+    # A still has no audio track, and `-c:a copy` against one killed Topaz
+    # with an access violation after a minute of producing no frames. It is
+    # the third such case documented here: `-frames:v` corrupts its heap and
+    # an AV1 decode dies the same way. Assume nothing is free.
     cmd = [install.ffmpeg, "-hide_banner", "-nostdin", "-y",
-           *extra_in, "-i", src, "-vf", vf, "-c:a", "copy",
+           *extra_in, "-i", src, "-vf", vf,
+           *(["-c:a", "copy"] if has_audio else []),
            *out_args, dst]
     if reporter is not None:
         reporter.start(total, stage=stage)
@@ -602,6 +616,29 @@ def run(install: Install, src: str, dst: str, *,
                 "never reached the model. Convert the source to H.265 first, "
                 "or use --interpolate rife, which reads the file through "
                 "stereo360's own ffmpeg.\n" + joined)
+        # An access violation with nothing written is the shape this
+        # takes when the frame is larger than the model can handle on
+        # this GPU. Measured on a Radeon 780M with Artemis Medium
+        # Quality: 2048x1024 in went through, 2400x1200 did not, and
+        # 3840x1920 died even at scale 1 -- so it is the frame going
+        # *in*, not the size coming out or what it was asked to do with
+        # it. Topaz answers by dying rather than refusing, after a minute
+        # of reporting frame=0, and what reached the user was a
+        # hexadecimal exit code under a wall of progress lines.
+        if code in _CRASH_CODES and width:
+            raise UpscaleError(
+                f"Topaz crashed on a {width}x{height} frame without "
+                f"finishing. Frame size is what decides this: the same "
+                f"model goes through at smaller sizes on this machine "
+                f"and dies above roughly 2048 wide whatever scale is "
+                f"asked for. Topaz's own application fails here too, "
+                f"partway through and without writing a file, so this "
+                f"is the installation rather than how it was called."
+                + "\n"
+                f"The free upscalers have no such limit and run at any "
+                f"size: --upscale fsrcnnx16 for video, --upscale siax "
+                f"for a still." + "\n"
+                + joined)
         raise UpscaleError(f"Topaz exited {code}:\n" + joined)
     if reporter is not None:
         reporter.finish(stage=stage)
@@ -631,9 +668,21 @@ def run_still(install: Install, src: str, dst: str, *,
         if subprocess.run(wrap, capture_output=True, text=True,
                           **NO_CONSOLE_WINDOW).returncode:
             raise UpscaleError("could not prepare the still for Topaz")
+        # The still's own size, passed through so a crash can say what it
+        # crashed on. Without it the frame-size diagnosis cannot fire on the
+        # path most likely to hit it -- a photo is the largest single frame
+        # this tool ever hands Topaz.
+        from . import ffmpeg_io
+
+        try:
+            shot = ffmpeg_io.probe(src)
+            w, h = shot.width, shot.height
+        except Exception:                                    # noqa: BLE001
+            w = h = 0
         run(install, wrapped, os.path.join(out_dir, "%03d.png"),
             up=up, scale=scale, total=n, reporter=reporter,
-            cancel=cancel, out_args=["-pix_fmt", "rgb24"])
+            cancel=cancel, width=w, height=h,
+            out_args=["-pix_fmt", "rgb24"])
         frames = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
         if not frames:
             raise UpscaleError("Topaz produced no frames for this still")

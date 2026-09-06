@@ -579,3 +579,58 @@ def test_the_runner_reports_the_model_that_was_chosen(runner):
     i = call.index(f"_es.{runner}(")
     assert "name=chosen.name" in call[i:i + 500], \
         f"the CLI does not tell {runner} which model it chose"
+
+
+def test_topaz_is_not_handed_an_audio_argument_it_cannot_use():
+    """Its build crashes on arguments it has no use for, and this is the third
+    such case: `-frames:v` corrupts its heap, an AV1 decode dies with an
+    access violation, and `-c:a copy` against a still -- which has no audio
+    track -- killed it the same way after a minute of producing no frames.
+
+    The argument exists because a pre-pass that says nothing about audio lets
+    ffmpeg re-encode it to the container default. That reasoning holds for a
+    video with a track and is meaningless without one, so it is only sent
+    when there is something to copy."""
+    from stereo360 import upscale
+
+    seen = {}
+
+    class FakeInstall:
+        ffmpeg = "ffmpeg"
+
+        def env(self):
+            return {}
+
+    def fake_popen(cmd, **kw):
+        seen["cmd"] = cmd
+        raise OSError("the command is what is under test")
+
+    real = upscale.subprocess.Popen
+    upscale.subprocess.Popen = fake_popen
+    try:
+        m = upscale.Model(code="amq-13", short="amq", name="A", desc="",
+                          min_scale=1.0, max_scale=4.0, preflight=2,
+                          postflight=3)
+        for audio, expect in ((False, False), (True, True)):
+            try:
+                upscale.run(FakeInstall(), "in.png", "out.mkv", up=m,
+                            scale=2.0, has_audio=audio,
+                            out_args=["-c:v", "ffv1"])
+            except Exception:                                # noqa: BLE001
+                pass
+            assert ("-c:a" in seen["cmd"]) is expect
+    finally:
+        upscale.subprocess.Popen = real
+
+
+def test_the_caller_tells_topaz_whether_the_source_has_audio():
+    """The parameter defaults to False, so a caller that forgets it silently
+    stops copying audio -- the bug it was added to fix, returning quietly."""
+    import inspect
+
+    from stereo360 import cli
+
+    src = inspect.getsource(cli)
+    i = src.index("_u.run(install,")
+    assert "has_audio=" in src[i:i + 900], \
+        "the CLI does not tell the Topaz pass whether there is audio"

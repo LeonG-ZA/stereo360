@@ -1182,6 +1182,7 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                    width=(info.width if info is not None else 0),
                    height=(info.height if info is not None else 0),
                    stage=stage, trim_from=skip, trim_to=end,
+                   has_audio=bool(info is not None and info.has_audio),
                    reporter=reporter, cancel=cancel)
             # What the renderer reads now starts at the window, so its own
             # range has to be re-stated against that rather than the original.
