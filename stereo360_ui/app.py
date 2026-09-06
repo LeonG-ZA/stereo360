@@ -133,6 +133,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         for item in overrides:
             name, _, value = item.partition("=")
+            if name == "topaz":
+                # A handed-in probe result describes the machine the test is
+                # about. Stop the real one, which answers about the machine
+                # the test is running on and would otherwise replace it a
+                # second later -- silently, and only on some machines.
+                controller._pinned_upscalers = True
             if value in ("true", "false"):
                 window.setProperty(name, value == "true")
             elif value[:1] in ("{", "["):

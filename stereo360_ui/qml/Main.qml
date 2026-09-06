@@ -95,6 +95,11 @@ ApplicationWindow {
     property bool upscale: false
     onUpscaleChanged: adoptDefaultResolution()
     property string upscaleModel: "amq"
+    // Whether the model above was picked from the box rather than chosen for
+    // the machine. A default is only right for the kind of job it was chosen
+    // for, so it has to be revisited when that kind changes; a deliberate
+    // pick has to survive.
+    property bool upscaleModelChosen: false
     property real upscaleScale: 2.0
     onUpscaleScaleChanged: adoptDefaultResolution()
     property bool interpolate: false
@@ -441,9 +446,14 @@ ApplicationWindow {
     }
 
     // A photo and a video are offered different upscalers, so the choice has
-    // to be revisited when the kind of job changes as well.
+    // to be revisited when the kind of job changes as well -- and here that
+    // means any choice this made itself, not only one that has stopped being
+    // usable. The two defaults are both usable on both kinds of job, so
+    // testing usability alone changed nothing: the interface opens with no
+    // input, the probe lands while this is still a video, and the video
+    // default then stayed put when a photo was opened.
     onPhotoModeChanged: {
-        if (!upscalerUsable(upscaleModel))
+        if (!upscaleModelChosen || !upscalerUsable(upscaleModel))
             upscaleModel = defaultUpscaler()
     }
 
@@ -1466,9 +1476,10 @@ ApplicationWindow {
                                     currentIndex: win.topazIndex(
                                         win.topaz.models, win.upscaleModel)
                                     onActivated: {
-                                        if (win.upscalerUsable(currentValue))
+                                        if (win.upscalerUsable(currentValue)) {
                                             win.upscaleModel = currentValue
-                                        else
+                                            win.upscaleModelChosen = true
+                                        } else
                                             currentIndex = win.topazIndex(
                                                 win.topaz.models,
                                                 win.upscaleModel)

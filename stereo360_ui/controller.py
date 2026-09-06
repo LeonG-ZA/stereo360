@@ -85,6 +85,12 @@ class Controller(QObject):
         self._upscalers: Dict[str, Any] = {}
         self._upscale_key = None
         self._last_upscale_args = None
+        # Set by --selftest when a probe result is handed in. A test that
+        # describes a machine -- Topaz signed in, six models installed, none
+        # at all -- has to be answering about that machine and not the one it
+        # is running on, and the real probe would otherwise land a second
+        # later and replace it.
+        self._pinned_upscalers = False
         self._upscale_probe = QProcess(self)
         self._upscale_probe.finished.connect(self._on_upscalers_probed)
         self._fetching = False
@@ -276,6 +282,8 @@ class Controller(QObject):
         written so a machine with neither Topaz nor a RIFE model -- which is
         most of them -- gets an empty answer instead of an error.
         """
+        if self._pinned_upscalers:
+            return
         key = (int(width), round(float(fps), 3))
         self._last_upscale_args = key
         # Cached per source, except after a signed-out answer: the message
@@ -345,6 +353,8 @@ class Controller(QObject):
         self.probeUpscalers(*(self._last_upscale_args or (0, 0.0)))
 
     def _on_upscalers_probed(self, code: int, _status) -> None:
+        if self._pinned_upscalers:
+            return          # a probe already in flight when the pin went on
         raw = bytes(self._upscale_probe.readAllStandardOutput()).decode(
             "utf-8", "replace").strip()
         try:

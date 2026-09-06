@@ -2143,12 +2143,14 @@ def test_a_photo_can_be_upscaled_without_topaz(tmp_path):
     """Which photo model is the core's business, not this test's. It named
     one outright while there was one, and that stopped being true -- the
     interface now takes the default from the probe, so asserting a
-    particular code here only pins whichever model happened to be first."""
+    particular code here only pins whichever model happened to be first.
+
+    The list has to be the real one. A stand-in holding a single photo model
+    passes whatever the interface picks, since there is nothing else to pick.
+    """
     from stereo360 import upscalers
 
-    props, rows = _dump(_topaz(available=False, topaz_fi=False, rife=False,
-                               esrgan=True),
-                        f"inputPath={_still(tmp_path)}")
+    props, rows = _dump(_every_upscaler(), f"inputPath={_still(tmp_path)}")
     assert rows["Upscale"] is True
     assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
 
@@ -2174,9 +2176,77 @@ def test_a_signed_out_topaz_falls_back_to_the_free_one_for_a_photo(tmp_path):
     """A choice the core cannot honour is worse than no choice."""
     from stereo360 import upscalers
 
-    props, _ = _dump(_topaz(needs_login=True, esrgan=True),
+    props, _ = _dump(_every_upscaler(topaz=True, needs_login=True),
                      f"inputPath={_still(tmp_path)}")
     assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
+
+
+def _every_upscaler(topaz=False, **kw):
+    """A probe result carrying the real registry, in the order it lists.
+
+    `_topaz` stands in a single photo model, which is what the machine had
+    when it was written. That cannot catch a wrong default any more: with one
+    candidate every way of picking agrees, and the real list has six -- and
+    the two defaults it names are the answer being checked.
+    """
+    import json
+
+    from stereo360 import upscalers
+
+    payload = {
+        "available": bool(topaz), "offered": True, "needs_login": False,
+        "interpolate_offered": False, "interpolators": [],
+        "photo_model": {"available": True}, "shader": {"available": True},
+        "models": [{"code": v.code, "short": v.code, "name": v.name,
+                    "desc": v.desc, "source": v.kind,
+                    "stills_only": v.stills_only,
+                    "min_scale": 1.0, "max_scale": float(v.scale)}
+                   for v in upscalers.VARIANTS],
+        "video_default": upscalers.VIDEO_DEFAULT,
+        "photo_default": upscalers.PHOTO_DEFAULT,
+    }
+    if topaz:
+        payload["models"].insert(0, json.loads(_TOPAZ_UP))
+    payload.update(kw)
+    return "topaz=" + json.dumps(payload)
+
+
+def test_opening_a_photo_drops_the_video_default(tmp_path):
+    """The order is the whole test. The window opens with no input, so the
+    probe lands while the job is still a video and the video default is
+    chosen; the photo arrives after. Re-picking only when the current model
+    had become *unusable* left that default sitting there, because both
+    defaults run on both kinds of job -- so a photo was upscaled with the
+    model chosen for how little its invented detail moves between frames."""
+    from stereo360 import upscalers
+
+    props, _ = _dump(_every_upscaler(), f"inputPath={_still(tmp_path)}")
+    assert props["photoMode"] == "True"
+    assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
+
+
+def test_a_video_keeps_the_video_default():
+    """The other half: nothing about the fix may reach the video path, whose
+    default was right all along."""
+    from stereo360 import upscalers
+
+    props, _ = _dump(_every_upscaler())
+    assert props["upscaleModel"] == upscalers.VIDEO_DEFAULT
+
+
+def test_a_deliberate_upscaler_survives_the_job_changing(tmp_path):
+    """Only a default this chose itself may be replaced. Someone who picks a
+    model by hand has said something the machine has not, and switching
+    between a photo and a video must not quietly undo it."""
+    from stereo360 import upscalers
+
+    assert upscalers.VIDEO_DEFAULT != upscalers.PHOTO_DEFAULT
+    props, _ = _dump(_every_upscaler(),
+                     f"upscaleModel={upscalers.VIDEO_DEFAULT}",
+                     "upscaleModelChosen=true",
+                     f"inputPath={_still(tmp_path)}")
+    assert props["photoMode"] == "True"
+    assert props["upscaleModel"] == upscalers.VIDEO_DEFAULT
 
 
 def test_the_upscaler_reaches_the_command_line():
