@@ -556,3 +556,26 @@ def test_a_warning_is_not_reported_as_the_error(monkeypatch):
     got = em.fetch(keys=["span"], on_line=lambda m: None)
     assert "RuntimeError" in got["span"]["detail"]
     assert "UserWarning" not in got["span"]["detail"]
+
+
+@pytest.mark.parametrize("runner", ["run_still", "run_video"])
+def test_the_runner_reports_the_model_that_was_chosen(runner):
+    """These defaulted to the module's own NAME and CODE while there was one
+    photo model, and kept reporting it after there were six -- so a Siax
+    render announced itself as Real-ESRGAN and the only thing that disagreed
+    was the file on disk. `run_video` was given the parameters when it was
+    written and `run_still` was missed, which is how it survived."""
+    import inspect
+
+    from stereo360 import cli, esrgan
+
+    sig = inspect.signature(getattr(esrgan, runner))
+    assert "name" in sig.parameters and "code" in sig.parameters, \
+        f"{runner} cannot be told which model it is running"
+
+    # and the caller has to pass them, or the parameters change nothing
+    call = inspect.getsource(cli._run_prepasses if hasattr(cli, "_run_prepasses")
+                             else cli)
+    i = call.index(f"_es.{runner}(")
+    assert "name=chosen.name" in call[i:i + 500], \
+        f"the CLI does not tell {runner} which model it chose"

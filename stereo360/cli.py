@@ -1128,7 +1128,9 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
             if is_image:
                 _es.run_still(src, working(".png"),
                               scale=args.upscale_scale, model=chosen_path,
-                              provider=args.ort_provider, reporter=reporter)
+                              provider=args.ort_provider,
+                              name=chosen.name, code=chosen.code,
+                              reporter=reporter)
             else:
                 _es.run_video(src, working(".mkv"),
                               scale=args.upscale_scale, model=chosen_path,

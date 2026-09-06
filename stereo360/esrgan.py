@@ -272,6 +272,7 @@ def run_video(src: str, dst: str, *, scale: float = 2.0,
 
 def run_still(src: str, dst: str, *, scale: float = 2.0,
               model: Optional[str] = None, provider: Optional[str] = None,
+              name: str = NAME, code: str = CODE,
               reporter=None, ffmpeg: str = "ffmpeg") -> tuple:
     """Upscale one image into `dst`. Returns the size written.
 
@@ -291,8 +292,14 @@ def run_still(src: str, dst: str, *, scale: float = 2.0,
     sess, chosen = _session(path, provider)
     if reporter is not None:
         reporter.info(
-            f"Upscaling the photo: {NAME} on {chosen}, {scale:g}x from "
-            f"{info.width}x{info.height}", stage="upscale", model=CODE)
+            # The model that was chosen, not the one this module was named
+            # after. These defaulted to the constants while there was one
+            # photo model, and kept reporting it after there were six -- so a
+            # Siax render announced itself as Real-ESRGAN and the only thing
+            # that disagreed was the file on disk. `run_video` was given this
+            # and `run_still` was missed.
+            f"Upscaling the photo: {name} on {chosen}, {scale:g}x from "
+            f"{info.width}x{info.height}", stage="upscale", model=code)
 
     read = subprocess.run(
         [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
