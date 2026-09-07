@@ -91,6 +91,22 @@ one clip does not overturn that. `crawl` is the newer measure -- two
 consecutive frames, masked to where the source did not move, against Lanczos,
 which cannot invent and so is the unit.
 
+`LiveActionV1 SPAN` came off OpenModelDB, where its author says the existing
+video models "all denoise or cause colour shifts" -- the fault this footage
+already arrives with. Measured against the two onnx models it sits between:
+
+    model                luma dB   SSIM   temporal   amplify   crawl
+    LiveActionV1 SPAN      34.35  0.968       103%     0.85x   1.31x
+    Compact ldl            34.83  0.968       119%     1.87x   1.96x
+    SPAN                   31.65  0.966       107%     1.43x   1.54x
+
+Half a decibel behind Compact ldl and far steadier: 1.31x of the Lanczos
+crawl floor against 1.96x, which puts it beside the shaders (1.22-1.28x)
+rather than beside the generators. The amplification is the odd number --
+0.85x is *below* one, and below Lanczos at 0.96x, so it damps a small change
+rather than passing it on. Nothing else measured does that, and it would
+normally mean smoothing; it out-resolved Compact ldl on brickwork instead.
+
 `ArtCNN C4F16` was measured the same way and stays an option rather than the
 default. Against FSRCNNX 16 on the same twelve frames it read 36.58 dB to
 36.13, 0.981 SSIM to 0.980, 101% temporal to 102% and 1.15x amplification to
@@ -213,6 +229,16 @@ VARIANTS: Sequence[Variant] = (
             "onnx", "2xNomosUni_span_multijpg.onnx", 2, False,
             "https://huggingface.co/Phips/2xNomosUni_span_multijpg/resolve/"
             "main/2xNomosUni_span_multijpg.safetensors", 4.5),
+    Variant("liveaction", "LiveActionV1 SPAN",
+            "The steadiest learned model measured, and the one to reach for "
+            "on video when a shader is not enough: it damps a small "
+            "frame-to-frame change rather than amplifying it, which nothing "
+            "else here does. Trained for live action rather than anime, and "
+            "against denoising rather than with it.",
+            "onnx", "2xLiveActionV1_SPAN.onnx", 2, False,
+            "https://raw.githubusercontent.com/jcj83429/upscaling/"
+            "f73a3a02874360ec6ced18f8bdd8e43b5d7bba57/2xLiveActionV1_SPAN/"
+            "2xLiveActionV1_SPAN_490000.pth", 8.9),
     Variant("spanldl", "SPAN ldl",
             "SPAN trained with Locally Discriminative Learning, which "
             "targets the artifacts a GAN leaves behind. Sharper than plain "
