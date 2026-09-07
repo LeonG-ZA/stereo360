@@ -134,3 +134,45 @@ def test_video_is_refused_with_the_reason(tmp_path):
     # amplifies a small change rather than the old percentage-of-movement.
     assert "4.2 times" in said
     assert "fsrcnnx16" in said, "and it has to say what to use instead"
+
+
+class _LumaSess:
+    """A stand-in ArtCNN: one channel in, doubled by nearest, one channel out."""
+
+    def get_inputs(self):
+        class _In:
+            name = "input"
+            shape = [1, 1, "h", "w"]
+        return [_In()]
+
+    def run(self, _out, feed):
+        x = feed["input"]
+        return [np.repeat(np.repeat(x, 2, axis=2), 2, axis=3)]
+
+
+@pytest.mark.parametrize("scale", [2.0, 3.0, 4.0])
+def test_a_luma_graph_fills_the_frame_at_any_scale(scale):
+    """The graph doubles; the job may ask for more. Slicing the tile at the
+    graph's scale and resizing afterwards cut a window twice too large out of
+    a tile half the size, which tiled garbage across the frame -- 17.6 dB on
+    a real 2K source, where plain Lanczos gets 33.
+
+    A horizontal ramp catches it: any correct enlargement of a ramp still
+    climbs left to right, and the broken one stepped backwards at every tile
+    edge.
+    """
+    from stereo360 import artcnn
+
+    w, h = 900, 64                       # wider than one 768px tile
+    ramp = np.tile(np.linspace(0, 255, w, dtype=np.float32), (h, 1))
+    frame = np.dstack([ramp] * 3).astype(np.uint8)
+
+    got = artcnn.upscale(_LumaSess(), frame, scale)
+
+    assert got.shape == (int(round(h * scale)), int(round(w * scale)), 3)
+    row = got[got.shape[0] // 2, :, 0].astype(np.int16)
+    assert row.min() >= 0 and row.max() <= 255
+    backwards = np.diff(row) < -2
+    assert not backwards.any(), (
+        f"the ramp steps backwards at {int(backwards.sum())} places -- "
+        f"tiles are not landing where they belong")

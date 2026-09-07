@@ -183,9 +183,9 @@ def upscale(sess, frame: np.ndarray, scale: float = 2.0,
             # whole frame was, so the pieces tile the result exactly.
             ox0, oy0 = int(round(x0 * scale)), int(round(y0 * scale))
             ox1, oy1 = int(round(x1 * scale)), int(round(y1 * scale))
-            sized = cv2.resize(
-                big, (int(round(tw * scale)), int(round(th * scale))),
-                interpolation=cv2.INTER_AREA)
+            from .artcnn import _resized
+            sized = _resized(cv2, big, int(round(tw * scale)),
+                             int(round(th * scale)))
             top = int(round((y0 - ya) * scale))
             left = int(round((x0 - xa) * scale))
             core = sized[top:top + (oy1 - oy0), left:left + (ox1 - ox0)]

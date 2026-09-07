@@ -411,6 +411,24 @@ def test_the_old_shader_is_named_for_its_size():
     assert upscalers.BY_CODE["fsrcnnx16"].name == "FSRCNNX 16"
 
 
+def test_a_gist_url_is_pinned_to_a_revision():
+    """The shaders come from tagged releases; SSimSuperRes comes from a gist,
+    whose plain raw URL follows whatever revision is newest -- and there have
+    been nineteen. A moving URL would quietly ship a shader nobody measured,
+    so a gist has to name its revision sha."""
+    from stereo360 import upscalers
+
+    for v in upscalers.VARIANTS:
+        if "gist.github" not in v.url:
+            continue
+        parts = v.url.rstrip("/").split("/")
+        assert "raw" in parts, f"{v.code}: not a raw gist URL"
+        sha = parts[parts.index("raw") + 1]
+        assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha), (
+            f"{v.code}: the URL after /raw/ is {sha!r}, not a revision sha -- "
+            f"this follows the gist instead of pinning it")
+
+
 def test_native_scale_is_preferred_over_a_bigger_graph():
     """A 4x graph asked for 2x computes sixteen times the source pixels to
     hand back four. The same ESRGAN architecture measured 129 s a frame at

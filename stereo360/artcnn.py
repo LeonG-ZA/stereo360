@@ -68,6 +68,22 @@ def to_rgb(ycc: np.ndarray) -> np.ndarray:
     return np.clip(out @ _INV.T, 0, 255)
 
 
+def _resized(cv2, tile, want_w: int, want_h: int):
+    """`tile` at the wanted size, with the filter that suits the direction.
+
+    INTER_AREA is a shrinking filter -- it averages source pixels into each
+    output one, which is right for a 4x graph asked for 2x and wrong for a 2x
+    graph asked for 4x, where it behaves about like nearest neighbour. Asking
+    it to enlarge is what put Compact ldl below plain Lanczos on a 2K source.
+    """
+    if (tile.shape[1], tile.shape[0]) == (want_w, want_h):
+        return tile                      # the graph already did exactly this
+    shrinking = want_w * want_h < tile.shape[1] * tile.shape[0]
+    return cv2.resize(tile, (want_w, want_h),
+                      interpolation=cv2.INTER_AREA if shrinking
+                      else cv2.INTER_LANCZOS4)
+
+
 def upscale(sess, frame: np.ndarray, scale: float = 2.0,
             tile: int = _TILE, overlap: int = _OVERLAP) -> np.ndarray:
     """`frame` at `scale` times its size, luma through the model."""
@@ -89,15 +105,18 @@ def upscale(sess, frame: np.ndarray, scale: float = 2.0,
             win = ycc[ya:yb, xa:xb, 0] / 255.0
             big = sess.run(None, {name: win[None, None].astype(np.float32)}
                            )[0][0, 0] * 255.0
-            # The tile's own share of the result, placed where it belongs.
-            sy, sx = big.shape[0] / (yb - ya), big.shape[1] / (xb - xa)
-            top, left = int(round((y0 - ya) * sy)), int(round((x0 - xa) * sx))
+            # Bring the tile to the size actually asked for *before* cutting
+            # its share out of it. Slicing at the graph's own scale and
+            # resizing afterwards is only right when the two agree: asked for
+            # 4x from a 2x graph it cut a window twice too large out of a
+            # tile half the size, and the frame came back at 17.6 dB.
+            big = _resized(cv2, big, int(round((xb - xa) * scale)),
+                           int(round((yb - ya) * scale)))
+            top = int(round((x0 - xa) * scale))
             oy0, ox0 = int(round(y0 * scale)), int(round(x0 * scale))
             oy1, ox1 = int(round(y1 * scale)), int(round(x1 * scale))
-            core = big[top:top + (oy1 - oy0), left:left + (ox1 - ox0)]
-            if core.shape != (oy1 - oy0, ox1 - ox0):
-                core = cv2.resize(core, (ox1 - ox0, oy1 - oy0),
-                                  interpolation=cv2.INTER_AREA)
+            up = int(round((y0 - ya) * scale))
+            core = big[up:up + (oy1 - oy0), top:top + (ox1 - ox0)]
             out_y[oy0:oy1, ox0:ox1] = core
 
     chroma = cv2.resize(ycc[..., 1:], (ow, oh),

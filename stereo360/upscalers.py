@@ -68,6 +68,29 @@ a row from a third machine.
     ESRGAN 2x uni     3.7x        1.82x     142%
     Siax                1x        4.24x       --
 
+`spline36_SSSR` is the odd one out: it has no scale factor of its own. igv's
+SSimSuperRes corrects whatever the main scaler did rather than doing the
+scaling, so `scale` is 2 here to match the range it was measured over and not
+because the shader is limited to it -- above 2x it does *more*, because the
+kernel has more error to correct. The corollary is that pairing it with
+FSRCNNX is pointless: at exactly 2x the prescaler lands on the output size,
+the kernel does nothing, and SSSR finds nothing to fix -- 0.03 levels of
+difference, against 0.47 at 3x where the kernel has real work.
+
+Measured on the same twelve frames as the rows above:
+
+    method            luma dB   SSIM   temporal   amplify   crawl   s/frame
+    FSRCNNX 16          36.58  0.980       102%     1.10x   1.24x      0.32
+    ArtCNN C4F16        37.10  0.981       101%     1.15x   1.26x      0.32
+    spline36 + SSSR     36.66  0.981       102%     1.15x   1.22x      0.29
+
+It beats the current default on every column and is a 6 KB file with no model
+behind it. It is still not the default, because sharper measured is not the
+same as better watched: FSRCNNX was preferred by eye on the same footage, and
+one clip does not overturn that. `crawl` is the newer measure -- two
+consecutive frames, masked to where the source did not move, against Lanczos,
+which cannot invent and so is the unit.
+
 `ArtCNN C4F16` was measured the same way and stays an option rather than the
 default. Against FSRCNNX 16 on the same twelve frames it read 36.58 dB to
 36.13, 0.981 SSIM to 0.980, 101% temporal to 102% and 1.15x amplification to
@@ -170,6 +193,18 @@ VARIANTS: Sequence[Variant] = (
             "onnx", "ArtCNN_R8F64.onnx", 2, False,
             "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
             "ArtCNN_R8F64.onnx", 3.5),
+    Variant("spline36_sssr", "spline36_SSSR",
+            "Not an upscaler but a corrector: libplacebo scales, then the "
+            "shader downscales its own result, compares that against the "
+            "source and fixes the difference. Crisper edges than the "
+            "learned shaders and the steadiest thing measured -- though "
+            "sharper is not the same as better, and FSRCNNX may still read "
+            "well against it by eye.",
+            "shader", "SSimSuperRes.glsl", 2, False,
+            "https://gist.githubusercontent.com/igv/"
+            "2364ffa6e81540f29cb7ab4c9bc05b6b/raw/"
+            "15d93440d0a24fc4b8770070be6a9fa2af6f200b/SSimSuperRes.glsl",
+            0.01),
     Variant("span", "SPAN",
             "The steadiest of the learned models and fast enough for video, "
             "though not as steady as its first measurement suggested: a "
