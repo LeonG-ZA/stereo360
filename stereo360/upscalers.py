@@ -91,6 +91,26 @@ one clip does not overturn that. `crawl` is the newer measure -- two
 consecutive frames, masked to where the source did not move, against Lanczos,
 which cannot invent and so is the unit.
 
+`LSDIR Compact v2` is the only entry here measured against a real answer.
+Every other row scores an upscaler against an 8K frame it was asked to
+reconstruct from a 4K one; this one was tested at 4x from a 2K source whose
+true 8K we still had, so the invented detail could be seen rather than
+inferred. On one 256px patch taken to 1024:
+
+    method                 PSNR   contrast
+    ArtCNN R8F64          35.44       1.28
+    ArtCNN C4F16          34.77       1.39
+    Lanczos 4x            34.62       1.13
+    LSDIR Compact v2      31.73       2.30
+
+Twice Lanczos's local contrast and three decibels below it. Beside the true
+frame the difference is legible: the window frames it draws are crisper than
+Lanczos and about right, while the brick grows a mottled streakiness the real
+8K does not have and the foliage hardens into strands. That is a good trade
+for a photograph and a bad one for a depth pass, which would read the
+invented texture as geometry -- hence stills only. It costs 0.57 s for a
+2K to 8K frame, the cheapest sharp option measured.
+
 `LiveActionV1 SPAN` came off OpenModelDB, where its author says the existing
 video models "all denoise or cause colour shifts" -- the fault this footage
 already arrives with. Measured against the two onnx models it sits between:
@@ -264,6 +284,15 @@ VARIANTS: Sequence[Variant] = (
             "onnx", "2xNomosUni_esrgan_multijpg.onnx", 2, True,
             "https://huggingface.co/Phips/2xNomosUni_esrgan_multijpg/"
             "resolve/main/2xNomosUni_esrgan_multijpg.safetensors", 33.5),
+    Variant("lsdir", "LSDIR Compact v2",
+            "For stills, and the cheapest sharp one here: a 4x graph, so it "
+            "does the whole job in one pass where a 2x model would need two. "
+            "It draws confident window frames and edges -- and brick and "
+            "foliage come back more contrasty than they really were, which "
+            "is why it is offered for photos rather than video.",
+            "onnx", "4xLSDIRCompactv2.onnx", 4, True,
+            "https://github.com/Phhofm/models/releases/download/"
+            "4xLSDIRCompact2/4xLSDIRCompactv2.safetensors", 1.2),
     Variant("siax", "Siax",
             "For stills, and the sharpest of these -- but it invents to get "
             "there, which shows as detail that was not in the scene. Worst "
@@ -273,6 +302,20 @@ VARIANTS: Sequence[Variant] = (
             "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/"
             "4x_NMKD-Siax_200k.pth", 67.0),
 )
+
+#: How far each model magnifies a small frame-to-frame change, measured with
+#: the seeded 0.86-level nudge described above. Kept here rather than in the
+#: table because not every model has one -- LSDIR was judged against a real
+#: 8K frame instead -- and because a refusal that quotes the wrong model's
+#: figure is worse than one that quotes none. Read on a video frame, which is
+#: the material that governs a pre-pass; the figures from `outdoor.jpg` are
+#: lower and are the ones the first table records.
+AMPLIFY: Dict[str, float] = {
+    "fsrcnnx8": 1.11, "fsrcnnx16": 1.10, "artcnn16": 1.15, "artcnnr8": 1.09,
+    "spline36_sssr": 1.15, "liveaction": 0.85, "span": 1.43, "spanldl": 1.63,
+    "compactldl": 1.87, "esrgan2x": 1.82, "siax": 4.24,
+}
+
 
 BY_CODE: Dict[str, Variant] = {v.code: v for v in VARIANTS}
 

@@ -434,15 +434,54 @@ def test_a_gist_url_is_pinned_to_a_revision():
             f"the repository instead of pinning a version of it")
 
 
+def test_the_stills_only_refusal_quotes_the_right_model():
+    """The refusal is meant to carry a measurement -- "photos only" alone
+    reads as an arbitrary rule. It carried a hardcoded 4.2, which is Siax's
+    amplification and nobody else's, so ESRGAN 2x uni (1.82x) and LSDIR
+    (never measured for it) were both told something untrue about
+    themselves. Each model now quotes its own figure or none.
+    """
+    from stereo360 import upscalers
+
+    stills = [v for v in upscalers.VARIANTS if v.stills_only]
+    assert stills, "the guard is pointless if nothing is stills-only"
+    for v in stills:
+        amp = upscalers.AMPLIFY.get(v.code)
+        if amp is None:
+            continue
+        assert amp > 1.0, (
+            f"{v.code} is stills-only yet damps a change ({amp}x) -- either "
+            f"the flag or the measurement is wrong")
+    # every figure quoted anywhere has to belong to the model quoting it
+    for code, amp in upscalers.AMPLIFY.items():
+        assert code in upscalers.BY_CODE, f"{code} is not in the table"
+
+
 def test_native_scale_is_preferred_over_a_bigger_graph():
     """A 4x graph asked for 2x computes sixteen times the source pixels to
     hand back four. The same ESRGAN architecture measured 129 s a frame at
-    4x and 29 s at 2x, so everything that has a 2x checkpoint uses it."""
+    4x and 29 s at 2x, so everything that *has* a 2x checkpoint uses it.
+
+    The exceptions are named rather than counted, so a third cannot arrive
+    without someone deciding it should:
+
+      siax   the NMKD checkpoint exists only at 4x
+      lsdir  every LSDIR Compact release is 4x, v2 included
+
+    Both are stills-only, which is what makes the waste affordable: a photo
+    is upscaled once and a pre-pass thousands of times.
+    """
     from stereo360 import upscalers
 
-    four = [v for v in upscalers.VARIANTS if v.scale != 2]
-    assert [v.code for v in four] == ["siax"], \
-        "only Siax has no 2x checkpoint"
+    four = {v.code for v in upscalers.VARIANTS if v.scale != 2}
+    assert four == {"siax", "lsdir"}, (
+        f"{four} are not 2x. A 4x graph doing a 2x job wastes three quarters "
+        f"of what it computes -- add it here with a reason, or find a 2x "
+        f"checkpoint")
+    for code in four:
+        assert upscalers.BY_CODE[code].stills_only, (
+            f"{code} is 4x and not stills-only: a video pre-pass would pay "
+            f"the sixteen-for-four penalty on every frame")
 
 
 # ------------------------------------------------------- audio through a pass

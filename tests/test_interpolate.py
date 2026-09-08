@@ -264,3 +264,93 @@ def test_the_model_is_released_when_the_pass_is_done():
     s.close()
     assert s._sess is None
     s.close()          # twice is safe; `run` closes in a finally
+
+
+# --------------------------------------------------- the flow engine
+
+
+def test_flow_needs_nothing_fetched():
+    """The point of it. RIFE is a 20 MB download and a runtime; this is the
+    OpenCV that has to be installed for the converter to run at all, so it
+    can be offered on a machine that has fetched nothing."""
+    from stereo360 import flow
+
+    assert flow.available() is True
+    assert flow.describe()["available"] is True
+
+
+def _structured(h=96, w=640):
+    """Something a flow estimator can actually track.
+
+    Not random noise: noise has no structure to follow, so DIS finds nothing
+    and the test measures the estimator's failure rather than the warp's
+    correctness. Real footage has edges and gradients, so the fixture does.
+    """
+    import numpy as np
+
+    y, x = np.mgrid[0:h, 0:w].astype(np.float32)
+    img = (110 + 70 * np.sin(x / 23.0) * np.cos(y / 17.0)
+           + 40 * np.sin((x + y) / 41.0))
+    img[30:60, 100:180] = 235                       # a couple of hard edges
+    img[20:40, 400:520] = 25
+    return np.dstack([np.clip(img, 0, 255).astype(np.uint8)] * 3)
+
+
+def test_flow_carries_each_neighbour_its_own_share():
+    """`t` is not always a half. A source at 30 fps taken to 72 asks for
+    frames a third and two thirds of the way along, and a warp that always
+    went halfway would put every one of them in the same wrong place."""
+    import numpy as np
+    from stereo360 import flow
+
+    a = _structured()
+    b = np.roll(a, 20, axis=1)              # a clean 20 px translation
+    eng = flow.Engine()
+    for t, shift in ((0.25, 5), (0.5, 10), (0.75, 15)):
+        got = eng.between(a, b, t)
+        want = np.roll(a, shift, axis=1)
+        err = np.abs(got[:, 64:-64].astype(float)
+                     - want[:, 64:-64].astype(float)).mean()
+        assert err < 12, f"t={t} landed {err:.1f} levels from a {shift} px roll"
+
+
+def test_flow_warps_toward_the_truth_not_away_from_it():
+    """The sign. OpenCV gives b(x + flow) = a(x), so the halfway frame is
+    a(x - flow/2); sampling at plus a half carries the content away by the
+    whole motion instead. It still looks like an image, which is why it
+    survived a glance and had to be caught by measurement."""
+    import numpy as np
+    from stereo360 import flow
+
+    a = _structured()
+    b = np.roll(a, 24, axis=1)
+    got = flow.Engine().between(a, b, 0.5)
+    right = np.roll(a, 12, axis=1)
+    wrong = np.roll(a, -12, axis=1)         # what the flipped sign produces
+    core = slice(64, -64)
+    d_right = np.abs(got[:, core].astype(float) - right[:, core].astype(float)).mean()
+    d_wrong = np.abs(got[:, core].astype(float) - wrong[:, core].astype(float)).mean()
+    assert d_right < d_wrong, (
+        f"closer to the backwards warp ({d_wrong:.1f}) than the right one "
+        f"({d_right:.1f}) -- the sign is inverted")
+
+
+def test_a_narrow_frame_does_not_wrap_past_both_ends():
+    """The wrap is 256 px of the far side. A frame narrower than that would
+    slice past both ends and come back empty -- a silent nothing rather than
+    an error, and only ever seen on a test-sized array."""
+    import numpy as np
+    from stereo360 import flow
+
+    a = np.zeros((32, 64, 3), np.uint8)
+    assert flow.Engine().between(a, a, 0.5).shape == (32, 64, 3)
+
+
+def test_the_streamer_takes_either_engine():
+    """Both share the decode, the encode, the frame accounting and the seam
+    handling; only the arithmetic in the middle differs. A second copy of
+    that plumbing is how the two drift apart."""
+    from stereo360.interpolate import Streamer
+
+    assert Streamer(30.0, 60.0, engine="flow").name == "Optical flow"
+    assert "DIS" in Streamer(30.0, 60.0, engine="flow").provider

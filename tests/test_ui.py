@@ -1991,9 +1991,14 @@ def test_the_core_offers_interpolation_only_up_to_30_fps():
     assert _fi.offered_for(0) is False
 
 
-def test_the_probe_lists_both_kinds_of_interpolator():
+def test_the_probe_lists_every_kind_of_interpolator():
     """One reply, because the interface asks one question -- what can this
-    machine do to a source before the stereo pass."""
+    machine do to a source before the stereo pass.
+
+    Three kinds now, not two: Topaz where it is installed, RIFE where its
+    graph has been fetched, and optical flow, which is offered on any machine
+    that can run the converter at all because OpenCV is already a dependency.
+    """
     import json
     import subprocess
     import sys
@@ -2006,9 +2011,13 @@ def test_the_probe_lists_both_kinds_of_interpolator():
     found = json.loads(out)
     assert "interpolate_offered" in found
     for entry in found["interpolators"]:
-        assert entry["source"] in ("topaz", "rife")
+        assert entry["source"] in ("topaz", "rife", "flow")
     if found["rife"]["available"]:
         assert any(e["source"] == "rife" for e in found["interpolators"])
+    # The one that needs no download has to be there, or the machine with
+    # nothing fetched is told it cannot interpolate when it can.
+    if found.get("flow", {}).get("available"):
+        assert any(e["source"] == "flow" for e in found["interpolators"])
 
 
 def test_a_fast_source_is_not_offered_interpolation_by_the_probe():

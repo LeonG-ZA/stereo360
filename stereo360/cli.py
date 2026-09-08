@@ -403,10 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interpolate", nargs="?", const="auto", default=None,
                    metavar="MODEL",
                    help="Raise the frame rate before converting. MODEL is a "
-                        "Topaz interpolation model (chr, apo, aion), or "
+                        "Topaz interpolation model (chr, apo, aion), "
                         "'rife' for the free one, which runs through "
-                        "onnxruntime and needs no Topaz -- fetch it once with "
-                        "scripts/fetch_rife.py. The default, 'auto', takes "
+                        "onnxruntime -- fetch it once with "
+                        "scripts/fetch_rife.py -- or 'flow', which downloads "
+                        "nothing and uses OpenCV's optical flow: level with "
+                        "RIFE on real footage, better on camera pans, weaker "
+                        "where one thing passes in front of another, and "
+                        "about twice as fast. The default, 'auto', takes "
                         "Chronos when Topaz is installed and RIFE otherwise. "
                         "Worth more in a headset than on a monitor: 30 fps "
                         "judders when your head keeps moving and there is no "
@@ -947,6 +951,7 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
 
     from . import esrgan as _es
     from . import fsrcnnx as _fs
+    from . import flow as _flow
     from . import interpolate as _fi
     from . import upscale as _u
 
@@ -962,6 +967,7 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
     # Topaz is here and RIFE when it is not, so the flag means the same thing
     # on both kinds of machine without the user having to know which.
     use_rife = False
+    engine = _fi.CODE
     fi = None
     if wanted:
         if not is_image and info is not None and not _fi.offered_for(info.fps):
@@ -971,7 +977,14 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                 f"that it only multiplies the frames to convert.")
         if wanted == "auto":
             wanted = _fi.CODE if install is None else "chr"
-        if wanted == _fi.CODE:
+        if wanted == _flow.CODE:
+            use_rife = True         # the same pre-pass, different arithmetic
+            engine = _flow.CODE
+            if not _flow.available():
+                raise SystemExit(
+                    "--interpolate flow needs OpenCV with DISOpticalFlow, "
+                    "and this OpenCV has neither. Use --interpolate rife.")
+        elif wanted == _fi.CODE:
             use_rife = True         # streamed by the renderer, not done here
             if not _fi.available(args.rife_model):
                 raise SystemExit("\n".join((
@@ -1021,9 +1034,17 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
         # four, and detail re-invented differently each frame is what a
         # headset shows as crawling.
         if chosen.stills_only and not is_image:
+            # The measurement for *this* model. It used to say "4.2 times"
+            # whoever was refused, which is Siax's figure and nobody else's:
+            # ESRGAN 2x uni is 1.82x and LSDIR has none. A refusal reads as
+            # an arbitrary rule without a number and as a false one with the
+            # wrong number, so it carries the model's own or says nothing.
+            amp = _up.AMPLIFY.get(chosen.code)
+            how = (f"it amplifies a small frame-to-frame change "
+                   f"{amp:.1f} times, and " if amp else
+                   "it invents detail to get its sharpness, and ")
             raise SystemExit(
-                f"--upscale {chosen.code} is for photos. On video it "
-                f"amplifies a small frame-to-frame change 4.2 times, and "
+                f"--upscale {chosen.code} is for photos. On video {how}"
                 f"invented detail that will not hold still reads as "
                 f"crawling in a headset. For video use "
                 f"--upscale {_up.VIDEO_DEFAULT}, or --upscale span.")
@@ -1206,7 +1227,7 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                 fps=(args.interpolate_fps or None),
                 model=args.rife_model, provider=args.ort_provider,
                 start=args.start_frame, count=args.max_frames,
-                reporter=reporter, cancel=cancel)
+                reporter=reporter, cancel=cancel, engine=engine)
         except _fi.InterpolateError as e:
             raise SystemExit(str(e))
         # The intermediate holds exactly the frames asked for, so the
@@ -1517,6 +1538,7 @@ def main(argv=None) -> int:
 
         from . import esrgan as _es
         from . import fsrcnnx as _fs
+        from . import flow as _flow
         from . import interpolate as _fi
         from . import upscale as _u
 
@@ -1568,6 +1590,16 @@ def main(argv=None) -> int:
                      "desc": _fi.DESC, "source": "rife",
                      "min_scale": 1.0, "max_scale": 1.0})
             found["rife"] = rife
+            # Offered whenever the source rate suits it, because unlike RIFE
+            # there is nothing to fetch: OpenCV is already installed or the
+            # converter would not have started.
+            if _flow.available() and (not args.probe_fps
+                                      or _fi.offered_for(args.probe_fps)):
+                found.setdefault("interpolators", []).append(
+                    {"code": _flow.CODE, "short": _flow.CODE,
+                     "name": _flow.NAME, "desc": _flow.DESC,
+                     "source": "flow", "min_scale": 1.0, "max_scale": 1.0})
+            found["flow"] = _flow.describe()
             found["interpolate_offered"] = bool(
                 found.get("interpolators")
                 and (not args.probe_fps or _fi.offered_for(args.probe_fps)))

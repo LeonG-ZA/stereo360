@@ -287,7 +287,7 @@ class Streamer:
 
     def __init__(self, src_fps: float, target_fps: Optional[float] = None,
                  model: Optional[str] = None, provider: Optional[str] = None,
-                 reporter=None) -> None:
+                 reporter=None, engine: str = CODE) -> None:
         self.src_fps = float(src_fps)
         self.target_fps = float(target_fps or self.src_fps * 2)
         if not offered_for(self.src_fps):
@@ -299,14 +299,30 @@ class Streamer:
             raise InterpolateError(
                 f"asked for {self.target_fps:g} fps from a {self.src_fps:g} "
                 f"fps source, which would drop frames rather than add them.")
-        path = model_path(model)
-        if not os.path.exists(path):
-            raise InterpolateError("\n".join((
-                f"RIFE model not found: {path}",
-                "It is not shipped with the repository. Fetch it once:",
-                "    python scripts/fetch_rife.py")))
-        self._sess, self.provider = _session(path, provider)
-        self._tile = _tile_for(self.provider)
+        # Which arithmetic makes the in-between frame. Everything after
+        # this -- the decode, the encode, the frame accounting, the wrap at
+        # the seam -- is the same either way, so the two share it rather than
+        # each growing a copy of it.
+        from . import flow as _flow
+
+        self.engine = engine
+        if engine == _flow.CODE:
+            self._flow = _flow.Engine()
+            self.provider = self._flow.provider
+            self.name = _flow.NAME
+            self._between = self._flow.between
+        else:
+            path = model_path(model)
+            if not os.path.exists(path):
+                raise InterpolateError("\n".join((
+                    f"RIFE model not found: {path}",
+                    "It is not shipped with the repository. Fetch it once:",
+                    "    python scripts/fetch_rife.py")))
+            self._sess, self.provider = _session(path, provider)
+            self._tile = _tile_for(self.provider)
+            self.name = NAME
+            self._between = (lambda a, b, t:
+                             between(self._sess, a, b, t, self._tile))
         self._reporter = reporter
 
     @property
@@ -320,9 +336,9 @@ class Streamer:
     def announce(self) -> None:
         if self._reporter is not None:
             self._reporter.info(
-                f"Smoothing motion before the render: {NAME} on "
+                f"Smoothing motion before the render: {self.name} on "
                 f"{self.provider}, {self.src_fps:g} to {self.target_fps:g} fps",
-                stage="interpolate", model=CODE)
+                stage="interpolate", model=self.engine)
 
     def total(self, source_frames: Optional[int]) -> Optional[int]:
         """Output frames for a source this long, for the progress bar."""
@@ -388,8 +404,7 @@ class Streamer:
             elif t > 1 - 1e-4:
                 yield nxt
             else:
-                yield (between(self._sess, prev[0], nxt[0], t, self._tile),
-                       None)
+                yield (self._between(prev[0], nxt[0], t), None)
             made += 1
             j += 1
 
@@ -413,7 +428,8 @@ def _encoder(ffmpeg: str = "ffmpeg", *, pix_fmt=None, width=0, height=0,
 def run(src: str, dst: str, *, info=None, fps: Optional[float] = None,
         model: Optional[str] = None, provider: Optional[str] = None,
         start: int = 0, count: Optional[int] = None,
-        reporter=None, cancel=None, ffmpeg: str = "ffmpeg") -> int:
+        reporter=None, cancel=None, ffmpeg: str = "ffmpeg",
+        engine: str = CODE) -> int:
     """Smooth `src` into `dst` before anything else runs. Returns the frames.
 
     A pass over the file rather than a filter inside the render, and that is
@@ -440,7 +456,7 @@ def run(src: str, dst: str, *, info=None, fps: Optional[float] = None,
 
         info = ffmpeg_io.probe(src)
     streamer = Streamer(info.fps, fps, model=model, provider=provider,
-                        reporter=reporter)
+                        reporter=reporter, engine=engine)
     streamer.announce()
 
     skip, take = streamer.window(start, count)
