@@ -25,16 +25,23 @@ def test_every_spec_points_at_the_path_its_loader_reads():
     assert {s.key: s.path for s in em.SPECS} == want
 
 
-def test_a_stills_only_model_is_never_the_video_default():
-    """The one mistake this table can make that a user cannot see until the
-    render finishes: 142% temporal on ESRGAN 2x uni is worse than the 135%
-    that got Real-ESRGAN barred from video, so anything marked stills_only
-    must stay out of the video default."""
+def test_no_model_is_barred_from_video_any_more():
+    """What replaced the stills-only flag, and why.
+
+    Three models used to be refused for video on an amplification figure
+    read against the Lanczos floor. Watching 120 frames of each showed all
+    of them steady -- and the *untouched* 8K flickering 1.20x that floor
+    itself, from sensor noise and wind. The floor was never the target, so a
+    number measured against it could not say what it was being asked to say.
+
+    The figures survive as measurement in AMPLIFY. What they no longer do is
+    decide, and no table entry carries a bar.
+    """
     from stereo360 import upscalers
 
-    video = upscalers.BY_CODE[upscalers.VIDEO_DEFAULT]
-    assert not video.stills_only, (
-        f"{video.code} is stills-only and cannot be the video default")
+    assert not hasattr(upscalers.VARIANTS[0], "stills_only")
+    for code, amp in upscalers.AMPLIFY.items():
+        assert code in upscalers.BY_CODE, f"{code} is not in the table"
 
 
 def test_the_onnx_entries_name_a_checkpoint_the_exporter_can_read():
@@ -357,18 +364,20 @@ def test_the_kill_backstop_outlasts_an_uninterruptible_depth_pass():
 # ------------------------------------------------------- the upscaler table
 
 def test_the_two_defaults_are_different_models():
-    """A still is judged on one frame; a video on how little the invented
-    detail moves between them. Those pick different models -- the shader
-    cannot crawl and is what video wants, while a still can afford a network
-    and wants the extra sharpness. One default cannot serve both."""
+    """The two defaults are now deliberately the same model.
+
+    They used to differ because a still was judged on one frame and a video
+    on how little the invented detail moved between them. That split turned
+    out to be the wrong axis: every model held still, and what actually
+    decides is whether the *source* is degraded or pristine -- which the job
+    type does not tell you. So both name the best free predictor, and the
+    real choice moved to the two dropdowns.
+    """
     from stereo360 import upscalers
 
-    assert upscalers.VIDEO_DEFAULT != upscalers.PHOTO_DEFAULT
-    assert upscalers.BY_CODE[upscalers.VIDEO_DEFAULT].stills_only is False
-    # The photo default is not required to be stills-*only*. That held while
-    # it was Siax and was never the rule: what a still wants is the model
-    # judged best on one frame, and whether that model also survives video is
-    # a separate question it does not have to fail.
+    assert upscalers.VIDEO_DEFAULT == upscalers.PHOTO_DEFAULT
+    assert upscalers.VIDEO_DEFAULT == upscalers.FREE_DEFAULT
+    assert upscalers.BY_CODE[upscalers.FREE_DEFAULT].category ==         upscalers.PREDICTOR
     assert upscalers.PHOTO_DEFAULT in upscalers.BY_CODE
 
 
@@ -393,13 +402,17 @@ def test_every_variant_is_reachable_by_its_code():
     assert upscalers.get(None) is None
 
 
-def test_a_stills_only_model_is_never_a_video_fallback():
-    """`for_job` falls forward when the preferred model is missing, and the
-    one thing it must not do is fall forward onto the model that crawls."""
+def test_the_fallback_never_lands_on_a_resampler():
+    """`for_job` falls forward when the preferred model is missing.
+
+    It may now land on anything that upscales, since nothing is barred --
+    except a resampler, which belongs to the *second* dropdown. Offering one
+    here would silently answer a different question than the one asked.
+    """
     from stereo360 import upscalers
 
     got = upscalers.for_job(is_photo=False)
-    assert got is None or not got.stills_only
+    assert got is None or got.category != upscalers.RESAMPLER
 
 
 def test_the_old_shader_is_named_for_its_size():
@@ -434,27 +447,21 @@ def test_a_gist_url_is_pinned_to_a_revision():
             f"the repository instead of pinning a version of it")
 
 
-def test_the_stills_only_refusal_quotes_the_right_model():
-    """The refusal is meant to carry a measurement -- "photos only" alone
-    reads as an arbitrary rule. It carried a hardcoded 4.2, which is Siax's
-    amplification and nobody else's, so ESRGAN 2x uni (1.82x) and LSDIR
-    (never measured for it) were both told something untrue about
-    themselves. Each model now quotes its own figure or none.
+def test_every_amplification_figure_belongs_to_a_real_model():
+    """AMPLIFY is measurement now rather than policy, and measurement that
+    names a model nobody has is worse than none.
+
+    It used to feed a refusal, and that refusal quoted a hardcoded 4.2 --
+    Siax's figure -- at every model it turned away, so ESRGAN 2x uni (1.82x)
+    and LSDIR (never measured for it) were both told something untrue about
+    themselves. The refusal is gone; the requirement that a figure belong to
+    its model is not.
     """
     from stereo360 import upscalers
 
-    stills = [v for v in upscalers.VARIANTS if v.stills_only]
-    assert stills, "the guard is pointless if nothing is stills-only"
-    for v in stills:
-        amp = upscalers.AMPLIFY.get(v.code)
-        if amp is None:
-            continue
-        assert amp > 1.0, (
-            f"{v.code} is stills-only yet damps a change ({amp}x) -- either "
-            f"the flag or the measurement is wrong")
-    # every figure quoted anywhere has to belong to the model quoting it
     for code, amp in upscalers.AMPLIFY.items():
         assert code in upscalers.BY_CODE, f"{code} is not in the table"
+        assert amp > 0, f"{code} has a nonsense figure"
 
 
 def test_native_scale_is_preferred_over_a_bigger_graph():
@@ -468,20 +475,29 @@ def test_native_scale_is_preferred_over_a_bigger_graph():
       siax   the NMKD checkpoint exists only at 4x
       lsdir  every LSDIR Compact release is 4x, v2 included
 
-    Both are stills-only, which is what makes the waste affordable: a photo
-    is upscaled once and a pre-pass thousands of times.
+    The waste is real and is no longer the whole story: on the matched pair
+    tested -- the same SPAN architecture at both scales -- running the 4x
+    graph and downscaling by area scored 1.5 dB *better* than the native 2x,
+    because averaging four samples damps the model's own errors. It costs
+    about twice the time for it. So this is a trade rather than a mistake,
+    and the exceptions are still named so a third cannot arrive unnoticed.
+
+    Anything that scales to whatever it is asked for is exempt: a resampler
+    and NVIDIA VSR both take an output size, so there is no mismatch to pay
+    for.
     """
     from stereo360 import upscalers
 
-    four = {v.code for v in upscalers.VARIANTS if v.scale != 2}
+    four = {v.code for v in upscalers.VARIANTS
+            if not v.any_scale and v.scale != 2}
     assert four == {"siax", "lsdir"}, (
-        f"{four} are not 2x. A 4x graph doing a 2x job wastes three quarters "
-        f"of what it computes -- add it here with a reason, or find a 2x "
-        f"checkpoint")
+        f"{four} are neither 2x nor any-scale. A 4x graph doing a 2x job "
+        f"computes four times what it hands back -- add it here with a "
+        f"reason, or find a 2x checkpoint")
     for code in four:
-        assert upscalers.BY_CODE[code].stills_only, (
-            f"{code} is 4x and not stills-only: a video pre-pass would pay "
-            f"the sixteen-for-four penalty on every frame")
+        assert upscalers.BY_CODE[code].category == upscalers.GENERATOR, (
+            f"{code} is a 4x graph outside the generators, where the "
+            f"sixteen-for-four cost has no invention to pay for it")
 
 
 # ------------------------------------------------------- audio through a pass

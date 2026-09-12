@@ -209,7 +209,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "sourceSubsampling", "spatialAudio", "depthTiles",
                          "codec", "outputMode", "yaw", "outputWidth", "resolutionIndex",
                          "spatialAudioHint", "photoMode",
-                         "upscale", "upscaleModel", "upscaleScale",
+                         "upscale", "upscaleModel", "upscaleResampler",
+                         "upscaleScale",
                          "interpolate", "interpolateModel", "interpolateFps",
                          # Which downloads the panel decided to offer. The
                          # card's visibility alone cannot catch offering an

@@ -42,6 +42,12 @@ class Controller(QObject):
     encodersChanged = Signal()
     upscalersChanged = Signal()
     fetchingChanged = Signal()
+    #: NVIDIA VSR's install state changed -- downloaded, or its licence
+    #: accepted. Separate from `upscalersChanged` because it moves for
+    #: reasons the upscaler probe knows nothing about.
+    nvvsrChanged = Signal()
+    #: True while the wheel is downloading, so the button can say so.
+    nvvsrFetchingChanged = Signal()
     thumbnailChanged = Signal()
     #: level, text -- appended to the log view
     logged = Signal(str, str)
@@ -96,6 +102,9 @@ class Controller(QObject):
         self._fetching = False
         self._fetch_proc = QProcess(self)
         self._fetch_proc.finished.connect(self._on_enhancers_fetched)
+        self._nvvsr_proc = QProcess(self)
+        self._nvvsr_proc.finished.connect(self._on_nvvsr_installed)
+        self._nvvsr_fetching = False
         # Its own process, so a probe can never disturb a running render.
         self._probe = QProcess(self)
         self._probe.finished.connect(self._on_probe_finished)
@@ -227,9 +236,18 @@ class Controller(QObject):
                                         int(output_width) or None))
 
     @Slot(int, int, str, result="QVariantList")
-    def resolutionChoices(self, width: int, height: int, mode: str) -> list:
-        """Output sizes worth offering for this source, largest first."""
-        return options.resolution_choices(int(width), int(height), str(mode))
+    @Slot(int, int, str, bool, result="QVariantList")
+    def resolutionChoices(self, width: int, height: int, mode: str,
+                          upscaling: bool = False) -> list:
+        """Output sizes worth offering for this source, largest first.
+
+        `upscaling` asks for the sizes *above* the source instead, which is
+        the only set that makes sense when a pre-pass is going to enlarge it.
+        Both overloads are declared because the panel calls it with and
+        without, and a QML call that matches no signature fails silently.
+        """
+        return options.resolution_choices(int(width), int(height), str(mode),
+                                          upscaling=bool(upscaling))
 
     @Slot(int, int, str, bool, result=int)
     def defaultOutputWidth(self, width: int, height: int, mode: str,
@@ -513,6 +531,130 @@ class Controller(QObject):
         except ValueError:
             return
         self.sourceInfoChanged.emit()
+
+    # ------------------------------------------------------- NVIDIA VSR
+
+    @Slot(result="QVariantMap")
+    def nvvsrStatus(self) -> dict:
+        """Whether to offer NVIDIA VSR, and why not when the answer is no.
+
+        Asked of `nvidia-smi` rather than of a runtime, so it can be answered
+        before anything is downloaded -- which is the point, since the entry
+        exists to decide whether to offer a 490 MB proprietary download.
+        """
+        from stereo360 import nvvsr
+
+        return nvvsr.describe()
+
+    @Slot(result=str)
+    def nvvsrAgreement(self) -> str:
+        """The licence to present, or "" if it cannot be read.
+
+        Read from the PDFs inside the installed wheel rather than fetched:
+        NVIDIA's web page and the shipped PDFs are not the same document, so
+        the page would show terms other than the ones in force here. See the
+        note in stereo360/nvvsr.py.
+
+        Synchronous because it is local and memoised -- half a second on the
+        first deliberate click, then nothing. An empty string is a refusal:
+        the dialog shows the reason and leaves Accept disabled rather than
+        offering to accept something nobody could read.
+        """
+        from stereo360 import nvvsr
+
+        return nvvsr.agreement() or ""
+
+    @Property(bool, notify=nvvsrFetchingChanged)
+    def nvvsrFetching(self) -> bool:
+        """True while the wheel is downloading, so the button can say so."""
+        return self._nvvsr_fetching
+
+    @Slot()
+    def nvvsrInstall(self) -> None:
+        """Fetch NVIDIA's wheel, out of process.
+
+        `pip` rather than a plain download: the wheel is 490 MB of bundled
+        SDK and has its own dependencies, and reproducing what pip does with
+        a urlretrieve is how a half-installed package happens. `--no-input`
+        because nothing here can answer a prompt, and the index is NVIDIA's
+        own -- PyPI carries a 2.7 KB stub and none of the real artifacts.
+
+        Nothing about the licence happens here. The terms live inside the
+        wheel, so they cannot be shown until this has finished; the interface
+        asks for them before the model is first used, which is also when the
+        agreement itself says it binds.
+        """
+        from stereo360 import nvvsr
+
+        if self._nvvsr_fetching or self._nvvsr_proc.state() != QProcess.NotRunning:
+            return
+        if not nvvsr.supported():
+            self.logged.emit("warn", nvvsr.why_not() or "Not available here.")
+            return
+        self._nvvsr_fetching = True
+        self.nvvsrFetchingChanged.emit()
+        self.logged.emit(
+            "info", "Downloading NVIDIA VSR (about 490 MB) from NVIDIA...")
+        self._nvvsr_proc.setWorkingDirectory(core_root())
+        self._nvvsr_proc.setProgram(sys.executable)
+        self._nvvsr_proc.setArguments(
+            ["-m", "pip", "install", "--no-input", "--disable-pip-version-check",
+             "--extra-index-url", nvvsr.INDEX, nvvsr.PACKAGE])
+        self._nvvsr_proc.start()
+
+    def _on_nvvsr_installed(self, code: int, _status) -> None:
+        from stereo360 import nvvsr
+
+        self._nvvsr_fetching = False
+        self.nvvsrFetchingChanged.emit()
+        out = (bytes(self._nvvsr_proc.readAllStandardOutput()).decode(
+                   "utf-8", "replace")
+               + bytes(self._nvvsr_proc.readAllStandardError()).decode(
+                   "utf-8", "replace")).strip()
+        # pip is loud and most of it is noise. Only the tail matters when it
+        # worked, and all of it matters when it did not.
+        lines = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
+        for line in (lines if code != 0 else lines[-3:]):
+            self.logged.emit("info" if code == 0 else "warn", line)
+        if code != 0:
+            self.logged.emit(
+                "warn", "NVIDIA VSR could not be installed. Everything else "
+                        "is unaffected.")
+        elif nvvsr.installed():
+            self.logged.emit(
+                "info", "NVIDIA VSR downloaded. Its licence is shown next.")
+        else:
+            # pip succeeded and the package still will not import. Said out
+            # loud rather than falling quietly back to offering the download
+            # again, which is what happened while `installed()` was reading a
+            # directory listing taken before the package existed.
+            self.logged.emit(
+                "warn", "NVIDIA VSR downloaded, but it is not importable in "
+                        "this session yet. Restart the application and it "
+                        "will be offered. Nothing needs downloading again.")
+        self.nvvsrChanged.emit()
+
+    @Slot(str, result=bool)
+    def nvvsrAccept(self, text: str) -> bool:
+        """Record consent to the exact agreement that was on screen.
+
+        Keyed by the text, so an updated agreement asks again instead of
+        passing under a tick given to last year's terms -- which is what
+        NVIDIA's own "Updated Agreement" clause expects of whoever presents
+        them.
+        """
+        from stereo360 import nvvsr
+
+        if not text.strip():
+            return False
+        nvvsr.record(text)
+        # The model becomes available at this moment and nothing else would
+        # say so: `present()` asks for consent as well as for the wheel, so
+        # the upscaler list is stale until it is asked again.
+        self.nvvsrChanged.emit()
+        self._upscale_key = None
+        self.probeUpscalers(*(self._last_upscale_args or (0, 0.0)))
+        return True
 
     # ------------------------------------------------------------- helpers
 

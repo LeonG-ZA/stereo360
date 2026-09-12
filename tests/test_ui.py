@@ -348,6 +348,23 @@ def test_qml_loads_and_renders():
     assert not warnings, "QML warnings:\n" + "\n".join(warnings)
 
 
+def test_the_upscale_panel_loads_without_warnings(tmp_path):
+    """The same check with the panel actually open.
+
+    Closed, most of it never evaluates: `visible: win.upscale && ...` short
+    circuits at the first term, so a binding further along can be wrong for
+    months while the warning-free run above keeps saying it is fine. That is
+    how `(a !== "" || win.nvvsr.why_not)` shipped -- null rather than false,
+    which QML declines to assign to a bool -- and it was found by someone
+    using the app rather than by this suite.
+    """
+    stdout, warnings = _selftest("--set", f"inputPath={_still(tmp_path)}",
+                                 "--set", "upscale=true",
+                                 "--set", _every_upscaler(nvidia=True))
+    assert "SELFTEST ok" in stdout
+    assert not warnings, "QML warnings:" + chr(10) + chr(10).join(warnings)
+
+
 def test_default_window_fits_a_768_high_screen():
     """1366x768 is still common, and leaves roughly 690 px of client area
     once the title bar and taskbar are gone. A default window taller than
@@ -1368,6 +1385,43 @@ def test_upscaling_a_4k_video_starts_at_a_size_the_headset_decodes(tmp_path):
     assert upscaled["outputWidth"] == "5760"
 
 
+def test_enabling_upscale_leaves_the_two_controls_agreeing(tmp_path):
+    """The resolution and the factor describe one decision, so they have to
+    agree -- and to agree on a size the panel actually offers.
+
+    **This does not reproduce the bug it was written after, and saying so is
+    the point.** Toggling the switch in a running window showed 7680 in the
+    box beside a readout describing 4096: `adoptDefaultResolution` runs from
+    `onUpscaleChanged` and read the `resolutions` binding, which had not
+    re-evaluated for the new value, so it chose from the list that runs
+    *down* from the source. `--set` applies properties at startup and does
+    not recreate that ordering, so the suite cannot see it -- checked by
+    removing both the fix and the guard, after which this still passed.
+
+    What it does hold is the invariant either fault would have violated
+    afterwards: whatever is chosen, the delivered width is a real entry and
+    the factor lands the pre-pass on one too. That catches a wrong *result*;
+    the live ordering needs a person with the window open.
+    """
+    src = _video_4k(tmp_path)
+    props, _ = _dump(f"inputPath={src}", "upscale=true")
+
+    width = int(props["outputWidth"])
+    scale = float(props["upscaleScale"])
+    assert width == 5760
+    # 3840 -> 5760 is 1.5x. Supersample is on by default and would reach one
+    # size further, so the factor is allowed to be larger -- but it has to be
+    # a factor that *lands on a real size*, not one left over from a list the
+    # handler should never have been reading.
+    landed = round(3840 * scale)
+    choices = [r["width"] for r in
+               options.resolution_choices(3840, 1920, "360", upscaling=True)]
+    assert landed in choices, (
+        f"{scale:.4f}x puts the pre-pass at {landed}, which is not a size "
+        f"the panel offers")
+    assert landed >= width, "the pre-pass cannot land under the delivered size"
+
+
 def test_the_full_size_survives_the_upscale_default(tmp_path):
     """A default, not a restriction. 7680 is still the right master to upload
     and has to stay one click away."""
@@ -2196,7 +2250,7 @@ def test_a_signed_out_topaz_falls_back_to_the_free_one_for_a_photo(tmp_path):
     assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
 
 
-def _every_upscaler(topaz=False, **kw):
+def _every_upscaler(topaz=False, nvidia=False, **kw):
     """A probe result carrying the real registry, in the order it lists.
 
     `_topaz` stands in a single photo model, which is what the machine had
@@ -2212,11 +2266,27 @@ def _every_upscaler(topaz=False, **kw):
         "available": bool(topaz), "offered": True, "needs_login": False,
         "interpolate_offered": False, "interpolators": [],
         "photo_model": {"available": True}, "shader": {"available": True},
+        # Only what is actually here, which is what the probe emits: it
+        # filters on `present`, and a fixture that does not offers models
+        # nobody has. NVIDIA VSR is the one that made this matter -- it is in
+        # the registry on every machine and installed on almost none, so an
+        # unfiltered list handed it the default and the test that caught it
+        # was right to.
+        # A machine, described here rather than whichever one is running the
+        # suite. `present` is asked because that is what the probe filters
+        # on -- but NVIDIA VSR is excluded unless a test asks for it, or
+        # these assertions would say one thing on a developer's box with the
+        # wheel installed and its licence accepted, and another on everyone
+        # else's. That is exactly what happened.
         "models": [{"code": v.code, "short": v.code, "name": v.name,
                     "desc": v.desc, "source": v.kind,
-                    "stills_only": v.stills_only,
-                    "min_scale": 1.0, "max_scale": float(v.scale)}
-                   for v in upscalers.VARIANTS],
+                    "category": v.category, "scale": v.scale,
+                    "cost": v.cost, "option": v.option,
+                    "direction": v.direction,
+                    "min_scale": 1.0,
+                    "max_scale": float(v.max_scale or v.scale)}
+                   for v in upscalers.VARIANTS
+                   if (upscalers.present(v) if v.kind != "nvvsr" else nvidia)],
         "video_default": upscalers.VIDEO_DEFAULT,
         "photo_default": upscalers.PHOTO_DEFAULT,
     }
@@ -2255,13 +2325,66 @@ def test_a_deliberate_upscaler_survives_the_job_changing(tmp_path):
     between a photo and a video must not quietly undo it."""
     from stereo360 import upscalers
 
-    assert upscalers.VIDEO_DEFAULT != upscalers.PHOTO_DEFAULT
+    # Deliberately not the default. The two defaults used to differ and the
+    # test leaned on that; they are now the same model on purpose, so leaning
+    # on it would have made this pass without checking anything. A model
+    # nobody would have picked automatically is what makes a wrongful re-pick
+    # visible.
+    picked = "fsrcnnx8"
+    assert picked != upscalers.VIDEO_DEFAULT, "pick one the default is not"
     props, _ = _dump(_every_upscaler(),
-                     f"upscaleModel={upscalers.VIDEO_DEFAULT}",
+                     f"upscaleModel={picked}",
                      "upscaleModelChosen=true",
                      f"inputPath={_still(tmp_path)}")
     assert props["photoMode"] == "True"
-    assert props["upscaleModel"] == upscalers.VIDEO_DEFAULT
+    assert props["upscaleModel"] == picked
+
+
+def test_a_deliberate_none_survives_the_job_changing(tmp_path):
+    """"None" in the first dropdown is a choice, and the hardest one to keep.
+
+    It is spelt "" -- and "" is also what `defaultUpscaler` answers before
+    the probe lands, with no list to choose from. Treating the two alike in
+    one direction left the box empty on a machine with Topaz installed; in
+    the other it would quietly restore a model someone had turned off. Only
+    `upscaleModelChosen` separates them.
+    """
+    props, _ = _dump(_every_upscaler(),
+                     "upscaleModel=",
+                     "upscaleModelChosen=true",
+                     f"inputPath={_still(tmp_path)}")
+    assert props["photoMode"] == "True"
+    assert props["upscaleModel"] == "", (
+        "a deliberate 'no model' was replaced by a default")
+
+
+def test_nvidia_vsr_is_the_default_once_it_is_ready(tmp_path):
+    """The middle rung of the cascade: Topaz, then NVIDIA VSR, then free.
+
+    It only counts as ready when the wheel is installed *and* its licence
+    accepted -- `present` asks both, so a model that reaches this list is one
+    that can actually run. An RTX card alone is not enough, or the default
+    would be something nobody has downloaded.
+    """
+    props, _ = _dump(_every_upscaler(nvidia=True),
+                     f"inputPath={_still(tmp_path)}")
+    assert props["upscaleModel"] == "nvvsr_ultra"
+
+
+def test_topaz_still_outranks_nvidia_vsr(tmp_path):
+    """Leon's order, and the one the measurements were made against."""
+    props, _ = _dump(_every_upscaler(topaz=True, nvidia=True),
+                     f"inputPath={_still(tmp_path)}")
+    assert props["upscaleModel"] == "amq"
+
+
+def test_the_free_predictor_is_the_last_resort(tmp_path):
+    """With neither of the first two, the best free predictor."""
+    from stereo360 import upscalers
+
+    props, _ = _dump(_every_upscaler(),
+                     f"inputPath={_still(tmp_path)}")
+    assert props["upscaleModel"] == upscalers.FREE_DEFAULT
 
 
 def test_the_upscaler_box_shows_the_model_that_will_run(tmp_path):
@@ -2287,7 +2410,13 @@ def test_the_upscaler_box_shows_the_model_that_will_run(tmp_path):
     props, _ = _dump(*sets, late=late)
     shown, index = _items(*sets, late=late)["upscaleBox"]
 
-    codes = [v.code for v in upscalers.VARIANTS]
+    # The box's own list, which is no longer the probe's. The first dropdown
+    # leads with "None" and drops the resamplers -- those belong to the
+    # second one -- so indexing the registry here would compare a position in
+    # one list against a position in another and call the mismatch a bug.
+    codes = [""] + [v.code for v in upscalers.VARIANTS
+                    if upscalers.present(v)
+                    and v.category != upscalers.RESAMPLER]
     assert shown is True
     assert props["upscaleModel"] == upscalers.PHOTO_DEFAULT
     assert codes[int(index)] == props["upscaleModel"], (

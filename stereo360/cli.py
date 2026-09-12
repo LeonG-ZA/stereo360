@@ -400,6 +400,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--upscale-scale", type=float, default=2.0, metavar="F",
                    help="How much to upscale by (default: 2, which takes 4K "
                         "to 8K)")
+    p.add_argument("--upscale-resampler", default=None, metavar="NAME",
+                   help="Which filter finishes the factor the model does not "
+                        "cover -- a 2x model asked for 4x leaves 2x over. "
+                        "Any libplacebo preset: lanczos, spline36, "
+                        "ewa_lanczos, ewa_lanczossharp, ewa_lanczos4sharpest "
+                        "(default: libplacebo's own spline36). Ignored where "
+                        "the model already covers the whole factor.")
     p.add_argument("--interpolate", nargs="?", const="auto", default=None,
                    metavar="MODEL",
                    help="Raise the frame rate before converting. MODEL is a "
@@ -1012,6 +1019,16 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
     # generator, so it does not invent detail that fails to hold still. See
     # stereo360/fsrcnnx.py.
     use_shader = chosen is not None and chosen.kind == "shader"
+    # A resampler asked for by name, with no model in front of it. It runs
+    # through the same libplacebo pass as a shader -- the only difference is
+    # that there is no `custom_shader_path` -- so it shares that branch
+    # rather than growing a third one.
+    use_resampler = chosen is not None and chosen.kind == "resampler"
+    # NVIDIA's wheel, which is neither a shader nor an onnx graph and has its
+    # own runner. Without this branch the name falls through to the Topaz
+    # lookup and comes back as "No Topaz upscaling model called ..." -- true,
+    # and about the wrong thing entirely.
+    use_nvvsr = chosen is not None and chosen.kind == "nvvsr"
     #: The file this run will load: the registry's, unless one was named.
     chosen_path = (args.fsrcnnx_shader or args.esrgan_model
                    or (chosen.path if chosen else None))
@@ -1026,28 +1043,38 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
                 "--upscale fsrcnnx needs libplacebo in ffmpeg and a Vulkan "
                 "device, and this machine has one or neither. Everything "
                 "else works without it.")
-    elif use_esrgan:
-        # Only the models measured as unsteady are refused for video,
-        # not every model that happens to run through onnxruntime. SPAN
-        # passes a small input change straight through -- 0.99x, steadier
-        # than the shader -- while Siax turns a one-level wobble into
-        # four, and detail re-invented differently each frame is what a
-        # headset shows as crawling.
-        if chosen.stills_only and not is_image:
-            # The measurement for *this* model. It used to say "4.2 times"
-            # whoever was refused, which is Siax's figure and nobody else's:
-            # ESRGAN 2x uni is 1.82x and LSDIR has none. A refusal reads as
-            # an arbitrary rule without a number and as a false one with the
-            # wrong number, so it carries the model's own or says nothing.
-            amp = _up.AMPLIFY.get(chosen.code)
-            how = (f"it amplifies a small frame-to-frame change "
-                   f"{amp:.1f} times, and " if amp else
-                   "it invents detail to get its sharpness, and ")
+    elif use_resampler:
+        # No file to find -- a resampler is a preset rather than a download --
+        # but it runs through the same libplacebo pass, so it needs the same
+        # ffmpeg.
+        if not _fs.usable():
             raise SystemExit(
-                f"--upscale {chosen.code} is for photos. On video {how}"
-                f"invented detail that will not hold still reads as "
-                f"crawling in a headset. For video use "
-                f"--upscale {_up.VIDEO_DEFAULT}, or --upscale span.")
+                f"--upscale {chosen.code} needs libplacebo in ffmpeg and a "
+                "Vulkan device, and this machine has one or neither.")
+    elif use_nvvsr:
+        from . import nvvsr as _nv
+
+        why = _nv.why_not()
+        if why:
+            raise SystemExit(f"--upscale {chosen.code}: {why}")
+        if not _nv.installed():
+            raise SystemExit(
+                "NVIDIA VSR is not installed (about 490 MB). It comes from "
+                "NVIDIA under their licence, so it is downloaded from the "
+                "interface, which shows the agreement to accept.")
+        if not _nv.consented():
+            raise SystemExit(
+                "NVIDIA VSR is installed but its licence has not been "
+                "accepted. Open the interface and read it there; it is "
+                "asked once.")
+    elif use_esrgan:
+        # No model is refused for video any more. Three used to be, on an
+        # amplification figure -- and watching 120 frames of each showed all
+        # of them steady, while the *untouched* 8K flickered 1.20x the
+        # Lanczos floor itself. The floor was never the target, so a number
+        # measured against it could not say what it was being asked to say.
+        # The figures are kept in `upscalers.AMPLIFY` as measurement; what
+        # they no longer do is decide.
         if not _es.available(chosen_path):
             raise SystemExit("\n".join((
                 f"No model at {_es.model_path(chosen_path)}.",
@@ -1061,14 +1088,14 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
             "without any of them.")
 
     up = None
-    if (args.upscale and not (use_esrgan or use_shader)) \
+    if (args.upscale and not (use_esrgan or use_shader or use_resampler or use_nvvsr)) \
             or (wanted and not use_rife):
         auth = _u.auth_state(install)
         if auth == "login":
             raise SystemExit(
                 "Topaz Video AI is installed but not signed in. Please open "
                 "it and sign in, then run this again.")
-    if args.upscale and not (use_esrgan or use_shader):
+    if args.upscale and not (use_esrgan or use_shader or use_resampler or use_nvvsr):
         up = _u.resolve(install, args.upscale, "up")
         if up is None:
             raise SystemExit(f"No Topaz upscaling model called {args.upscale!r}. "
@@ -1113,22 +1140,37 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
         except OSError:
             pass
 
-    if use_shader:
+    if use_shader or use_resampler:
         scale = args.upscale_scale
+        # A resampler asked for by name has no shader and carries its own
+        # libplacebo preset; a shader may be handed one to finish whatever
+        # factor it does not cover itself.
+        if use_resampler:
+            shader_arg = _fs.NO_SHADER
+            resampler = chosen.option or chosen.code
+        else:
+            shader_arg = chosen_path
+            resampler = args.upscale_resampler
         skip, end, drop, produced = _prepass_window(
             args.start_frame, args.max_frames, 1.0)
         try:
             if is_image:
+                # The still gets its format too, and for the same reason
+                # the video does: the pre-pass converts before libplacebo
+                # sees the frame, and a 4:4:4 photo is the one source that
+                # actually has chroma to lose there.
                 _fs.run(src, working(".png"), width=info.width,
                         height=info.height, scale=scale,
-                        shader=chosen_path, total=1,
+                        shader=shader_arg, resampler=resampler, total=1,
+                        pix_fmt=info.pix_fmt,
                         name=chosen.name if chosen else _fs.NAME,
                         code=chosen.code if chosen else _fs.CODE,
                         reporter=reporter, cancel=cancel)
             else:
                 _fs.run(src, working(".mkv"), width=info.width,
                         height=info.height, scale=scale,
-                        shader=chosen_path, pix_fmt=info.pix_fmt,
+                        shader=shader_arg, resampler=resampler,
+                        pix_fmt=info.pix_fmt,
                         total=produced or (info.frame_count
                                            if info is not None else None),
                         trim_from=skip, frames=args.max_frames,
@@ -1139,6 +1181,34 @@ def _topaz_prepass(args, reporter, cancel, pipeline, is_image, made):
             raise SystemExit(str(e))
         # The pass wrote exactly the range asked for, so the renderer reads
         # what it was given from the beginning.
+        if args.max_frames is not None or args.start_frame:
+            args.start_frame = 0
+        src = made[-1]
+
+    if use_nvvsr:
+        from . import nvvsr as _nv
+
+        # The same pre-pass shape as the others: frames in, frames out, the
+        # range trimmed before the model sees it. A photo is one frame and
+        # goes through the identical path -- the runner does not know or care
+        # how many there are, so there is no still-specific branch to keep in
+        # step with the video one.
+        skip, end, drop, produced = _prepass_window(
+            args.start_frame, args.max_frames, 1.0)
+        try:
+            _nv.run(src, working(".png" if is_image else ".mkv"),
+                    width=info.width, height=info.height,
+                    scale=args.upscale_scale, level=chosen.option,
+                    pix_fmt=None if is_image else info.pix_fmt,
+                    total=1 if is_image else (
+                        produced or (info.frame_count
+                                     if info is not None else None)),
+                    trim_from=0 if is_image else skip,
+                    frames=1 if is_image else args.max_frames,
+                    name=chosen.name, code=chosen.code,
+                    reporter=reporter, cancel=cancel)
+        except _nv.NvvsrError as e:
+            raise SystemExit(str(e))
         if args.max_frames is not None or args.start_frame:
             args.start_frame = 0
         src = made[-1]
@@ -1570,8 +1640,15 @@ def main(argv=None) -> int:
                 found.setdefault("models", []).append(
                     {"code": v.code, "short": v.code, "name": v.name,
                      "desc": v.desc, "source": v.kind,
-                     "stills_only": v.stills_only,
-                     "min_scale": 1.0, "max_scale": float(v.scale)})
+                     # What it does about detail that is not in the source,
+                     # which is what the two dropdowns are built around --
+                     # and `scale` 0 for the ones that cover any factor by
+                     # themselves and so need no second stage.
+                     "category": v.category, "scale": v.scale,
+                     "cost": v.cost, "option": v.option,
+                     "direction": v.direction,
+                     "min_scale": 1.0,
+                     "max_scale": float(v.max_scale or v.scale)})
             # Kept for the two panels that ask "can this machine shade at
             # all" and "is there a photo model", which is a different
             # question from which variants are installed.
