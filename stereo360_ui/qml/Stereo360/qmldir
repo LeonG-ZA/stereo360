@@ -3,3 +3,4 @@ singleton Theme 1.0 Theme.qml
 Card 1.0 Card.qml
 Row2 1.0 Row2.qml
 DirectionPicker 1.0 DirectionPicker.qml
+LicenceDialog 1.0 LicenceDialog.qml

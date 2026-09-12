@@ -106,34 +106,37 @@ def test_a_scale_of_zero_is_refused():
 
 
 @needs_model
-def test_video_is_refused_with_the_reason(tmp_path):
-    """The refusal has to carry the measurement, because "photos only" on its
-    own reads as an arbitrary limitation rather than a finding.
+def test_video_is_no_longer_refused(tmp_path):
+    """Siax on video used to exit non-zero. It now renders.
 
-    Asked of the stills-only model by name rather than of "the ONNX one".
-    Since SPAN arrived, running through onnxruntime no longer implies unfit
-    for video -- SPAN passes a small frame-to-frame change through at 0.99x,
-    steadier than the shader -- so the refusal keys on the measurement and
-    this test has to name a model the measurement actually refuses."""
+    The bar came from an amplification figure read against the Lanczos
+    floor -- Siax turns a one-level wobble into four. What that missed is
+    that the floor is not the target: watched over 120 frames, the
+    *untouched* 8K itself changed 1.20x as much as Lanczos did, from sensor
+    noise and wind. A model sitting on the floor is too smooth rather than
+    admirably steady, so a number measured against it was answering a
+    different question.
+
+    Every model in the table was then watched at 1:1 over 120 frames and
+    none of them crawled. The figures stay in AMPLIFY as measurement; the
+    choice went to whoever is looking at the footage.
+    """
     src = tmp_path / "clip.mp4"
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
          "-i", "testsrc2=size=256x128:rate=30", "-frames:v", "2", str(src)],
         check=True, capture_output=True)
+    out = tmp_path / "out.mp4"
 
     done = subprocess.run(
         [sys.executable, "-m", "stereo360", str(src),
-         "-o", str(tmp_path / "out.mp4"), "--upscale", "siax"],
+         "-o", str(out), "--upscale", "siax"],
         capture_output=True, text=True, timeout=300, cwd=str(ROOT))
 
-    assert done.returncode != 0
     said = done.stdout + done.stderr
-    assert "photos" in said
-    # The number, not a particular number: the refusal carries whatever was
-    # measured for the model being refused, and Siax's figure is how far it
-    # amplifies a small change rather than the old percentage-of-movement.
-    assert "4.2 times" in said
-    assert "fsrcnnx16" in said, "and it has to say what to use instead"
+    assert done.returncode == 0, said
+    assert out.exists() and out.stat().st_size > 0
+    assert "photos" not in said, "no model is for photos only any more"
 
 
 class _LumaSess:

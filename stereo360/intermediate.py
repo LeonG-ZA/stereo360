@@ -41,7 +41,7 @@ import shutil
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
-from .ffmpeg_io import NO_CONSOLE_WINDOW
+from .ffmpeg_io import NO_CONSOLE_WINDOW, is_image_path
 
 #: Bytes per pixel a lossless intermediate takes, from the table above:
 #: 10 MB for a 29.5 Mpx frame. Only used to guess a file size before writing
@@ -253,9 +253,30 @@ def encoder_args(ffmpeg: str = "ffmpeg", *, pix_fmt: Optional[str] = None,
             "ffv1, lossless, yuv420p")
 
 
+#: A still's working file is written as the image its name promises.
+#:
+#: It did not used to be. Every destination went through `encoder_args`, so a
+#: pre-pass on a photo wrote a lossless HEVC bitstream into a file called
+#: `.png` -- `ffprobe` said `codec_name=hevc` -- and nothing downstream
+#: complained, because ffmpeg reads by content and the next stage decodes to
+#: rgb24 regardless. The name still has to be right: `cli` re-derives whether
+#: it is holding a photo or a video from the working file's own extension
+#: after a pre-pass, so the suffix is load-bearing and a video in a `.png` was
+#: one rename away from routing a still down the video path.
+#:
+#: No pixel format is named. The png encoder negotiates one from the frames it
+#: is given -- rgb24 for 8-bit, rgb48 above it -- and RGB carries full
+#: chroma, so this keeps everything the 4:4:4 pre-pass preserves. `-update`
+#: is what says "one file, not a numbered sequence"; without it ffmpeg warns
+#: about a missing `%03d` pattern.
+_STILL_ARGS = ["-frames:v", "1", "-update", "1"]
+
+
 def choose(ffmpeg: str = "ffmpeg", *, pix_fmt: Optional[str] = None,
            width: int = 0, height: int = 0, frames: Optional[int] = None,
            where: str = ".") -> Tuple[List[str], str]:
     """Everything above in one call: what to encode a working file with."""
+    if is_image_path(where):
+        return (list(_STILL_ARGS), "one still, written as itself")
     return encoder_args(ffmpeg, pix_fmt=pix_fmt,
                         lossless=wants_lossless(width, height, frames, where))

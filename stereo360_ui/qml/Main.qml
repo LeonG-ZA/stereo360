@@ -92,6 +92,9 @@ ApplicationWindow {
     // source size and resize the finished eyes. Off renders at the delivered
     // size instead, which is faster and coarser -- see the hint on the row.
     property bool supersample: true
+    // With a pre-pass in front, this decides how far past the delivered size
+    // to upscale, so the scale has to be recomputed when it moves.
+    onSupersampleChanged: adoptUpscaleScale()
     property bool upscale: false
     onUpscaleChanged: adoptDefaultResolution()
     property string upscaleModel: "amq"
@@ -100,8 +103,18 @@ ApplicationWindow {
     // for, so it has to be revisited when that kind changes; a deliberate
     // pick has to survive.
     property bool upscaleModelChosen: false
+    // Derived from the chosen resolution, not typed in -- see
+    // `adoptUpscaleScale`. It stays a plain property because the command line
+    // and the tests both set it directly, and because the pre-pass is what
+    // consumes it.
     property real upscaleScale: 2.0
-    onUpscaleScaleChanged: adoptDefaultResolution()
+    // The second stage. A model with a fixed factor rarely lands on the one
+    // that was asked for, and what covers the difference used to be chosen
+    // silently -- so a "2x model" at 4x was quietly handing half the job to
+    // spline36 without saying so. Now it is a control, and "" means the
+    // model covered the whole factor by itself.
+    property string upscaleResampler: ""
+    property bool upscaleResamplerChosen: false
     property bool interpolate: false
     property string interpolateModel: "chr"
     property real interpolateFps: 0
@@ -246,9 +259,17 @@ ApplicationWindow {
             "inpaint": inpaint, "chunkSize": chunkSize,
             "chunkOverlap": chunkOverlap, "temporalFill": temporalFill,
             "startFrame": startFrame, "maxFrames": maxFrames,
-            "upscale": upscale && canUpscale
-                       && upscalerUsable(upscaleModel),
-            "upscaleModel": upscaleModel, "upscaleScale": upscaleScale,
+            "upscale": upscale && canUpscale && upscaleSelectionUsable(),
+            // "" in the first dropdown is a choice, not an absence: the
+            // resampler then does the whole factor, which is what won every
+            // rung where the source was already sharpened. So the effective
+            // upscaler is the model where there is one and the resampler
+            // where there is not -- both are rows in the same table, so the
+            // core takes either by code.
+            "upscaleModel": upscaleModel !== "" ? upscaleModel
+                                                : upscaleResampler,
+            "upscaleResampler": upscaleModel !== "" ? upscaleResampler : "",
+            "upscaleScale": upscaleScale,
             "interpolate": interpolate && canInterpolate
                            && interpolatorUsable(interpolateModel),
             "interpolateModel": interpolateModel,
@@ -283,7 +304,10 @@ ApplicationWindow {
         outputWidth = 0
     }
 
-    Component.onCompleted: app.probeBackends()
+    Component.onCompleted: {
+        app.probeBackends()
+        refreshNvvsr()
+    }
 
     // Start a big 360 source at a size that plays, rather than at full size.
     // Resolved to a real number the moment the probe lands, never left as a
@@ -301,17 +325,105 @@ ApplicationWindow {
     function adoptDefaultResolution() {
         if (!app.sourceInfo || !app.sourceInfo.width)
             return
-        // Reads `upscale` and `upscaleScale` directly for the same reason the
-        // rest of this function reads `app`: it runs from property-changed
-        // handlers, and the bindings above may not have re-evaluated yet.
-        var mul = (upscale && upscaleScale > 0) ? upscaleScale : 1
-        var w = app.defaultOutputWidth(Math.round(app.sourceInfo.width * mul),
-                                       Math.round(app.sourceInfo.height * mul),
+        // Upscaling inverts which of these is the question. Off, the source
+        // decides what can be delivered and this suggests a size under it.
+        // On, the *delivered size* is the question and how far to upscale is
+        // the answer, so the list runs above the source instead.
+        if (upscale) {
+            // Asked of `app` rather than read from the `resolutions` binding,
+            // for the reason given at the top of this function and ignored
+            // once already: this runs from `onUpscaleChanged`, and the
+            // binding has not re-evaluated for the new value yet. Reading it
+            // got the *downward* list, chose 3840 from it, and left a size
+            // that is not in the upward list at all -- so the box fell back
+            // to its first entry and showed 7680 while the readout said
+            // "1.07x, 3840 to 4096". Two wrong numbers, one stale read.
+            var l = app.resolutionChoices(app.sourceInfo.width,
+                                          app.sourceInfo.height,
+                                          outputMode, true)
+            if (l.length > 0) {
+                // The largest that actually decodes, not the smallest. A 4K
+                // source upscaled can reach 7680x7680, which no HEVC or H.264
+                // level plays -- black on a Quest 3 -- so the default is the
+                // biggest entry under that ceiling and 5760 is what a 4K
+                // source lands on. Picking the smallest instead would ask
+                // least of the model and hand back the least resolution,
+                // which is not what someone switching upscaling on wants.
+                var pick = preferredWidth(l)
+                if (outputWidth === 0 || outputWidth === suggestedOutputWidth
+                        || outputWidth < app.sourceInfo.width)
+                    outputWidth = pick
+                suggestedOutputWidth = pick
+            }
+            adoptUpscaleScale()
+            return
+        }
+        var w = app.defaultOutputWidth(app.sourceInfo.width,
+                                       app.sourceInfo.height,
                                        outputMode,
                                        app.isImage(inputPath))
         if (outputWidth === 0 || outputWidth === suggestedOutputWidth)
             outputWidth = w
         suggestedOutputWidth = w
+    }
+
+    // How far the pre-pass has to enlarge the source to land on the size that
+    // was asked for. Derived rather than chosen: a multiplier and a delivered
+    // size in the same panel ask the same question in two units, and nothing
+    // stops the two answers disagreeing.
+    //
+    // Supersample is what claims the headroom. It already means "render above
+    // the delivery size and resize down", so with a pre-pass in front it
+    // reaches one standard size further and lets the downsample do the rest --
+    // which on the matched pair measured came out 1.5 dB ahead of upscaling
+    // straight to the delivered size. Off, the pre-pass lands exactly on the
+    // delivery and nothing is computed to be thrown away.
+    function upscaleTargetWidth() {
+        var want = outputWidth > 0 ? outputWidth : sourceWidth
+        if (!supersample || sourceWidth <= 0)
+            return want
+        var ceiling = sourceWidth * 4          // what --upscale-scale accepts
+        var best = want
+        var l = app.resolutionChoices(sourceWidth,
+                                      app.sourceInfo ? app.sourceInfo.height : 0,
+                                      outputMode, true)
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].width > want && l[i].width <= ceiling
+                    && (best === want || l[i].width < best))
+                best = l[i].width
+        return best
+    }
+
+    function adoptUpscaleScale() {
+        if (!upscale || sourceWidth <= 0)
+            return
+        var target = upscaleTargetWidth()
+        if (target > 0)
+            upscaleScale = target / sourceWidth
+    }
+
+    // Keep the second stage consistent with the first.
+    //
+    // Called whenever the model or the factor moves, because the residual is
+    // computed from both: picking a 4x model after asking for 4x should empty
+    // this control, and dragging the factor to 4x after picking a 2x model
+    // should fill it. A hand-picked resampler survives, the same rule the
+    // resolution box follows above -- but only while it still fits, since a
+    // change of direction makes the old choice meaningless rather than merely
+    // unfashionable.
+    function adoptDefaultResampler() {
+        var want = defaultResampler()
+        if (!upscaleResamplerChosen) {
+            upscaleResampler = want
+            return
+        }
+        // A deliberate pick is kept unless it is no longer on offer: an
+        // upscaling filter cannot finish a downscale, and vice versa.
+        var l = resamplerModels()
+        if (want === "" || topazIndex(l, upscaleResampler) < 0) {
+            upscaleResampler = want
+            upscaleResamplerChosen = false
+        }
     }
 
     // The CLI uses more tiles for a photo than for a video, so the spin box
@@ -346,31 +458,141 @@ ApplicationWindow {
             app.probeUpscalers(sourceWidth, app.sourceInfo.fps || 0)
     }
 
+    // The line under a model's name. Says what it does about detail that is
+    // not in the source, and what factor it produces -- the two things the
+    // arithmetic below depends on, so they belong where the choice is made.
     function upscalerNote(entry, usable) {
         if (entry.source === "topaz")
             return usable ? "Topaz" : "Topaz — signed out"
-        if (entry.stills_only === true && !usable)
-            return "photos only"
-        return ""
+        var bits = []
+        if (entry.category === "predictor")
+            bits.push("Predictor")
+        else if (entry.category === "generator")
+            bits.push("Generator")
+        else if (entry.category === "resampler")
+            bits.push("Resampler")
+        if (entry.scale === 0)
+            bits.push("any factor")
+        else if (entry.scale > 0)
+            bits.push(entry.scale + "×")
+        if (entry.short === win.fastestIn(entry.category))
+            bits.push("fastest")
+        return bits.join(" · ")
+    }
+
+    // The cheapest usable entry of a category. Relative cost travels between
+    // machines where a millisecond count does not -- architecture fixes the
+    // ordering and hardware only scales it -- so this marker is safe to show
+    // without measuring anything here.
+    function fastestIn(category) {
+        var l = topaz.models
+        if (!l || !category)
+            return ""
+        var best = "", bestCost = -1
+        for (var i = 0; i < l.length; ++i) {
+            if (l[i].category !== category || !upscalerUsable(l[i].short))
+                continue
+            var c = l[i].cost === undefined ? 1.0 : l[i].cost
+            if (bestCost < 0 || c < bestCost) {
+                bestCost = c
+                best = l[i].short
+            }
+        }
+        return best
+    }
+
+    // Everything that can take the first stage: the models, never the
+    // resamplers, which are the second dropdown's business.
+    function firstStageModels() {
+        var l = topaz.models, out = []
+        if (!l)
+            return out
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].category !== "resampler")
+                out.push(l[i])
+        return out
+    }
+
+    // The second dropdown's contents depend on which way the residual goes.
+    // Coming back down is a different filter set -- an area filter averages
+    // what it discards, where a sharpening upscaler run backwards aliases --
+    // so the two are never offered together.
+    function resamplerModels() {
+        var l = topaz.models, out = []
+        if (!l)
+            return out
+        var down = residualFactor() < 0.999
+        for (var i = 0; i < l.length; ++i) {
+            if (l[i].category !== "resampler")
+                continue
+            var d = l[i].direction === undefined ? "up" : l[i].direction
+            if ((d === "down") === down)
+                out.push(l[i])
+        }
+        return out
+    }
+
+    // What is left for the second stage once the first has done its part.
+    // 1 means nothing is; below 1 means the model overshot and the remainder
+    // is a downscale, which is a different filter set.
+    function residualFactor() {
+        var want = upscaleScale
+        if (want <= 0)
+            return 1
+        if (upscaleModel === "")
+            return want                     // no model: the resampler does all
+        var l = topaz.models
+        var i = topazIndex(l, upscaleModel)
+        if (i < 0)
+            return 1
+        var native = l[i].scale
+        if (native === undefined || native === 0)
+            return 1                        // covers whatever it is asked for
+        return want / native
+    }
+
+    function residualNote() {
+        var r = residualFactor()
+        if (Math.abs(r - 1) < 0.001)
+            return ""
+        if (upscaleModel === "")
+            return "Doing all " + win.factorText(r) + " of it."
+        if (r > 1)
+            return "The model doubles; a resampler covers the remaining "
+                    + win.factorText(r) + "."
+        return "The model overshoots, so this scales back down by "
+                + win.factorText(r) + "."
+    }
+
+    function factorText(f) {
+        return (Math.round(f * 100) / 100) + "×"
     }
 
     // The photo model is for stills: on video it amplifies a small change
     // than the scene has, which reads as crawling. Left in the list and
     // greyed rather than hidden, so the reason can be shown.
+    // Whether the pair of dropdowns names something that can actually run.
+    // With no model the resampler carries it, and a resampler is a preset in
+    // an ffmpeg this project already requires, so that case is always usable.
+    function upscaleSelectionUsable() {
+        if (upscaleModel === "")
+            return upscaleResampler !== ""
+        return upscalerUsable(upscaleModel)
+    }
+
     function upscalerUsable(code) {
         var l = topaz.models
         if (!l)
             return false
         for (var i = 0; i < l.length; ++i)
             if (l[i].short === code) {
-                // `stills_only` is the probe's own judgement, carried per
-                // model. This used to test `source` against the name of the
-                // one photo model there was, which stopped meaning anything
-                // when `source` became the runtime -- and let a stills-only
-                // model be picked for a video, which is the one thing the
-                // test existed to prevent.
-                if (l[i].stills_only === true)
-                    return photoMode
+                // Nothing is barred by the kind of job any more. Three
+                // models used to be refused for video on an amplification
+                // figure read against the Lanczos floor -- and the floor was
+                // never the target: the untouched 8K itself changed 1.20x as
+                // much as Lanczos did. Watched over 120 frames, every model
+                // here held still. What is left is whether the machine can
+                // actually run it.
                 if (l[i].source !== "topaz")
                     return true             // the free ones need no sign-in
                 return topaz.needs_login !== true
@@ -383,14 +605,21 @@ ApplicationWindow {
         if (!l)
             return ""
         // Artemis Medium Quality where Topaz can be used -- it is what the
-        // measurements were made against -- and otherwise whichever default
-        // the core names for this kind of job. The two are not the same
-        // model and must not be: a still is judged on one frame, so the
-        // sharpest wins, while a video is judged on how little the invented
-        // detail moves between frames, and the model that wins the first
-        // test loses the second by a distance.
-        var pick = photoMode ? topaz.photo_default : topaz.video_default
-        var order = ["amq"]
+        // measurements were made against -- then NVIDIA VSR where its wheel
+        // is present and its licence accepted, then the best free predictor.
+        //
+        // The NVIDIA rung asks the probe rather than asking for a GPU: an
+        // RTX card with nothing downloaded would otherwise be handed a
+        // default it cannot run. `present()` on the core side answers the
+        // whole question, so a model that reaches this list is one that
+        // works.
+        //
+        // The job type no longer changes the answer. That split assumed a
+        // still and a video want different models; what actually decides is
+        // whether the source is degraded or pristine, which the job type
+        // does not say.
+        var pick = topaz.video_default
+        var order = ["amq", "nvvsr_ultra"]
         if (pick)
             order.push(pick)
         for (var p = 0; p < order.length; ++p)
@@ -398,8 +627,37 @@ ApplicationWindow {
                 if (l[i].short === order[p] && upscalerUsable(order[p]))
                     return order[p]
         for (i = 0; i < l.length; ++i)
-            if (upscalerUsable(l[i].short))
+            if (l[i].category !== "resampler"
+                    && upscalerUsable(l[i].short))
                 return l[i].short
+        return ""
+    }
+
+    // The second stage, chosen for the residual the first one leaves.
+    //
+    // "" when the model covered the whole factor. Otherwise the sharpest
+    // resampler on the way up, because that is the case where the choice
+    // actually matters -- with no model in front of it the resampler is
+    // doing all the work, and the five differed by 0.37 dB at 2x. After a
+    // model they differ by 0.02 to 0.08 dB, which is nothing, so the same
+    // default serves both without argument.
+    function defaultResampler() {
+        var r = residualFactor()
+        if (Math.abs(r - 1) < 0.001)
+            return ""
+        // Going down is a different filter set. libplacebo takes it on
+        // `downscaler` and the onnx path uses INTER_AREA; a sharpening
+        // upscaler has no meaning here.
+        if (r < 1)
+            return "area"
+        var want = ["ewa_lanczos4sharpest", "lanczos", "spline36"]
+        var l = topaz.models
+        if (!l)
+            return ""                       // before the probe lands
+        for (var w = 0; w < want.length; ++w)
+            for (var i = 0; i < l.length; ++i)
+                if (l[i].short === want[w])
+                    return want[w]
         return ""
     }
 
@@ -441,8 +699,66 @@ ApplicationWindow {
     onTopazChanged: {
         if (!interpolatorUsable(interpolateModel))
             interpolateModel = defaultInterpolator()
-        if (!upscalerUsable(upscaleModel))
+        // "" means two things and only one of them is a decision. Someone
+        // who picked "None" wants no model and must keep it; "" also happens
+        // before the probe lands, when `defaultUpscaler` has no list to
+        // choose from and answers with nothing. `upscaleModelChosen` is what
+        // separates them -- without it the first case swallowed the second
+        // and the box sat empty on a machine with Topaz installed.
+        if (!deliberatelyNoModel() && !upscalerUsable(upscaleModel))
             upscaleModel = defaultUpscaler()
+        adoptDefaultResampler()
+    }
+
+    // Whether the empty first dropdown is an answer rather than an absence.
+    function deliberatelyNoModel() {
+        return upscaleModel === "" && upscaleModelChosen
+    }
+
+    // ---- NVIDIA VSR -------------------------------------------------------
+    //
+    // Held here rather than read from `app` at every use, because asking runs
+    // `nvidia-smi` and reads two PDFs. Refreshed when the state can have
+    // moved: at startup, after the wheel arrives, and after the licence is
+    // answered.
+    property var nvvsr: ({})
+    function refreshNvvsr() { nvvsr = app.nvvsrStatus() }
+    // Set while a download this window started is in flight, so the licence
+    // is put up the moment the wheel lands rather than waiting for the first
+    // render. Someone who has just spent 490 MB is the right person to ask,
+    // and the terms only become readable at that point -- they are inside
+    // the wheel.
+    property bool nvvsrAsking: false
+    Connections {
+        target: app
+        function onNvvsrChanged() {
+            win.refreshNvvsr()
+            if (win.nvvsrAsking && win.nvvsrAction === "licence") {
+                win.nvvsrAsking = false
+                win.showNvidiaLicence()
+            } else if (win.nvvsrAction !== "licence") {
+                win.nvvsrAsking = false   // it failed, or it is already ours
+            }
+        }
+    }
+
+    // Show the terms. Refuses rather than improvises when they cannot be
+    // read: an empty string leaves the dialog's Accept disabled and says so,
+    // which is the only honest thing to do with someone else's licence.
+    function showNvidiaLicence() {
+        nvidiaLicence.text = app.nvvsrAgreement()
+        nvidiaLicence.open()
+    }
+
+    // What the row offers, which is three different things.
+    readonly property string nvvsrAction: {
+        if (!nvvsr.supported)
+            return ""                       // not this machine; why_not says so
+        if (!nvvsr.installed)
+            return "download"
+        if (!nvvsr.accepted)
+            return "licence"
+        return ""                           // ready, and in the dropdown
     }
 
     // A photo and a video are offered different upscalers, so the choice has
@@ -453,8 +769,10 @@ ApplicationWindow {
     // input, the probe lands while this is still a video, and the video
     // default then stayed put when a photo was opened.
     onPhotoModeChanged: {
-        if (!upscaleModelChosen || !upscalerUsable(upscaleModel))
+        if (!upscaleModelChosen
+                || (!deliberatelyNoModel() && !upscalerUsable(upscaleModel)))
             upscaleModel = defaultUpscaler()
+        adoptDefaultResampler()
     }
 
     function fpsIndex(fps) {
@@ -496,7 +814,12 @@ ApplicationWindow {
             app.requestThumbnail(inputPath, photo ? 0 : previewFrame.value)
     }
 
-    onOutputWidthChanged: refreshEncoders()
+    onOutputWidthChanged: {
+        refreshEncoders()
+        // The delivered size is the question now; how far to upscale is the
+        // answer, and it follows from here rather than being set beside it.
+        adoptUpscaleScale()
+    }
 
     onOutputModeChanged: {
         // The cap only bites in 360: the same source is 7680x7680 there and
@@ -566,10 +889,19 @@ ApplicationWindow {
            : app.sourceInfo.height)
         : 0
 
+    // Built from the *source*, not from the upscaled size, when a pre-pass is
+    // running: the list is what to deliver, and how far to upscale follows
+    // from the choice. Reading it from `effectiveWidth` -- which is itself
+    // derived from the scale -- would close a loop through the control that
+    // sets the scale.
     readonly property var resolutions:
-        effectiveWidth > 0
-        ? app.resolutionChoices(effectiveWidth, effectiveHeight, outputMode)
-        : []
+        sourceWidth > 0 && upscale
+        ? app.resolutionChoices(sourceWidth,
+                                app.sourceInfo ? app.sourceInfo.height : 0,
+                                outputMode, true)
+        : (effectiveWidth > 0
+           ? app.resolutionChoices(effectiveWidth, effectiveHeight, outputMode)
+           : [])
 
     readonly property var outputSize:
         effectiveWidth > 0
@@ -645,9 +977,15 @@ ApplicationWindow {
             out.push({
                 width: r.width,
                 text: r.label + (r.native ? "  ·  full size" : ""),
-                sub: r.megapixels + " MP — "
-                     + (r.fits ? "plays on a headset"
-                               : "past the 35.6 MP decode limit; upload only")
+                // The same limit, and the same exception: a photo is
+                // decoded as an image, so telling its reader that 7680 is
+                // "upload only" would be talking about a codec that never
+                // runs on it.
+                sub: r.megapixels + " MP"
+                     + (photoMode ? ""
+                        : r.fits ? " — plays on a headset"
+                                 : " — past the 35.6 MP decode limit; "
+                                   + "upload only")
             })
         }
         return out
@@ -658,6 +996,55 @@ ApplicationWindow {
             if (resolutions[i].width === want)
                 return i
         return 0
+    }
+
+    // A width the list does not contain shows as entry 0 by the rule above,
+    // so the box says one size while the render uses another -- and says it
+    // confidently, which is worse than saying nothing. That is how 7680
+    // appeared beside a readout describing 4096. Snapped back whenever the
+    // list changes under it, which is what turning upscaling on does.
+    onResolutionsChanged: reconcileOutputWidth()
+    function reconcileOutputWidth() {
+        var l = resolutions
+        if (l.length === 0)
+            return
+        var want = outputWidth === 0 ? sourceWidth : outputWidth
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].width === want)
+                return
+        // The same rule the default uses, not `l[0]`. This can fire while
+        // `adoptDefaultResolution` is still mid-flight -- the list re-
+        // evaluates the moment `upscale` changes, before the width has been
+        // chosen -- and falling back to the first entry then picked 7680,
+        // the one size a headset will not decode.
+        for (var j = 0; j < l.length; ++j)
+            if (l[j].width === suggestedOutputWidth) {
+                outputWidth = suggestedOutputWidth
+                return
+            }
+        outputWidth = preferredWidth(l)
+    }
+
+    // The largest entry that a decoder will actually play, or the smallest
+    // if none of them will. 7680x7680 is 59 MP against the 35.7 MP ceiling,
+    // so a 4K source upscaling lands on 5760 rather than on the top of the
+    // list.
+    //
+    // A photo takes the top of the list instead, because that ceiling is the
+    // *video* decoder's and a still never reaches one: a 59 MP stereo JPEG
+    // displays fine on a Quest 3. `defaultOutputWidth` has always known this
+    // and returns 0 for a photo; the upscaling path reached for `fits`
+    // directly and so re-imposed a limit that had already been lifted,
+    // capping an upscaled photo at 5760 for no reason.
+    function preferredWidth(l) {
+        if (!l || l.length === 0)
+            return 0
+        if (photoMode)
+            return l[0].width              // largest first
+        for (var i = 0; i < l.length; ++i)
+            if (l[i].fits === true)
+                return l[i].width
+        return l[l.length - 1].width
     }
 
     function encoderEntry(name) {
@@ -842,6 +1229,25 @@ ApplicationWindow {
             win.inputPath = app.toLocalPath(selectedFile.toString())
             win.adoptSuggestedOutput(selectedFile.toString())
         }
+    }
+
+    // NVIDIA's terms, shown once before their software is first used.
+    //
+    // After the download rather than before it, because the agreement is
+    // inside the wheel -- and NVIDIA's web page is not the same document, so
+    // presenting that would ask someone to accept text other than the terms
+    // they are bound by. It also matches the agreement, which binds on use
+    // rather than on acquisition.
+    LicenceDialog {
+        id: nvidiaLicence
+        vendor: "NVIDIA"
+        product: "NVIDIA VSR"
+        moreInfo: win.nvvsr.agreement_url || ""
+        onAgreed: function (agreementText) {
+            app.nvvsrAccept(agreementText)
+            win.refreshNvvsr()
+        }
+        onRejected: win.refreshNvvsr()
     }
 
     FileDialog {
@@ -1135,7 +1541,14 @@ ApplicationWindow {
                             Row2 {
                                 objectName: "supersampleRow"
                                 label: "Supersample"
-                                visible: win.outputWidth !== 0
+                                // Never for a photo: a still renders one
+                                // frame, so trading its geometry for speed
+                                // buys seconds and costs the deliverable.
+                                // The CLI refuses the flag outright, so
+                                // offering the switch here was offering a
+                                // setting that could only fail the run.
+                                visible: !photoMode
+                                         && win.outputWidth !== 0
                                          && win.outputWidth !== win.sourceWidth
                                 hint: win.supersample
                                       ? "Renders each eye at the source size and resizes it down, which smooths edges and keeps depth at full resolution. This is what makes a smaller output cost the same as a full-size one."
@@ -1452,16 +1865,49 @@ ApplicationWindow {
                             }
 
                             Row2 {
+                                label: "Amount"
+                                visible: win.upscale && win.upscaleReady
+                                // Shown rather than asked. It used to be a
+                                // slider beside the resolution picker, which
+                                // put the same question in the panel twice in
+                                // two different units -- and let the two
+                                // answers disagree: 2x on a 3840 source
+                                // delivered at 5760 computed 7680 pixels and
+                                // threw a quarter of them away.
+                                hint: {
+                                    if (win.sourceWidth <= 0)
+                                        return "Set by the resolution above."
+                                    var to = Math.round(win.sourceWidth
+                                                        * win.upscaleScale)
+                                    var said = win.sourceWidth + " to " + to
+                                               + " wide, set by the resolution above."
+                                    if (win.supersample && to > win.outputWidth
+                                            && win.outputWidth > 0)
+                                        said += " Past the delivered "
+                                                + win.outputWidth
+                                                + " because supersampling asks"
+                                                + " for the headroom; it is"
+                                                + " resized down afterwards."
+                                    return said
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: win.upscaleScale.toFixed(2) + "×"
+                                    color: Theme.text
+                                    font.pixelSize: Theme.fontM
+                                }
+                            }
+
+                            Row2 {
                                 label: "Upscale model"
                                 visible: win.upscale && win.upscaleReady
                                 hint: {
+                                    if (win.upscaleModel === "")
+                                        return "No model. The resampler below does the whole factor, which is the safest choice on footage that is already sharpened or compressed."
                                     var l = win.topaz.models
                                     var i = win.topazIndex(l, win.upscaleModel)
                                     if (i < 0)
                                         return ""
-                                    if (l[i].stills_only === true
-                                            && !win.photoMode)
-                                        return "Photos only. On video it amplifies a small frame-to-frame change 4.2 times — against 0.99 for SPAN and 1.13 for the shader — and detail that will not hold still reads as crawling."
                                     if (l[i].source === "topaz" && win.topazNeedsLogin)
                                         return "Needs a signed-in Topaz."
                                     return l[i].desc
@@ -1473,7 +1919,16 @@ ApplicationWindow {
                                     enabled: win.canUpscale
                                     textRole: "name"
                                     valueRole: "short"
-                                    model: win.topaz.models
+                                    // Models only. The resamplers are the
+                                    // second dropdown's business, and "None"
+                                    // leads because choosing no model at all
+                                    // is a real answer here rather than an
+                                    // absence -- it is what won every rung
+                                    // where the source was already sharpened.
+                                    model: [{"short": "", "name": "None",
+                                             "desc": "", "category": "",
+                                             "scale": -1}].concat(
+                                                win.firstStageModels())
                                     // A ComboBox given a model where it had
                                     // none picks its own currentIndex -- 0,
                                     // the first entry -- and that assignment
@@ -1491,7 +1946,7 @@ ApplicationWindow {
                                     // after the signal that says it changed.
                                     function sync() {
                                         currentIndex = win.topazIndex(
-                                            win.topaz.models, win.upscaleModel)
+                                            model, win.upscaleModel)
                                     }
                                     Component.onCompleted: sync()
                                     onCountChanged: Qt.callLater(sync)
@@ -1499,24 +1954,31 @@ ApplicationWindow {
                                         target: win
                                         function onUpscaleModelChanged() {
                                             upscaleBox.sync()
+                                            win.adoptDefaultResampler()
+                                        }
+                                        function onUpscaleScaleChanged() {
+                                            win.adoptDefaultResampler()
                                         }
                                         function onTopazChanged() {
                                             Qt.callLater(upscaleBox.sync)
                                         }
                                     }
                                     onActivated: {
-                                        if (win.upscalerUsable(currentValue)) {
+                                        if (currentValue === ""
+                                                || win.upscalerUsable(currentValue)) {
                                             win.upscaleModel = currentValue
                                             win.upscaleModelChosen = true
+                                            win.upscaleResamplerChosen = false
+                                            win.adoptDefaultResampler()
                                         } else
                                             currentIndex = win.topazIndex(
-                                                win.topaz.models,
-                                                win.upscaleModel)
+                                                model, win.upscaleModel)
                                     }
 
                                     delegate: ItemDelegate {
                                         width: upscaleBox.width
-                                        enabled: win.upscalerUsable(modelData.short)
+                                        enabled: modelData.short === ""
+                                                 || win.upscalerUsable(modelData.short)
                                         highlighted:
                                             upscaleBox.highlightedIndex === index
                                         contentItem: ColumnLayout {
@@ -1530,8 +1992,10 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                             }
                                             Text {
-                                                text: win.upscalerNote(modelData,
-                                                                       enabled)
+                                                text: modelData.short === ""
+                                                      ? "Resampler only"
+                                                      : win.upscalerNote(modelData,
+                                                                         enabled)
                                                 visible: text !== ""
                                                 color: enabled ? Theme.textFaint
                                                                : Theme.warn
@@ -1544,34 +2008,132 @@ ApplicationWindow {
                                 }
                             }
 
+                            // NVIDIA VSR is in the registry on every
+                            // machine and installed on almost none, so it
+                            // needs a way in that the other models do not:
+                            // 490 MB from NVIDIA, under NVIDIA's terms. The
+                            // row is silent once it is ready, and absent on
+                            // a machine that could not run it -- with the
+                            // reason shown rather than a greyed control and
+                            // nothing beside it.
                             Row2 {
-                                label: "Amount"
+                                label: "NVIDIA VSR"
+                                // `why_not` is null where there is no reason,
+                                // and `a || null` is null rather than false --
+                                // which QML then declines to assign to a bool
+                                // and says so on every startup. Compared
+                                // against "" so the expression is a boolean
+                                // whatever the map holds.
                                 visible: win.upscale && win.upscaleReady
-                                hint: win.sourceWidth <= 0
-                                      ? "How much wider to make the source before converting it."
-                                      : win.sourceWidth + " to "
-                                        + Math.round(win.sourceWidth
-                                                     * win.upscaleScale)
-                                        + " wide"
-                                        + (win.sourceWidth * win.upscaleScale
-                                           > 7680
-                                           ? ", which is past 8K - no headset shows it, and it costs the time anyway."
-                                           : ".")
-                                Slider {
+                                         && (win.nvvsrAction !== ""
+                                             || (win.nvvsr.why_not || "") !== "")
+                                hint: {
+                                    if (win.nvvsr.why_not)
+                                        return win.nvvsr.why_not
+                                    if (app.nvvsrFetching)
+                                        return "Downloading about 490 MB from NVIDIA. This takes a while."
+                                    if (win.nvvsrAction === "download")
+                                        return "NVIDIA's RTX Video upscaler. About 490 MB from NVIDIA, under their licence, which you are asked to read once when it arrives. It reproduced this camera's own texture more closely than anything else measured."
+                                    if (win.nvvsrAction === "licence")
+                                        return "Downloaded. Read and accept NVIDIA's licence to use it."
+                                    return ""
+                                }
+                                Button {
+                                    Layout.fillWidth: true
+                                    visible: win.nvvsrAction !== ""
+                                    enabled: !app.nvvsrFetching && !app.busy
+                                    text: app.nvvsrFetching
+                                          ? "Downloading..."
+                                          : win.nvvsrAction === "download"
+                                            ? "Download (490 MB)"
+                                            : "Read the licence"
+                                    onClicked: {
+                                        if (win.nvvsrAction === "download") {
+                                            win.nvvsrAsking = true
+                                            app.nvvsrInstall()
+                                        } else
+                                            win.showNvidiaLicence()
+                                    }
+                                }
+                            }
+
+                            Row2 {
+                                label: "Then resample"
+                                visible: win.upscale && win.upscaleReady
+                                // What the model leaves behind, said out
+                                // loud. It was always happening -- a 2x
+                                // model asked for 4x has always handed the
+                                // rest to spline36 -- and never shown, so
+                                // the arithmetic looked like a single step
+                                // that it never was.
+                                hint: {
+                                    var note = win.residualNote()
+                                    if (note !== "")
+                                        return note
+                                    return "Nothing left to do: the model covers the whole factor by itself."
+                                }
+                                ComboBox {
+                                    id: resampleBox
+                                    objectName: "resampleBox"
                                     Layout.fillWidth: true
                                     enabled: win.canUpscale
-                                    // Inside every installed model's own
-                                    // range, so the choice of model cannot
-                                    // make the chosen amount illegal.
-                                    from: 1; to: 4; stepSize: 0.25
-                                    value: win.upscaleScale
-                                    onMoved: win.upscaleScale = value
-                                }
-                                Text {
-                                    text: win.upscaleScale.toFixed(2) + "x"
-                                    color: Theme.text
-                                    font.pixelSize: Theme.fontM
-                                    Layout.preferredWidth: 42
+                                             && win.residualNote() !== ""
+                                    textRole: "name"
+                                    valueRole: "short"
+                                    model: win.residualNote() === ""
+                                           ? [{"short": "", "name": "None",
+                                               "desc": "", "category": "",
+                                               "scale": -1}]
+                                           : win.resamplerModels()
+                                    function sync() {
+                                        currentIndex = win.topazIndex(
+                                            model, win.upscaleResampler)
+                                    }
+                                    Component.onCompleted: sync()
+                                    onCountChanged: Qt.callLater(sync)
+                                    Connections {
+                                        target: win
+                                        function onUpscaleResamplerChanged() {
+                                            resampleBox.sync()
+                                        }
+                                        function onTopazChanged() {
+                                            Qt.callLater(resampleBox.sync)
+                                        }
+                                    }
+                                    onActivated: {
+                                        win.upscaleResampler = currentValue
+                                        win.upscaleResamplerChosen = true
+                                    }
+
+                                    delegate: ItemDelegate {
+                                        width: resampleBox.width
+                                        highlighted:
+                                            resampleBox.highlightedIndex === index
+                                        contentItem: ColumnLayout {
+                                            spacing: 0
+                                            Text {
+                                                text: modelData.name
+                                                color: Theme.text
+                                                font.pixelSize: Theme.fontM
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                            Text {
+                                                text: modelData.short === ""
+                                                      ? ""
+                                                      : win.factorText(
+                                                            win.residualFactor())
+                                                        + " · "
+                                                        + win.upscalerNote(modelData,
+                                                                           true)
+                                                visible: text !== ""
+                                                color: Theme.textFaint
+                                                font.pixelSize: Theme.fontS
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
                                 }
                             }
 

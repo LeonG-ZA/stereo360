@@ -259,8 +259,13 @@ def default_output_width(width: int, height: int, output_mode: str = "360",
     return HEADSET_SAFE_WIDTH
 
 
+#: The most an upscaler will produce, which is what `--upscale-scale` accepts.
+MAX_UPSCALE = 4.0
+
+
 def resolution_choices(width: int, height: int,
-                       output_mode: str = "360") -> List[Dict[str, Any]]:
+                       output_mode: str = "360",
+                       upscaling: bool = False) -> List[Dict[str, Any]]:
     """Every output size worth offering for this source, largest first.
 
     The source's own width always comes first and is the default -- it is the
@@ -271,11 +276,26 @@ def resolution_choices(width: int, height: int,
 
     From a 4K source nothing here is above the cap, so the list is just sizes
     and carries no warning. The restriction appears exactly when it applies.
+
+    `upscaling` turns the list around: the sizes *above* the source, up to
+    what an upscaler will produce. Below the source is then not offered at
+    all, because upscaling to less than you started with is a contradiction
+    the interface should not let anyone express. This is what lets the panel
+    ask for one number instead of two -- a delivered size and a multiplier in
+    the same panel is the same question in two units, and you have to do
+    arithmetic to know whether your answers agree.
     """
     seen = set()
     out = []
-    for candidate in (width,) + _STANDARD_WIDTHS:
-        if candidate > width or candidate in seen:
+    if upscaling:
+        ceiling = int(width * MAX_UPSCALE)
+        candidates = tuple(sorted(
+            (c for c in _STANDARD_WIDTHS if width < c <= ceiling),
+            reverse=True))
+    else:
+        candidates = (width,) + _STANDARD_WIDTHS
+    for candidate in candidates:
+        if (not upscaling and candidate > width) or candidate in seen:
             continue
         seen.add(candidate)
         w, h = output_size(width, height, output_mode, candidate)
@@ -285,6 +305,9 @@ def resolution_choices(width: int, height: int,
             "megapixels": round(w * h / 1e6, 1),
             "fits": w * h <= MAX_LEVEL_LUMA,
             "native": candidate == width,
+            # What the upscaler has to do to land here, so the panel can say
+            # it without the reader multiplying anything.
+            "scale": round(candidate / width, 4) if width else 1.0,
         })
     return out
 
@@ -317,6 +340,9 @@ _DEFAULTS = {
     "yaw": 0.0,
     "upscale": False,
     "upscaleModel": "amq",
+    # The second stage. "" means the first one covered the whole factor, which
+    # is the common case at 2x and never the case at 4x with a 2x model.
+    "upscaleResampler": "",
     "upscaleScale": 2.0,
     "interpolate": False,
     "interpolateModel": "chr",
@@ -400,7 +426,15 @@ def build_argv(
         # render smaller than and the flag would claim a saving it cannot
         # make. Emitted only when off, like the other switches whose default
         # is the fuller-quality one.
-        if not opts.get("supersample", True):
+        #
+        # And never for a photo. The CLI refuses `--no-supersample` on a
+        # still the same way it refuses `--max-frames`, so a switch left off
+        # from the last video failed the conversion outright. The refusal
+        # list below grew this entry after the guard further down was
+        # written, and the guard was not grown with it -- which is why the
+        # test for this walks `cli._VIDEO_ONLY_FLAGS` rather than naming the
+        # flags it knows about.
+        if not photo and not opts.get("supersample", True):
             argv.append("--no-supersample")
 
     if not opts.get("faceSizeAuto", True):
@@ -530,6 +564,12 @@ def build_argv(
         scale = _num(opts.get("upscaleScale"), _DEFAULTS["upscaleScale"])
         if abs(scale - _DEFAULTS["upscaleScale"]) > 1e-9:
             argv += ["--upscale-scale", f"{scale:g}"]
+        # Only when a model left something over. A model that covers the
+        # whole factor sends nothing, so the command reads as the single step
+        # it really is in that case.
+        second = str(opts.get("upscaleResampler") or "")
+        if second:
+            argv += ["--upscale-resampler", second]
 
     # Video only. A still has no frames to interpolate between, and the CLI
     # ignores the model rather than failing -- but emitting it would still put

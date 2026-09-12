@@ -100,6 +100,19 @@ def main() -> int:
             return 2
         want = [upscalers.BY_CODE[w] for w in args.which]
 
+    # NVIDIA VSR is not ours to fetch. It is a wheel from NVIDIA's own index
+    # under a licence someone has to read and accept first, which is not a
+    # thing a command-line script can honestly do on their behalf -- so it is
+    # named and skipped rather than silently attempted with the empty url it
+    # has instead of a real one. Four entries claiming 490 MB each would also
+    # announce a two-gigabyte download for one wheel.
+    nvidia = [v for v in want if v.kind == "nvvsr"]
+    want = [v for v in want if v.kind != "nvvsr"]
+    if nvidia:
+        print("NVIDIA VSR is installed through the interface rather than "
+              "here: it comes from NVIDIA under their licence, which you are "
+              "asked to read and accept once before anything downloads.\n")
+
     todo = [v for v in want if args.force or not upscalers.present(v, ROOT)]
     if not todo:
         print("Everything asked for is already in models/.")

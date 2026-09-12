@@ -152,192 +152,286 @@ from typing import Dict, NamedTuple, Optional, Sequence
 
 
 class Variant(NamedTuple):
-    """One upscaler: what it is, where it lives, and what it can be used for."""
+    """One upscaler: what it is, where it lives, and what it can be asked for."""
 
     code: str
     name: str
     desc: str
     #: "shader" runs through ffmpeg and libplacebo; "onnx" through
-    #: onnxruntime. The two have different runners and different failure
-    #: modes, and nothing else in this table depends on which.
+    #: onnxruntime; "resampler" is a libplacebo preset with no file of its
+    #: own; "nvvsr" is NVIDIA's wheel. Different runners and different
+    #: failure modes, and nothing else in this table depends on which.
     kind: str
-    filename: str            # under models/
-    scale: int               # what the graph natively does
-    #: Refuses the model for video outright, which is heavier than the
-    #: evidence now supports and is meant to become advice rather than a bar
-    #: -- "recommended for still images only", with the choice left to
-    #: whoever is looking at the footage.
+    filename: str            # under models/, "" for anything with no file
+    #: The factor it natively produces. **0 means it produces whatever it is
+    #: asked for** -- true of every resampler, and of NVIDIA VSR, which takes
+    #: output dimensions rather than a factor. Anything else hands the
+    #: remainder to a resampler; see `residual`.
+    scale: int
+    #: What it does about detail that is not in the source, which is the axis
+    #: that decides when to reach for it. Measured as the share of spectral
+    #: energy above the ceiling a 4K source can carry on an 8K grid, where
+    #: the real 8K holds 4.68%:
     #:
-    #: Watched at 1:1 over 120 frames of dry grass, every model in this
-    #: table looked stable, this flag's two included. The numbers that set
-    #: the flag disagree with each other as well: Siax is barred on 4.24x
-    #: amplification, yet in that clip it moved *less* between frames than
-    #: Compact ldl, which is not barred. A 4x graph asked for 2x is
-    #: downsampled by area on the way out (see esrgan.upscale), and that
-    #: averaging may be quietly steadying it -- which would mean the flag
-    #: rests on a measurement of something else. Worth re-testing before
-    #: anyone relies on it either way.
-    stills_only: bool
+    #:     resampler   0.83 - 1.24%   adds nothing
+    #:     predictor   1.79 - 2.36%   extrapolates from the real pixels
+    #:     generator   4.03 - 4.58%   invents plausible detail
+    #:
+    #: Three bands that do not overlap, and not a restatement of `kind`:
+    #: ArtCNN R8F64 is an onnx file and a predictor, and the generators
+    #: include a shader-speed one in NVIDIA VSR.
+    category: str
     url: str
     mb: float                # download size, to say before the wait
+    #: Cost relative to plain lanczos over the same 150 frames of 4K to 8K.
+    #: Architecture fixes the ordering and hardware only scales it, which is
+    #: why a relative figure can be shipped where a millisecond count cannot
+    #: -- the same reasoning that makes the "fastest" marker safe.
+    #:
+    #: Comparable *within* a category and not across one: the shader and
+    #: resampler rows carry ffmpeg's decode and encode, which is most of
+    #: lanczos's own 20.6 ms; the onnx rows were timed in process around
+    #: `esrgan.upscale` alone; the VSR rows in a torch loop.
+    cost: float = 1.0
+    #: Largest factor it will produce when `scale` is 0. 0 means no ceiling.
+    max_scale: float = 0.0
+    #: The libplacebo preset, or the VSR quality level -- whatever the runner
+    #: needs naming that is not a filename.
+    option: str = ""
+    #: Which way this resampler is for. A 4x graph asked for 2x leaves a
+    #: *downscale* to finish, and that is a different filter set: an
+    #: area filter averages the samples it is discarding, where a sharpening
+    #: upscaler used backwards just aliases. Only ever "down" on a resampler.
+    direction: str = "up"
 
     @property
     def path(self) -> str:
-        return os.path.join("models", self.filename)
+        return os.path.join("models", self.filename) if self.filename else ""
+
+    @property
+    def any_scale(self) -> bool:
+        """Whether it covers the whole factor by itself, at any factor."""
+        return self.scale == 0
 
 
-#: Native 2x wherever possible. A 4x graph asked for 2x computes sixteen
-#: times the source pixels to hand back four, and the difference is not
-#: academic: the same ESRGAN architecture is 129 s a frame at 4x and 29 s at
-#: 2x. Siax stays 4x because that is the checkpoint that exists.
+RESAMPLER, PREDICTOR, GENERATOR = "resampler", "predictor", "generator"
+
+#: Ordered for the interface, and the order is chosen per category rather
+#: than globally, because a single ranking would assert something the
+#: measurements do not support.
+#:
+#: The predictors *are* ordered by quality: C4F32 >= C4F16 > FSRCNNX 16 >=
+#: FSRCNNX 8 > R8F64 held on all four sources tested, with SSSR apart as the
+#: one that wins when the source is soft. C4F32 DN is the exception to the
+#: ordering rather than to the rule: it sits next to its sibling rather than
+#: at its own score, because the 0.35 dB it gives up is what it is for.
+#: The generators are not ordered by quality, because
+#: theirs flipped -- LiveActionV1 was the best of them at 4x on outdoor.jpg
+#: and last on the Giethoorn blossom -- so they run by scale and name. The
+#: resamplers run by how much acutance they add, which is a fact about the
+#: filters rather than a verdict on them.
 VARIANTS: Sequence[Variant] = (
-    Variant("fsrcnnx16", "FSRCNNX 16",
-            "The video default. A shader, not a generator -- it resamples "
-            "rather than inventing, so nothing it draws can fail to hold "
-            "still. Runs on any GPU with a Vulkan driver.",
-            "shader", "FSRCNNX_x2_16-0-4-1.glsl", 2, False,
-            "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/"
-            "FSRCNNX_x2_16-0-4-1.glsl", 0.24),
-    Variant("fsrcnnx8", "FSRCNNX 8",
-            "The smaller shader, and a third faster. It measured within "
-            "0.1 dB of FSRCNNX 16 on grass and differed from it by about a "
-            "third of a level on edges, so the choice is close.",
-            "shader", "FSRCNNX_x2_8-0-4-1.glsl", 2, False,
-            "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/"
-            "FSRCNNX_x2_8-0-4-1.glsl", 0.07),
-    Variant("artcnn16", "ArtCNN C4F16",
-            "A shader like FSRCNNX and within a hair of its cost. It "
-            "measured ahead on brickwork and level on low-contrast stone, "
-            "so it is offered rather than chosen: it is trained for anime, "
-            "which is not what this converts.",
-            "shader", "ArtCNN_C4F16.glsl", 2, False,
-            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
-            "ArtCNN_C4F16.glsl", 0.21),
+    # ---- resamplers: no file, no download, built into libplacebo ---------
+    Variant("lanczos", "Lanczos",
+            "A plain resampler. Adds nothing that was not in the source, "
+            "which is what makes it the safest choice on footage that is "
+            "already sharpened or compressed -- it won every such rung "
+            "tested.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.0),
+    Variant("spline36", "spline36",
+            "libplacebo's default. Indistinguishable from Lanczos here: "
+            "0.08 dB apart at 4K to 8K.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.0, 0.0, "spline36"),
+    Variant("ewa_lanczos", "ewa_lanczos",
+            "Jinc rather than sinc, and applied over a disc rather than "
+            "along the axes, so it has no preferred direction and treats a "
+            "diagonal like anything else. About three times the taps.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.1, 0.0, "ewa_lanczos"),
+    Variant("ewa_lanczossharp", "ewa_lanczossharp",
+            "ewa_lanczos with the kernel narrowed 1.9%, which is a mild "
+            "sharpening. The constant is Nicolas Robidoux's.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.1, 0.0,
+            "ewa_lanczossharp"),
+    Variant("ewa_lanczos4sharpest", "ewa_lanczos4sharpest",
+            "The one to reach for on camera footage. Despite the name it "
+            "behaves as a de-ringer, because it is the only preset here "
+            "with anti-ringing -- 0.8, which is what makes its 11.5% "
+            "narrower kernel usable. Best of anything measured on the "
+            "oversharpened and haloed rungs.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.2, 0.0,
+            "ewa_lanczos4sharpest"),
+    Variant("area", "INTER_AREA",
+            "The way back down, for a 4x graph asked for less. It averages "
+            "the samples it discards rather than dropping them, which is "
+            "also why the overshoot is not simply waste: on the matched "
+            "pair tested, four samples averaged came out 1.5 dB ahead of "
+            "the same architecture's native 2x.",
+            "resampler", "", 0, RESAMPLER, "", 0.0, 1.0, 0.0, "area", "down"),
+
+    # ---- predictors: extrapolate from the pixels that are there ----------
     Variant("artcnn32", "ArtCNN C4F32",
-            "The larger shader. Half a decibel ahead of C4F16 on brickwork "
-            "for twice the time, and still under a second a frame -- worth "
-            "it when the source has fine repeating detail and not when it "
-            "does not.",
-            "shader", "ArtCNN_C4F32.glsl", 2, False,
+            "The best predictor measured, and the one to reach for on a "
+            "clean source: it won on 360 stills, on broadcast video and on "
+            "an 8K walking tour. Four convolutions, 32 filters, and the "
+            "neutral build -- Artoriuz ships denoising ones too, and DN is "
+            "below.",
+            "shader", "ArtCNN_C4F32.glsl", 2, PREDICTOR,
             "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
-            "ArtCNN_C4F32.glsl", 0.73),
-    Variant("artcnnr8", "ArtCNN R8F64",
-            "The sharpest thing here that is still safe in front of video: "
-            "it resolves more than the shader and amplifies less, which "
-            "nothing else in this table manages. Twelve times the shader's "
-            "cost, so it is the choice when the wait is acceptable.",
-            "onnx", "ArtCNN_R8F64.onnx", 2, False,
+            "ArtCNN_C4F32.glsl", 0.73, 2.6),
+    Variant("artcnn32dn", "ArtCNN C4F32 DN",
+            "The same network trained to denoise and soften instead of to "
+            "reproduce, and the one predictor that behaves like a "
+            "resampler -- 1.10% of its energy above the source's ceiling, "
+            "inside the resampler band and below every other predictor "
+            "here. On degraded footage it lands on ewa_lanczos4sharpest's "
+            "texture almost exactly. On a clean source it gives up 0.35 dB "
+            "to plain C4F32, which is the trade it exists to make.",
+            "shader", "ArtCNN_C4F32_DN.glsl", 2, PREDICTOR,
             "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
-            "ArtCNN_R8F64.onnx", 3.5),
+            "ArtCNN_C4F32_DN.glsl", 0.73, 2.6),
+    Variant("artcnn16", "ArtCNN C4F16",
+            "Half the cost of C4F32 and within noise of it everywhere "
+            "except a pristine source, where C4F32 leads by 0.26 dB. On the "
+            "other seven rungs they were 0.05 dB apart or less.",
+            "shader", "ArtCNN_C4F16.glsl", 2, PREDICTOR,
+            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
+            "ArtCNN_C4F16.glsl", 0.21, 1.4),
+    Variant("fsrcnnx16", "FSRCNNX 16",
+            "The long-standing video default. A shader, not a generator -- "
+            "it resamples rather than inventing. Behind both ArtCNN "
+            "variants on every rung tested.",
+            "shader", "FSRCNNX_x2_16-0-4-1.glsl", 2, PREDICTOR,
+            "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/"
+            "FSRCNNX_x2_16-0-4-1.glsl", 0.24, 1.6),
+    Variant("fsrcnnx8", "FSRCNNX 8",
+            "The cheaper FSRCNNX. Measured 36.13 against the 16's 36.12 on "
+            "the test that chose it, so the larger one buys little.",
+            "shader", "FSRCNNX_x2_8-0-4-1.glsl", 2, PREDICTOR,
+            "https://github.com/igv/FSRCNN-TensorFlow/releases/download/1.1/"
+            "FSRCNNX_x2_8-0-4-1.glsl", 0.07, 1.2),
     Variant("spline36_sssr", "spline36_SSSR",
-            "Not an upscaler but a corrector: libplacebo scales, then the "
-            "shader downscales its own result, compares that against the "
-            "source and fixes the difference. Crisper edges than the "
-            "learned shaders and the steadiest thing measured -- though "
-            "sharper is not the same as better, and FSRCNNX may still read "
-            "well against it by eye.",
-            "shader", "SSimSuperRes.glsl", 2, False,
+            "A corrector rather than a doubler: it resamples, then pulls "
+            "the result back towards the source's own structure. Won all "
+            "three soft rungs, and lost the sharpened ones by more than "
+            "anything else -- the most aggressive predictor here.",
+            "shader", "SSimSuperRes.glsl", 2, PREDICTOR,
             "https://gist.githubusercontent.com/igv/"
             "2364ffa6e81540f29cb7ab4c9bc05b6b/raw/"
             "15d93440d0a24fc4b8770070be6a9fa2af6f200b/SSimSuperRes.glsl",
-            0.01),
-    Variant("span", "SPAN",
-            "The steadiest of the learned models and fast enough for video, "
-            "though not as steady as its first measurement suggested: a "
-            "small change comes back 1.4 times larger on real footage, "
-            "against 1.0 on a photograph. The shaders are steadier.",
-            "onnx", "2xNomosUni_span_multijpg.onnx", 2, False,
-            "https://huggingface.co/Phips/2xNomosUni_span_multijpg/resolve/"
-            "main/2xNomosUni_span_multijpg.safetensors", 4.5),
+            0.01, 1.1),
+    Variant("artcnnr8", "ArtCNN R8F64",
+            "Eight residual blocks. Won on 360 stills once, and never "
+            "since -- on the eight-rung ladder it placed below C4F16 and "
+            "below Lanczos, at forty times C4F16's cost.",
+            "onnx", "ArtCNN_R8F64.onnx", 2, PREDICTOR,
+            "https://github.com/Artoriuz/ArtCNN/releases/download/v1.6.2/"
+            "ArtCNN_R8F64.onnx", 3.5, 94.0),
+
+    # ---- generators: invent detail that is not in the source -------------
+    Variant("nvvsr_ultra", "NVIDIA VSR ULTRA",
+            "NVIDIA's RTX Video upscaler at its highest setting, and the "
+            "closest match measured to a degraded source's own texture. "
+            "Scales to any factor up to 4x by itself.",
+            "nvvsr", "", 0, GENERATOR, "", 490.0, 0.9, 4.0, "ULTRA"),
+    Variant("nvvsr_high", "NVIDIA VSR HIGH",
+            "A step below ULTRA and slightly sharper than the truth on the "
+            "material tested. Scales to any factor up to 4x.",
+            "nvvsr", "", 0, GENERATOR, "", 490.0, 0.7, 4.0, "HIGH"),
+    Variant("nvvsr_medium", "NVIDIA VSR MEDIUM",
+            "Cheaper, and on a clean source it scored *above* HIGH -- the "
+            "levels do not rank consistently, because how much invention "
+            "helps depends on the source. Scales to any factor up to 4x.",
+            "nvvsr", "", 0, GENERATOR, "", 490.0, 0.4, 4.0, "MEDIUM"),
+    Variant("nvvsr_low", "NVIDIA VSR LOW",
+            "The cheapest thing in this table, faster than plain Lanczos, "
+            "and on a clean 360 still the best-scoring of the four levels. "
+            "Scales to any factor up to 4x.",
+            "nvvsr", "", 0, GENERATOR, "", 490.0, 0.3, 4.0, "LOW"),
+    Variant("compactldl", "Compact ldl",
+            "Sharper than a shader without a GAN's invention, because JPEG "
+            "degradation was in its training -- it reads a compression "
+            "artifact as damage where a faithful model sharpens it.",
+            "onnx", "2xNomosUni_compact_multijpg_ldl.onnx", 2, GENERATOR,
+            "https://huggingface.co/Phips/2xNomosUni_compact_multijpg_ldl/"
+            "resolve/main/2xNomosUni_compact_multijpg_ldl.safetensors", 2.4,
+            1.26),
     Variant("liveaction", "LiveActionV1 SPAN",
-            "The steadiest learned model measured, and the one to reach for "
-            "on video when a shader is not enough: it damps a small "
-            "frame-to-frame change rather than amplifying it, which nothing "
-            "else here does. Trained for live action rather than anime, and "
-            "against denoising rather than with it.",
-            "onnx", "2xLiveActionV1_SPAN.onnx", 2, False,
+            "Trained for live action rather than anime, and against "
+            "denoising rather than with it. The only generator measured to "
+            "beat plain Lanczos while inventing 15% -- on one source; it "
+            "was last on another.",
+            "onnx", "2xLiveActionV1_SPAN.onnx", 2, GENERATOR,
             "https://raw.githubusercontent.com/jcj83429/upscaling/"
             "f73a3a02874360ec6ced18f8bdd8e43b5d7bba57/2xLiveActionV1_SPAN/"
-            "2xLiveActionV1_SPAN_490000.pth", 8.9),
+            "2xLiveActionV1_SPAN_490000.pth", 8.9, 1.57),
+    Variant("span", "SPAN",
+            "The plain NomosUni SPAN. Consistently the weakest of this "
+            "family on the sources tested.",
+            "onnx", "2xNomosUni_span_multijpg.onnx", 2, GENERATOR,
+            "https://huggingface.co/Phips/2xNomosUni_span_multijpg/resolve/"
+            "main/2xNomosUni_span_multijpg.safetensors", 4.5, 1.58),
     Variant("spanldl", "SPAN ldl",
-            "SPAN trained with Locally Discriminative Learning, which "
-            "targets the artifacts a GAN leaves behind. Sharper than plain "
-            "SPAN for the same cost, and slightly less settled with it -- "
-            "1.6 times a small change against SPAN's 1.4.",
-            "onnx", "2xNomosUni_span_multijpg_ldl.onnx", 2, False,
+            "SPAN with the loss that suppresses what a GAN would add. "
+            "Steadier than SPAN and no sharper.",
+            "onnx", "2xNomosUni_span_multijpg_ldl.onnx", 2, GENERATOR,
             "https://huggingface.co/Phips/2xNomosUni_span_multijpg_ldl/"
-            "resolve/main/2xNomosUni_span_multijpg_ldl.safetensors", 8.9),
-    Variant("compactldl", "Compact ldl",
-            "The stills default. Sharper than the shader without inventing, "
-            "because JPEG degradation was in its training -- it reads a "
-            "compression artifact as damage where a faithful model sharpens "
-            "it and a GAN paints over it. Slightly livelier frame to frame "
-            "than SPAN.",
-            "onnx", "2xNomosUni_compact_multijpg_ldl.onnx", 2, False,
-            "https://huggingface.co/Phips/2xNomosUni_compact_multijpg_ldl/"
-            "resolve/main/2xNomosUni_compact_multijpg_ldl.safetensors", 2.4),
+            "resolve/main/2xNomosUni_span_multijpg_ldl.safetensors", 8.9,
+            1.58),
     Variant("esrgan2x", "ESRGAN 2x uni",
-            "For stills, when Siax is close but too slow: the same ESRGAN "
-            "architecture at 2x rather than 4x, so it computes four times "
-            "the source pixels instead of sixteen and finishes in a quarter "
-            "the time. Sharper than Compact ldl without Siax's invention.",
-            "onnx", "2xNomosUni_esrgan_multijpg.onnx", 2, True,
-            "https://huggingface.co/Phips/2xNomosUni_esrgan_multijpg/"
-            "resolve/main/2xNomosUni_esrgan_multijpg.safetensors", 33.5),
+            "The ESRGAN architecture at 2x. The one model whose fidelity "
+            "*improves* when its invention is suppressed, which is a sign "
+            "it guesses wrong more often than right on this material.",
+            "onnx", "2xNomosUni_esrgan_multijpg.onnx", 2, GENERATOR,
+            "https://huggingface.co/Phips/2xNomosUni_esrgan_multijpg/resolve/"
+            "main/2xNomosUni_esrgan_multijpg.safetensors", 33.5, 9.44),
     Variant("lsdir", "LSDIR Compact v2",
-            "For stills, and the cheapest sharp one here: a 4x graph, so it "
-            "does the whole job in one pass where a 2x model would need two. "
-            "It draws confident window frames and edges -- and brick and "
-            "foliage come back more contrasty than they really were, which "
-            "is why it is offered for photos rather than video.",
-            "onnx", "4xLSDIRCompactv2.onnx", 4, True,
+            "A 4x graph, so at 2x it computes four times the pixels it "
+            "hands back -- which on the matched pair tested came out 1.5 dB "
+            "*better*, because averaging four samples damps the model's own "
+            "errors. Twice the time for it.",
+            "onnx", "4xLSDIRCompactv2.onnx", 4, GENERATOR,
             "https://github.com/Phhofm/models/releases/download/"
-            "4xLSDIRCompact2/4xLSDIRCompactv2.safetensors", 1.2),
+            "4xLSDIRCompact2/4xLSDIRCompactv2.safetensors", 1.2, 2.46),
     Variant("siax", "Siax",
-            "For stills, and the sharpest of these -- but it invents to get "
-            "there, which shows as detail that was not in the scene. Worst "
-            "on video by a distance: it turns a one-level wobble into four, "
-            "which reads as crawling. Two minutes a frame.",
-            "onnx", "4x_NMKD-Siax.onnx", 4, True,
+            "A 4x graph and the slowest thing here by a wide margin. Reads "
+            "sharpest on a frozen frame and invents visibly to get there.",
+            "onnx", "4x_NMKD-Siax.onnx", 4, GENERATOR,
             "https://huggingface.co/uwg/upscaler/resolve/main/ESRGAN/"
-            "4x_NMKD-Siax_200k.pth", 67.0),
+            "4x_NMKD-Siax_200k.pth", 67.0, 28.49),
 )
 
 #: How far each model magnifies a small frame-to-frame change, measured with
 #: the seeded 0.86-level nudge described above. Kept here rather than in the
 #: table because not every model has one -- LSDIR was judged against a real
-#: 8K frame instead -- and because a refusal that quotes the wrong model's
-#: figure is worse than one that quotes none. Read on a video frame, which is
-#: the material that governs a pre-pass; the figures from `outdoor.jpg` are
-#: lower and are the ones the first table records.
+#: 8K frame instead. Read on a video frame, which is the material that
+#: governs a pre-pass; the figures from `outdoor.jpg` are lower and are the
+#: ones the first table records.
+#:
+#: Retained as measurement rather than as policy. It used to bar three models
+#: from video; watching 120 frames of each showed every one of them steady,
+#: and the *untouched* 8K flickering 1.20x the Lanczos floor itself -- so the
+#: floor was never the target and a model sitting on it is too smooth rather
+#: than admirably still.
 AMPLIFY: Dict[str, float] = {
     "fsrcnnx8": 1.11, "fsrcnnx16": 1.10, "artcnn16": 1.15, "artcnnr8": 1.09,
     "spline36_sssr": 1.15, "liveaction": 0.85, "span": 1.43, "spanldl": 1.63,
     "compactldl": 1.87, "esrgan2x": 1.82, "siax": 4.24,
 }
 
-
 BY_CODE: Dict[str, Variant] = {v.code: v for v in VARIANTS}
 
-#: A shader, because a video pre-pass runs thousands of times and the only
-#: thing here that cannot crawl is the one that does not invent.
-VIDEO_DEFAULT = "fsrcnnx16"
+#: Reached for in order, and the first two are not in this table: Topaz if it
+#: is installed, then NVIDIA VSR if its wheel is present *and* its licence
+#: accepted -- a GPU alone is not enough, or the default would be something
+#: the user has not downloaded. See `default_code`.
+NVIDIA_DEFAULT = "nvvsr_ultra"
+FREE_DEFAULT = "artcnn32"
 
-#: Judged by eye on real 360 stills rather than by the scorecard, and the
-#: scorecard would have chosen differently: Siax reads sharpest on a frozen
-#: frame and invents visibly to get there, which a headset shows as detail
-#: that was never in the scene.
-#:
-#: What separates this one is what it was trained on. The sources here are
-#: compressed -- an ordinary outdoor frame measured 1.71 bits a pixel with a
-#: blockiness ratio of 1.137 -- and `multijpg` means JPEG degradation was in
-#: its training, so it treats a compression artifact as damage rather than as
-#: detail. Models trained without that sharpen the artifacts faithfully and
-#: read as noisy; GAN-trained ones paint over them and read as invented. The
-#: `ldl` half is the loss that suppresses what a GAN would otherwise add.
-#:
-#: Also thirty times faster than Siax, which is the smaller reason.
-PHOTO_DEFAULT = "compactldl"
+#: Kept for callers that predate the two-stage choice. Both now name the same
+#: predictor: the stills/video split they encoded was the wrong axis, and
+#: what actually decides is whether the source is degraded or pristine.
+VIDEO_DEFAULT = FREE_DEFAULT
+PHOTO_DEFAULT = FREE_DEFAULT
 
 
 def get(code: Optional[str]) -> Optional[Variant]:
@@ -345,21 +439,90 @@ def get(code: Optional[str]) -> Optional[Variant]:
 
 
 def present(v: Variant, root: str = ".") -> bool:
+    """Whether it can be used here.
+
+    A resampler is always present -- it is a preset in an ffmpeg this project
+    already requires. NVIDIA VSR needs its wheel *and* an accepted licence,
+    which is asked of `nvvsr` so that this table holds no opinion about
+    someone else's terms.
+    """
+    if v.kind == "resampler":
+        return True
+    if v.kind == "nvvsr":
+        from . import nvvsr
+
+        return nvvsr.installed() and nvvsr.consented()
     return os.path.exists(os.path.join(root, v.path))
+
+
+def in_category(category: str, root: Optional[str] = None) -> list:
+    """The variants of one category, in the table's order.
+
+    With `root`, only those usable here.
+    """
+    return [v for v in VARIANTS if v.category == category
+            and (root is None or present(v, root))]
+
+
+def residual(target: float, v: Optional[Variant]) -> float:
+    """What is left for a resampler once `v` has done its part.
+
+    1.0 means nothing is left and the second stage is not needed. Below 1.0
+    means the model overshot and the remainder is a *downscale*, which is a
+    different filter set -- libplacebo takes it on `downscaler` and the onnx
+    path uses INTER_AREA.
+
+    With no model the resampler does the whole factor.
+    """
+    if target <= 0:
+        raise ValueError(f"a target of {target:g} is not a scale")
+    if v is None:
+        return float(target)
+    if v.any_scale:
+        return 1.0
+    return float(target) / float(v.scale)
+
+
+def fastest(category: str, root: Optional[str] = None) -> Optional[str]:
+    """The cheapest usable variant of a category, or None if it has none.
+
+    Chosen from `cost`, which is relative and so survives a change of
+    hardware; the ordering within a category is set by architecture rather
+    than by the machine that measured it.
+    """
+    pool = in_category(category, root)
+    return min(pool, key=lambda v: v.cost).code if pool else None
+
+
+def default_code(topaz: bool = False, root: str = ".") -> Optional[str]:
+    """The model to select when nothing has been chosen.
+
+    Topaz first where it is installed, then NVIDIA VSR where it is ready,
+    then the best free predictor. Returns None for Topaz because it is not
+    in this table -- the caller owns that half of the choice.
+    """
+    if topaz:
+        return None
+    nvidia = BY_CODE.get(NVIDIA_DEFAULT)
+    if nvidia is not None and present(nvidia, root):
+        return NVIDIA_DEFAULT
+    free = BY_CODE.get(FREE_DEFAULT)
+    if free is not None and present(free, root):
+        return FREE_DEFAULT
+    for v in VARIANTS:
+        if v.category != RESAMPLER and present(v, root):
+            return v.code
+    return None
 
 
 def for_job(is_photo: bool, root: str = ".") -> Optional[Variant]:
     """The best default actually installed here, or None.
 
-    Falls forward rather than failing: a machine with the video default
-    missing and a photo model present should be offered the photo model for a
-    photo, and anything usable for a video, rather than nothing.
+    Falls forward rather than failing, so a machine missing the preferred
+    model is offered something usable rather than nothing. `is_photo` no
+    longer changes the answer -- the flag it used to consult was removed once
+    every model in this table was watched over 120 frames and none crawled --
+    and it stays in the signature for the callers that pass it.
     """
-    want = PHOTO_DEFAULT if is_photo else VIDEO_DEFAULT
-    first = BY_CODE.get(want)
-    if first is not None and present(first, root):
-        return first
-    for v in VARIANTS:
-        if present(v, root) and (is_photo or not v.stills_only):
-            return v
-    return None
+    code = default_code(root=root)
+    return BY_CODE.get(code) if code else None

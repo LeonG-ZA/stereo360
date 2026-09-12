@@ -194,17 +194,69 @@ def describe(explicit: Optional[str] = None, ffmpeg: str = "ffmpeg") -> dict:
     return {"available": True, "shader": path, "reason": ""}
 
 
+#: Pass as `shader` for a resample with no model in front of it, which is
+#: what the interface's first dropdown set to "None" asks for. Distinct from
+#: `None`, which still means "the default shader".
+NO_SHADER = "-"
+
+
+#: What a source's pixel format has to become before libplacebo sees it.
+#:
+#: Something must be named here, because every shader in `models/` is a
+#: `//!HOOK LUMA` shader: handed RGB there is no luma plane to hook, the pass
+#: runs to completion, and the output is a plain resample with no sign that
+#: the model never ran. So an RGB source is converted rather than left alone.
+#:
+#: What must *not* be named is `yuv420p` for everything, which is what stood
+#: here. It is the source's own layout for all camera video, and a silent
+#: downgrade for anything better: a 4:4:4 still lost three quarters of its
+#: chroma (1.5 dB, measured against the 8K truth) and a 10-bit source was
+#: truncated to 8 (878 distinct luma codes down to 440). The working file is
+#: built to carry both -- `intermediate.choose` asks for yuv444p and
+#: yuv420p10le when the source has them -- so the loss happened one filter
+#: before the container designed to prevent it.
+#:
+#: Anything that cannot be named as a plain planar YUV layout falls back to
+#: `yuv420p`, which is what every source got before: RGB, the hardware
+#: surface formats, 12-bit, and an unprobed source with no format at all.
+def filter_format(pix_fmt: Optional[str]) -> str:
+    """The `format=` a pre-pass should use to preserve `pix_fmt`."""
+    from . import ffmpeg_io
+
+    chroma = ffmpeg_io.chroma_from_pix_fmt(pix_fmt)
+    depth = ffmpeg_io.bit_depth_from_pix_fmt(pix_fmt)
+    return ffmpeg_io.CHROMA_PIX_FMT.get((chroma, depth), "yuv420p")
+
+
 def chain(width: int, height: int, scale: float = 2.0,
-          shader: Optional[str] = None) -> str:
+          shader: Optional[str] = None,
+          resampler: Optional[str] = None,
+          pix_fmt: Optional[str] = None) -> str:
     """The -vf for one pass over frames `width` x `height`.
 
     The shader doubles; libplacebo then resamples to whatever was actually
-    asked for, so a scale other than 2 still lands on the right size.
+    asked for, so a scale other than 2 still lands on the right size. That
+    second step was always happening and was never named -- a 2x shader asked
+    for 4x has always handed half the job to libplacebo's default spline36 --
+    and `resampler` is what lets the caller say which filter does it.
+
+    It only bites where there is something left to do. At a scale the shader
+    lands on exactly, the option is measurably a no-op: 0.099 levels out of
+    255 between spline36 and ewa_lanczos4sharpest at 2x, against 0.000 for
+    the same command run twice. At 3x or 4x it is doing half the work.
+
+    With `shader=NO_SHADER` there is no model at all and the named filter
+    does the whole factor, which is the safest choice on a source that is
+    already sharpened -- it won every such rung measured.
     """
     out_w = int(round(width * scale))
     out_h = int(round(height * scale))
-    return (f"format=yuv420p,libplacebo=w={out_w}:h={out_h}:"
-            f"custom_shader_path={_escape(shader_path(shader))}")
+    parts = [f"w={out_w}", f"h={out_h}"]
+    if resampler:
+        parts.append(f"upscaler={resampler}")
+    if shader != NO_SHADER:
+        parts.append(f"custom_shader_path={_escape(shader_path(shader))}")
+    return f"format={filter_format(pix_fmt)},libplacebo=" + ":".join(parts)
 
 
 def _escape(path: str) -> str:
@@ -224,21 +276,27 @@ def run(src: str, dst: str, *, width: int, height: int, scale: float = 2.0,
         shader: Optional[str] = None, total: Optional[int] = None,
         pix_fmt: Optional[str] = None,
         trim_from: int = 0, frames: Optional[int] = None,
-        name: str = NAME, code: str = CODE,
+        name: str = NAME, code: str = CODE, resampler: Optional[str] = None,
         reporter=None, cancel=None, ffmpeg: str = "ffmpeg") -> None:
-    """One pass over `src`, writing `dst`. Raises `ShaderError`."""
-    path = shader_path(shader)
-    if not os.path.exists(path):
-        raise ShaderError("\n".join((
-            f"FSRCNNX shader not found: {path}",
-            "It is not shipped with the repository. Fetch it once:",
-            "    python scripts/fetch_fsrcnnx.py")))
+    """One pass over `src`, writing `dst`. Raises `ShaderError`.
+
+    `shader=NO_SHADER` runs `resampler` alone, with no model -- there is then
+    no file to look for, which is why the existence check is skipped for it
+    rather than being handed a path it would not find.
+    """
+    if shader != NO_SHADER:
+        path = shader_path(shader)
+        if not os.path.exists(path):
+            raise ShaderError("\n".join((
+                f"FSRCNNX shader not found: {path}",
+                "It is not shipped with the repository. Fetch it once:",
+                "    python scripts/fetch_fsrcnnx.py")))
     if not usable(ffmpeg):
         raise ShaderError(
             "This ffmpeg cannot run libplacebo, or there is no Vulkan device "
             "for it. Upscaling with a shader needs both.")
 
-    vf = chain(width, height, scale, shader)
+    vf = chain(width, height, scale, shader, resampler, pix_fmt)
     if trim_from > 0:
         vf = f"trim=start_frame={trim_from},setpts=PTS-STARTPTS,{vf}"
     # Audio is copied, never re-encoded. Without this ffmpeg maps the source's
